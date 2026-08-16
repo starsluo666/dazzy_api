@@ -19,6 +19,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "accounts",
     "providers",
+    "orders",
     "activities",
     "mediafiles",
     "health",
@@ -106,7 +107,12 @@ COS_SIGNED_PUBLIC_URL_TTL = int(os.getenv("COS_SIGNED_PUBLIC_URL_TTL", "3600"))
 COS_SIGNED_PRIVATE_URL_TTL = int(os.getenv("COS_SIGNED_PRIVATE_URL_TTL", "300"))
 
 REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        "config.authentication.DevelopmentUserAuthentication",
+    ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
 }
+DAZZY_DEMO_USER_PUBLIC_ID = os.getenv("DAZZY_DEMO_USER_PUBLIC_ID", "")
 SPECTACULAR_SETTINGS = {"TITLE": "DAZZY API", "VERSION": "1.0.0", "SERVE_INCLUDE_SCHEMA": False}
