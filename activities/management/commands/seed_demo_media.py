@@ -17,6 +17,7 @@ AVATARS = {
     "13810000003": "tiantian.webp",
     "13810000004": "keke.webp",
 }
+AVATAR_ALIASES = {"13810000005": "13810000001"}
 
 ACTIVITY_COVERS = {
     "台球局｜晚上球局来一局": "billiards.webp",
@@ -59,6 +60,11 @@ class Command(BaseCommand):
             )
             user.avatar_object_key = object_key
             user.save(update_fields=("avatar_object_key",))
+
+        for target_phone, source_phone in AVATAR_ALIASES.items():
+            target = User.objects.get(phone=target_phone)
+            target.avatar_object_key = User.objects.get(phone=source_phone).avatar_object_key
+            target.save(update_fields=("avatar_object_key",))
 
         for title, filename in ACTIVITY_COVERS.items():
             activity = Activity.objects.get(title=title)
