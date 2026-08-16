@@ -1,13 +1,19 @@
 from django.contrib.gis.db.models.functions import Distance
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
 from .models import Activity
-from .serializers import ActivityListItemSerializer, ActivityListQuerySerializer
+from .serializers import (
+    ActivityDetailSerializer,
+    ActivityListItemSerializer,
+    ActivityListQuerySerializer,
+)
 
 
 class ActivityListView(APIView):
@@ -43,13 +49,23 @@ class ActivityListView(APIView):
 
         page = params["page"]
         page_size = params["page_size"]
-        total = queryset.count()
-        items = queryset[(page - 1) * page_size : page * page_size]
-        return Response(
-            {
-                "data": {
-                    "items": ActivityListItemSerializer(items, many=True).data,
-                    "pagination": {"page": page, "page_size": page_size, "total": total},
-                }
-            }
+        return paginated_response(
+            queryset,
+            ActivityListItemSerializer,
+            page=page,
+            page_size=page_size,
         )
+
+
+class ActivityDetailView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, pk):
+        activity = get_object_or_404(
+            Activity.objects.select_related(
+                "category", "organizer", "organizer__provider_profile", "cover"
+            ),
+            pk=pk,
+        )
+        return Response({"data": ActivityDetailSerializer(activity).data})

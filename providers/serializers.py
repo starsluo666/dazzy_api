@@ -45,6 +45,7 @@ class ProviderServiceSummarySerializer(serializers.ModelSerializer):
 class ProviderListItemSerializer(serializers.ModelSerializer):
     public_id = serializers.UUIDField(source="user.public_id")
     nickname = serializers.CharField(source="user.nickname")
+    birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
     avatar_url = serializers.SerializerMethodField()
     verified = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
@@ -55,6 +56,7 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
         fields = (
             "public_id",
             "nickname",
+            "birth_date",
             "avatar_url",
             "verified",
             "service_city_name",
@@ -75,3 +77,18 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
     def get_distance_km(self, obj) -> float | None:
         distance = getattr(obj, "distance", None)
         return round(distance.km, 1) if distance is not None else None
+
+
+class ProviderDetailSerializer(ProviderListItemSerializer):
+    gender = serializers.CharField(source="user.gender")
+    birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
+    credit_score = serializers.IntegerField()
+    max_service_radius_km = serializers.IntegerField()
+
+    class Meta(ProviderListItemSerializer.Meta):
+        fields = ProviderListItemSerializer.Meta.fields + (
+            "gender",
+            "birth_date",
+            "credit_score",
+            "max_service_radius_km",
+        )

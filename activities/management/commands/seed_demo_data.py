@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
@@ -62,6 +62,8 @@ class Command(BaseCommand):
                 phone=phone,
                 defaults={
                     "nickname": nickname,
+                    "gender": User.Gender.FEMALE,
+                    "birth_date": date(2000 + index, 4, 15),
                     "verification_status": User.VerificationStatus.VERIFIED,
                     "account_status": User.AccountStatus.ACTIVE,
                     "is_active": True,
@@ -92,7 +94,7 @@ class Command(BaseCommand):
             )
 
         organizer = users[0]
-        now = timezone.now()
+        now = timezone.localtime()
         for title, category_slug, day, hour, capacity, minimum, amount, place, lng, lat in ACTIVITIES:
             starts_at = (now + timedelta(days=day)).replace(
                 hour=hour, minute=0, second=0, microsecond=0

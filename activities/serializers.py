@@ -64,3 +64,48 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
     def get_distance_km(self, obj) -> float | None:
         distance = getattr(obj, "distance", None)
         return round(distance.km, 1) if distance is not None else None
+
+
+class ActivityDetailSerializer(ActivityListItemSerializer):
+    meeting_address = serializers.CharField()
+    description = serializers.CharField()
+    participation_rules = serializers.CharField()
+    formation_deadline = serializers.DateTimeField()
+    refund_template_version = serializers.CharField()
+    refund_rule_snapshot = serializers.JSONField()
+    participant_count = serializers.SerializerMethodField()
+    platform_service_fee_amount = serializers.SerializerMethodField()
+    payable_amount = serializers.SerializerMethodField()
+    organizer_verified = serializers.SerializerMethodField()
+    organizer_rating = serializers.SerializerMethodField()
+
+    class Meta(ActivityListItemSerializer.Meta):
+        fields = ActivityListItemSerializer.Meta.fields + (
+            "meeting_address",
+            "description",
+            "participation_rules",
+            "formation_deadline",
+            "refund_template_version",
+            "refund_rule_snapshot",
+            "participant_count",
+            "platform_service_fee_amount",
+            "payable_amount",
+            "organizer_verified",
+            "organizer_rating",
+        )
+
+    def get_participant_count(self, obj) -> int:
+        return 0
+
+    def get_platform_service_fee_amount(self, obj) -> int:
+        return round(obj.aa_principal_amount * 0.1)
+
+    def get_payable_amount(self, obj) -> int:
+        return obj.aa_principal_amount + self.get_platform_service_fee_amount(obj)
+
+    def get_organizer_verified(self, obj) -> bool:
+        return obj.organizer.verification_status == obj.organizer.VerificationStatus.VERIFIED
+
+    def get_organizer_rating(self, obj) -> str | None:
+        profile = getattr(obj.organizer, "provider_profile", None)
+        return str(profile.rating) if profile else None

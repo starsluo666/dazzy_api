@@ -1,13 +1,19 @@
 from django.contrib.gis.db.models.functions import Distance
-from django.db.models import Min, Prefetch, Q
+from django.db.models import Min, Q
+from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
-from .models import ProviderProfile, ProviderService
-from .serializers import ProviderListItemSerializer, ProviderListQuerySerializer
+from .selectors import public_providers
+from .serializers import (
+    ProviderDetailSerializer,
+    ProviderListItemSerializer,
+    ProviderListQuerySerializer,
+)
 
 
 class ProviderListView(APIView):
@@ -23,20 +29,13 @@ class ProviderListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
 
-        active_services = ProviderService.objects.filter(is_active=True).select_related("category")
         queryset = (
-            ProviderProfile.objects.filter(
-                status=ProviderProfile.Status.APPROVED,
-                user__is_active=True,
-                user__account_status="active",
-            )
-            .select_related("user")
+            public_providers()
             .annotate(
                 starting_price_amount=Min(
                     "services__price_amount", filter=Q(services__is_active=True)
                 )
             )
-            .prefetch_related(Prefetch("services", queryset=active_services))
         )
         if category := params.get("category"):
             queryset = queryset.filter(services__category__slug=category, services__is_active=True)
@@ -62,13 +61,19 @@ class ProviderListView(APIView):
         queryset = queryset.distinct()
         page = params["page"]
         page_size = params["page_size"]
-        total = queryset.count()
-        items = queryset[(page - 1) * page_size : page * page_size]
-        return Response(
-            {
-                "data": {
-                    "items": ProviderListItemSerializer(items, many=True).data,
-                    "pagination": {"page": page, "page_size": page_size, "total": total},
-                }
-            }
+        return paginated_response(
+            queryset,
+            ProviderListItemSerializer,
+            page=page,
+            page_size=page_size,
         )
+
+
+class ProviderDetailView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, public_id):
+        queryset = public_providers().filter(user__public_id=public_id)
+        provider = get_object_or_404(queryset)
+        return Response({"data": ProviderDetailSerializer(provider).data})

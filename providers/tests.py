@@ -62,3 +62,41 @@ class ProviderModelTests(TestCase):
         self.assertEqual(response.json()["data"]["pagination"]["total"], 1)
         self.assertEqual(response.json()["data"]["items"][0]["nickname"], "晓晓")
         self.assertIsNotNone(response.json()["data"]["items"][0]["distance_km"])
+
+    def test_provider_detail_returns_public_profile_and_active_services(self):
+        user = User.objects.create_user(
+            phone="13800000004",
+            password="test-password",
+            nickname="可可",
+            birth_date="2000-05-23",
+        )
+        provider = ProviderProfile.objects.create(
+            user=user,
+            status=ProviderProfile.Status.APPROVED,
+            service_city_code="110100",
+            service_city_name="北京市",
+            bio="喜欢旅行与摄影",
+        )
+        category = ServiceCategory.objects.create(name="旅行陪伴", slug="travel-detail")
+        ProviderService.objects.create(
+            provider=provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=17800,
+        )
+
+        response = self.client.get(f"/api/v1/providers/{user.public_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["nickname"], "可可")
+        self.assertEqual(data["services"][0]["price_amount"], 17800)
+        self.assertEqual(data["birth_date"], "2000-05-23")
+
+    def test_provider_detail_hides_unapproved_profile(self):
+        user = User.objects.create_user(phone="13800000005", password="test-password")
+        ProviderProfile.objects.create(user=user, status=ProviderProfile.Status.DRAFT)
+
+        response = self.client.get(f"/api/v1/providers/{user.public_id}/")
+
+        self.assertEqual(response.status_code, 404)

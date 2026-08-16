@@ -25,3 +25,16 @@ def build_media_url(object_key: str, *, private: bool = False) -> str | None:
         Key=object_key,
         Expired=ttl,
     )
+
+
+def upload_public_file(*, local_path: str, object_key: str, content_type: str) -> str:
+    """Upload a public-facing asset to COS and return its normalized ETag."""
+    with open(local_path, "rb") as body:
+        response = _cos_client().put_object(
+            Bucket=settings.COS_BUCKET,
+            Key=object_key,
+            Body=body,
+            ContentType=content_type,
+            CacheControl="public, max-age=31536000, immutable",
+        )
+    return response.get("ETag", "").strip('"')

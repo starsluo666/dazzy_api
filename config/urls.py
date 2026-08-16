@@ -7,6 +7,7 @@ urlpatterns = [
     path("api/v1/", include("health.urls")),
     path("api/v1/", include("providers.urls")),
     path("api/v1/", include("activities.urls")),
+    path("api/v1/", include("mediafiles.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
 ]
