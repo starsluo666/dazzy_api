@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from mediafiles.services import build_media_url
 from providers.models import ProviderProfile, ProviderService
+from providers.availability import ensure_booking_within_schedule
 
 from .models import ProviderOrder
 from .services import build_quote, validate_booking
@@ -37,6 +38,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
         duration, ends_at = validate_booking(
             service, attrs["starts_at"], attrs["duration_minutes"]
         )
+        ensure_booking_within_schedule(service.provider, attrs["starts_at"], ends_at)
         attrs["service"] = service
         attrs["duration_minutes"] = duration
         attrs["ends_at"] = ends_at

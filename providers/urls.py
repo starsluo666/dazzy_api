@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import ProviderDetailView, ProviderListView
+from .views import ProviderAvailabilityView, ProviderDetailView, ProviderListView
 
 urlpatterns = [
     path("providers/", ProviderListView.as_view(), name="provider-list"),
@@ -8,5 +8,10 @@ urlpatterns = [
         "providers/<uuid:public_id>/",
         ProviderDetailView.as_view(),
         name="provider-detail",
+    ),
+    path(
+        "providers/<uuid:public_id>/availability/",
+        ProviderAvailabilityView.as_view(),
+        name="provider-availability",
     ),
 ]

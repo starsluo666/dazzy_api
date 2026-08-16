@@ -26,6 +26,13 @@ class ProviderListQuerySerializer(serializers.Serializer):
         return attrs
 
 
+class ProviderAvailabilityQuerySerializer(serializers.Serializer):
+    service_id = serializers.IntegerField(min_value=1)
+    start_date = serializers.DateField(required=False)
+    days = serializers.IntegerField(required=False, default=4, min_value=1, max_value=7)
+    duration_minutes = serializers.IntegerField(required=False, min_value=30, max_value=480)
+
+
 class ProviderServiceSummarySerializer(serializers.ModelSerializer):
     category = serializers.CharField(source="category.name")
     category_slug = serializers.CharField(source="category.slug")

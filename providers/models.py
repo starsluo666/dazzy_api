@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.gis.db import models
 from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
 
 
 class ServiceCategory(models.Model):
@@ -116,3 +117,39 @@ class ProviderService(models.Model):
 
     def __str__(self) -> str:
         return f"{self.provider} - {self.category}"
+
+
+class ProviderWeeklyAvailability(models.Model):
+    provider = models.ForeignKey(
+        ProviderProfile,
+        on_delete=models.CASCADE,
+        related_name="weekly_availability",
+        verbose_name="达人",
+    )
+    weekday = models.PositiveSmallIntegerField(
+        "星期", choices=tuple((value, label) for value, label in enumerate("一二三四五六日"))
+    )
+    starts_at = models.TimeField("开始时间")
+    ends_at = models.TimeField("结束时间")
+    is_active = models.BooleanField("启用", default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_weekly_availability"
+        ordering = ("weekday", "starts_at", "id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("provider", "weekday", "starts_at", "ends_at"),
+                name="uniq_provider_weekly_availability",
+            )
+        ]
+        verbose_name = "达人每周可服务时段"
+        verbose_name_plural = verbose_name
+
+    def clean(self):
+        if self.starts_at >= self.ends_at:
+            raise ValidationError({"ends_at": "结束时间必须晚于开始时间。"})
+
+    def __str__(self) -> str:
+        return f"{self.provider} 周{self.get_weekday_display()} {self.starts_at}-{self.ends_at}"

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import time, timedelta
 from decimal import Decimal
 
 from django.contrib.gis.geos import Point
@@ -7,7 +7,12 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
-from providers.models import ProviderProfile, ProviderService, ServiceCategory
+from providers.models import (
+    ProviderProfile,
+    ProviderService,
+    ProviderWeeklyAvailability,
+    ServiceCategory,
+)
 
 from .models import ProviderOrder
 
@@ -33,10 +38,18 @@ class ProviderOrderApiTests(TestCase):
             billing_type=ProviderService.BillingType.HOURLY,
             price_amount=17800,
         )
+        ProviderWeeklyAvailability.objects.bulk_create(
+            [
+                ProviderWeeklyAvailability(
+                    provider=self.provider, weekday=weekday, starts_at=time(9), ends_at=time(18)
+                )
+                for weekday in range(7)
+            ]
+        )
         self.client.force_login(self.customer)
 
     def payload(self):
-        starts_at = (timezone.now() + timedelta(days=1)).replace(
+        starts_at = (timezone.localtime() + timedelta(days=1)).replace(
             hour=13, minute=0, second=0, microsecond=0
         )
         return {

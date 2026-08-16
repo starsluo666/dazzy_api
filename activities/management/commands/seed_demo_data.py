@@ -6,7 +6,12 @@ from django.utils import timezone
 
 from accounts.models import User
 from config.geospatial import gcj02_to_wgs84
-from providers.models import ProviderProfile, ProviderService, ServiceCategory
+from providers.models import (
+    ProviderProfile,
+    ProviderService,
+    ProviderWeeklyAvailability,
+    ServiceCategory,
+)
 
 from ...models import Activity, ActivityCategory
 
@@ -92,6 +97,14 @@ class Command(BaseCommand):
                 billing_type=ProviderService.BillingType.HOURLY,
                 defaults={"price_amount": int(price), "is_active": True},
             )
+            for weekday in range(7):
+                ProviderWeeklyAvailability.objects.update_or_create(
+                    provider=provider,
+                    weekday=weekday,
+                    starts_at="09:00",
+                    ends_at="18:00",
+                    defaults={"is_active": True},
+                )
 
         organizer = users[0]
         now = timezone.localtime()
