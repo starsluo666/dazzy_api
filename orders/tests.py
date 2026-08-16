@@ -2,6 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.gis.geos import Point
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -101,3 +102,17 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["status"], ProviderOrder.Status.CANCELLED)
         self.assertEqual(ProviderOrder.objects.get(order_no=order_no).route_distance_km, Decimal("6.80"))
+
+    def test_expire_command_closes_timed_out_order(self):
+        create = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order = ProviderOrder.objects.get(order_no=create.json()["data"]["order_no"])
+        order.payment_expires_at = timezone.now() - timedelta(seconds=1)
+        order.save(update_fields=("payment_expires_at",))
+
+        call_command("expire_provider_orders")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.CANCELLED)
+        self.assertIsNotNone(order.cancelled_at)

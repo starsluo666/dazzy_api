@@ -97,3 +97,12 @@ def ensure_slot_available(provider: ProviderProfile, starts_at, ends_at):
         blocking, provider=provider, starts_at__lt=ends_at, ends_at__gt=starts_at
     ).exists():
         raise ValidationError({"starts_at": "该时间段刚刚被预约，请选择其他时间。"})
+
+
+def expire_pending_orders(queryset=None) -> int:
+    queryset = queryset if queryset is not None else ProviderOrder.objects.all()
+    now = timezone.now()
+    return queryset.filter(
+        status=ProviderOrder.Status.PENDING_PAYMENT,
+        payment_expires_at__lte=now,
+    ).update(status=ProviderOrder.Status.CANCELLED, cancelled_at=now, updated_at=now)

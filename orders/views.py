@@ -13,7 +13,7 @@ from providers.models import ProviderProfile
 
 from .models import ProviderOrder
 from .serializers import ProviderOrderInputSerializer, ProviderOrderSerializer, quote_payload
-from .services import PAYMENT_LOCK_MINUTES, ensure_slot_available
+from .services import PAYMENT_LOCK_MINUTES, ensure_slot_available, expire_pending_orders
 
 
 def make_order_no():
@@ -33,7 +33,9 @@ class ProviderOrderListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        orders = ProviderOrder.objects.filter(customer=request.user).select_related(
+        customer_orders = ProviderOrder.objects.filter(customer=request.user)
+        expire_pending_orders(customer_orders)
+        orders = customer_orders.select_related(
             "provider__user", "service__category"
         )[:50]
         return Response({"data": {"items": ProviderOrderSerializer(orders, many=True).data}})
@@ -71,6 +73,7 @@ class ProviderOrderDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self, request, order_no):
+        expire_pending_orders(ProviderOrder.objects.filter(customer=request.user, order_no=order_no))
         return get_object_or_404(
             ProviderOrder.objects.select_related("provider__user", "service__category"),
             order_no=order_no, customer=request.user,
