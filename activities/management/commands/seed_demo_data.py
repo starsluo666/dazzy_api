@@ -31,16 +31,16 @@ ACTIVITY_CATEGORIES = (
     ("其他", "other"),
 )
 PROVIDERS = (
-    ("13810000001", "晓晓", "billiards", "17800", "116.4039810", "39.9150010", "4.90"),
-    ("13810000002", "小雨", "travel", "16800", "116.4172010", "39.9212110", "4.80"),
-    ("13810000003", "甜甜", "board-games", "15800", "116.3891200", "39.9088300", "4.90"),
-    ("13810000004", "可可", "business", "18800", "116.4294300", "39.9131200", "4.70"),
+    ("13810000001", "晓晓", "billiards", "17800", "114.5152000", "36.6119000", "4.90"),
+    ("13810000002", "小雨", "travel", "16800", "114.5038000", "36.6181000", "4.80"),
+    ("13810000003", "甜甜", "board-games", "15800", "114.5269000", "36.6046000", "4.90"),
+    ("13810000004", "可可", "business", "18800", "114.4963000", "36.6067000", "4.70"),
 )
 MULTI_SERVICE_PROVIDER = {
     "phone": "13810000005",
     "nickname": "多多",
-    "longitude": "116.4118600",
-    "latitude": "39.9166300",
+    "longitude": "114.5126000",
+    "latitude": "36.6148000",
     "services": (
         ("travel", ProviderService.BillingType.HOURLY, 17800, None, "城市漫游与旅行陪伴"),
         ("board-games", ProviderService.BillingType.PER_SESSION, 21800, 180, "桌游教学与欢乐组局"),
@@ -48,9 +48,9 @@ MULTI_SERVICE_PROVIDER = {
     ),
 }
 ACTIVITIES = (
-    ("台球局｜晚上球局来一局", "billiards", 3, 19, 6, 4, 4800, "星牌台球俱乐部", "116.4052850", "39.9145230"),
-    ("桌游轰趴｜趣味欢乐局", "board-games", 4, 14, 8, 6, 6800, "朝阳桌游空间", "116.4217300", "39.9195300"),
-    ("周末露营交友局", "travel", 6, 8, 12, 6, 9800, "城市绿心森林公园", "116.6862000", "39.9012000"),
+    ("台球局｜晚上球局来一局", "billiards", 3, 19, 6, 4, 4800, "丛台区星牌台球俱乐部", "114.5181000", "36.6129000"),
+    ("桌游轰趴｜趣味欢乐局", "board-games", 4, 14, 8, 6, 6800, "美乐城桌游空间", "114.5240070", "36.6074460"),
+    ("周末露营交友局", "travel", 6, 8, 12, 6, 9800, "龙湖公园", "114.5424000", "36.6120000"),
 )
 
 
@@ -91,8 +91,8 @@ class Command(BaseCommand):
                 defaults={
                     "status": ProviderProfile.Status.APPROVED,
                     "bio": "认真生活，也认真陪你体验城市里的好时光。",
-                    "service_city_code": "110100",
-                    "service_city_name": "北京市",
+                    "service_city_code": "130400",
+                    "service_city_name": "邯郸市",
                     "source_longitude": Decimal(lng),
                     "source_latitude": Decimal(lat),
                     "service_center": gcj02_to_wgs84(Decimal(lng), Decimal(lat)),
@@ -138,8 +138,8 @@ class Command(BaseCommand):
             defaults={
                 "status": ProviderProfile.Status.APPROVED,
                 "bio": "喜欢旅行、桌游与城市探索，可根据你的计划灵活选择服务。",
-                "service_city_code": "110100",
-                "service_city_name": "北京市",
+                "service_city_code": "130400",
+                "service_city_name": "邯郸市",
                 "source_longitude": Decimal(demo["longitude"]),
                 "source_latitude": Decimal(demo["latitude"]),
                 "service_center": gcj02_to_wgs84(
@@ -188,7 +188,7 @@ class Command(BaseCommand):
                     "ends_at": starts_at + timedelta(hours=3),
                     "formation_deadline": starts_at - timedelta(hours=12),
                     "meeting_place_name": place,
-                    "meeting_address": "北京市演示地址（非真实活动地点）",
+                    "meeting_address": f"邯郸市演示地址 · {place}",
                     "source_longitude": Decimal(lng),
                     "source_latitude": Decimal(lat),
                     "meeting_point": gcj02_to_wgs84(Decimal(lng), Decimal(lat)),

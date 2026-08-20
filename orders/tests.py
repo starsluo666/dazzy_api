@@ -1,5 +1,6 @@
 from datetime import time, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
 from django.core.management import call_command
@@ -13,6 +14,7 @@ from providers.models import (
     ProviderWeeklyAvailability,
     ServiceCategory,
 )
+from locations.tencent import RouteResult
 
 from .models import ProviderOrder
 
@@ -29,6 +31,8 @@ class ProviderOrderApiTests(TestCase):
             status=ProviderProfile.Status.APPROVED,
             service_city_code="130400",
             service_city_name="邯郸市",
+            source_longitude=Decimal("114.4907000"),
+            source_latitude=Decimal("36.6123000"),
             service_center=Point(114.4907, 36.6123, srid=4326),
         )
         category = ServiceCategory.objects.create(name="旅游陪伴", slug="travel-order")
@@ -47,6 +51,12 @@ class ProviderOrderApiTests(TestCase):
             ]
         )
         self.client.force_login(self.customer)
+        self.route_patcher = patch(
+            "orders.serializers.tencent_map.driving_route",
+            return_value=RouteResult(distance_km=Decimal("6.80"), duration_minutes=18),
+        )
+        self.route_patcher.start()
+        self.addCleanup(self.route_patcher.stop)
 
     def payload(self):
         starts_at = (timezone.localtime() + timedelta(days=1)).replace(
@@ -57,7 +67,8 @@ class ProviderOrderApiTests(TestCase):
             "starts_at": starts_at.isoformat(),
             "duration_minutes": 120,
             "meeting_address": "邯郸市丛台区美乐城南门",
-            "route_distance_km": "6.80",
+            "longitude": "114.5060000",
+            "latitude": "36.6200000",
             "contact_name": "张三",
             "contact_phone": "13812346688",
             "note": "请提前联系",

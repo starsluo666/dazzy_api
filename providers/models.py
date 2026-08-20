@@ -36,6 +36,7 @@ class ProviderProfile(models.Model):
 
     class MapSource(models.TextChoices):
         AMAP = "amap", "高德地图"
+        TENCENT = "tencent", "腾讯地图"
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,

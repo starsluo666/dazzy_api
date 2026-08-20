@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     "orders",
     "activities",
     "mediafiles",
+    "locations",
     "health",
 ]
 MIDDLEWARE = [
@@ -115,4 +116,8 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
 }
 DAZZY_DEMO_USER_PUBLIC_ID = os.getenv("DAZZY_DEMO_USER_PUBLIC_ID", "")
+TENCENT_MAP_WEB_SERVICE_KEY = os.environ["TENCENT_MAP_WEB_SERVICE_KEY"]
+TENCENT_MAP_WEB_SERVICE_SK = os.environ["TENCENT_MAP_WEB_SERVICE_SK"]
+TENCENT_MAP_DEFAULT_REGION = os.getenv("TENCENT_MAP_DEFAULT_REGION", "邯郸市")
+TENCENT_MAP_TIMEOUT_SECONDS = float(os.getenv("TENCENT_MAP_TIMEOUT_SECONDS", "5"))
 SPECTACULAR_SETTINGS = {"TITLE": "DAZZY API", "VERSION": "1.0.0", "SERVE_INCLUDE_SCHEMA": False}

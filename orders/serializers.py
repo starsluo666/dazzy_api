@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from mediafiles.services import build_media_url
+from locations.tencent import tencent_map
 from providers.models import ProviderProfile, ProviderService
 from providers.availability import ensure_booking_within_schedule
 
@@ -13,18 +14,13 @@ class ProviderOrderInputSerializer(serializers.Serializer):
     starts_at = serializers.DateTimeField()
     duration_minutes = serializers.IntegerField(min_value=30, max_value=480)
     meeting_address = serializers.CharField(max_length=255)
-    longitude = serializers.DecimalField(required=False, max_digits=10, decimal_places=7)
-    latitude = serializers.DecimalField(required=False, max_digits=10, decimal_places=7)
-    route_distance_km = serializers.DecimalField(
-        required=False, max_digits=7, decimal_places=2, min_value=0
-    )
+    longitude = serializers.DecimalField(max_digits=10, decimal_places=7)
+    latitude = serializers.DecimalField(max_digits=10, decimal_places=7)
     contact_name = serializers.CharField(max_length=30)
     contact_phone = serializers.RegexField(r"^1\d{10}$")
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
     def validate(self, attrs):
-        if ("longitude" in attrs) != ("latitude" in attrs):
-            raise serializers.ValidationError("longitude 和 latitude 必须同时提供。")
         try:
             service = ProviderService.objects.select_related(
                 "provider__user", "category"
@@ -39,10 +35,24 @@ class ProviderOrderInputSerializer(serializers.Serializer):
             service, attrs["starts_at"], attrs["duration_minutes"]
         )
         ensure_booking_within_schedule(service.provider, attrs["starts_at"], ends_at)
+        provider = service.provider
+        if provider.source_longitude is None or provider.source_latitude is None:
+            raise serializers.ValidationError({"service_id": "达人尚未配置服务中心，暂时无法预约。"})
+        route = tencent_map.driving_route(
+            provider.source_longitude,
+            provider.source_latitude,
+            attrs["longitude"],
+            attrs["latitude"],
+        )
+        if route.distance_km > provider.max_service_radius_km:
+            raise serializers.ValidationError(
+                {"meeting_address": f"该地点距达人约{route.distance_km}公里，超出{provider.max_service_radius_km}公里服务范围。"}
+            )
         attrs["service"] = service
         attrs["duration_minutes"] = duration
         attrs["ends_at"] = ends_at
-        attrs["quote"] = build_quote(service, duration, attrs.get("route_distance_km"))
+        attrs["route"] = route
+        attrs["quote"] = build_quote(service, duration, route.distance_km)
         return attrs
 
 
@@ -94,6 +104,8 @@ def quote_payload(validated_data):
         "ends_at": validated_data["ends_at"],
         "duration_minutes": validated_data["duration_minutes"],
         "meeting_address": validated_data["meeting_address"],
+        "route_distance_km": validated_data["route"].distance_km,
+        "route_duration_minutes": validated_data["route"].duration_minutes,
         "service_fee_amount": quote.service_fee_amount,
         "transport_fee_amount": quote.transport_fee_amount,
         "other_fee_amount": quote.other_fee_amount,
