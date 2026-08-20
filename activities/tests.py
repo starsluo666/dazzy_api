@@ -168,3 +168,52 @@ class ActivityModelTests(TestCase):
 
         self.assertEqual(full_response.status_code, 400)
         self.assertIn("名额已满", str(full_response.json()))
+
+    def test_my_activities_lists_joined_and_cancelled_records(self):
+        active_activity = self.build_activity(
+            title="正在参与的活动", status=Activity.Status.RECRUITING
+        )
+        active_activity.save()
+        cancelled_activity = self.build_activity(
+            title="已经取消的活动", status=Activity.Status.RECRUITING
+        )
+        cancelled_activity.save()
+        participant = User.objects.create_user(phone="13800000015", password="test")
+        ActivityParticipation.objects.create(activity=active_activity, user=participant)
+        ActivityParticipation.objects.create(
+            activity=cancelled_activity,
+            user=participant,
+            status=ActivityParticipation.Status.CANCELLED,
+            cancelled_at=timezone.now(),
+        )
+        self.client.force_login(participant)
+
+        upcoming = self.client.get("/api/v1/activities/mine/", {"state": "upcoming"})
+        history = self.client.get("/api/v1/activities/mine/", {"state": "history"})
+
+        self.assertEqual(upcoming.status_code, 200)
+        self.assertEqual(upcoming.json()["data"]["pagination"]["total"], 1)
+        self.assertEqual(
+            upcoming.json()["data"]["items"][0]["participation_status"], "active"
+        )
+        self.assertEqual(history.json()["data"]["pagination"]["total"], 1)
+        self.assertEqual(
+            history.json()["data"]["items"][0]["participation_status"], "cancelled"
+        )
+
+    def test_my_activities_lists_organized_activities(self):
+        activity = self.build_activity(
+            title="我发起的活动", status=Activity.Status.RECRUITING
+        )
+        activity.save()
+        self.client.force_login(self.organizer)
+
+        response = self.client.get(
+            "/api/v1/activities/mine/", {"role": "organized"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["pagination"]["total"], 1)
+        item = response.json()["data"]["items"][0]
+        self.assertEqual(item["title"], "我发起的活动")
+        self.assertIsNone(item["participation_status"])

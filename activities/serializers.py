@@ -25,6 +25,17 @@ class ActivityListQuerySerializer(serializers.Serializer):
         return attrs
 
 
+class MyActivityListQuerySerializer(serializers.Serializer):
+    role = serializers.ChoiceField(
+        required=False, default="joined", choices=("joined", "organized")
+    )
+    state = serializers.ChoiceField(
+        required=False, default="all", choices=("all", "upcoming", "history")
+    )
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
 class ActivityListItemSerializer(serializers.ModelSerializer):
     category = serializers.CharField(source="category.name")
     category_slug = serializers.CharField(source="category.slug")
@@ -66,6 +77,17 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
     def get_distance_km(self, obj) -> float | None:
         distance = getattr(obj, "distance", None)
         return round(distance.km, 1) if distance is not None else None
+
+
+class MyActivityListItemSerializer(ActivityListItemSerializer):
+    participation_status = serializers.CharField(read_only=True, allow_null=True)
+    joined_at = serializers.DateTimeField(read_only=True, allow_null=True)
+
+    class Meta(ActivityListItemSerializer.Meta):
+        fields = ActivityListItemSerializer.Meta.fields + (
+            "participation_status",
+            "joined_at",
+        )
 
 
 class ActivityDetailSerializer(ActivityListItemSerializer):
