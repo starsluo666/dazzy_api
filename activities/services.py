@@ -2,7 +2,29 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
+from config.geospatial import gcj02_to_wgs84
+
 from .models import Activity, ActivityParticipation
+from .serializers import STANDARD_REFUND_SNAPSHOT
+
+
+def create_activity_draft(*, organizer, validated_data) -> Activity:
+    category = validated_data.pop("category_slug")
+    longitude = validated_data.pop("longitude")
+    latitude = validated_data.pop("latitude")
+    validated_data.pop("refund_template_version")
+    wgs84 = gcj02_to_wgs84(longitude, latitude)
+    return Activity.objects.create(
+        organizer=organizer,
+        category=category,
+        source_longitude=longitude,
+        source_latitude=latitude,
+        meeting_point=wgs84,
+        refund_template_version="standard-v1",
+        refund_rule_snapshot=STANDARD_REFUND_SNAPSHOT,
+        status=Activity.Status.DRAFT,
+        **validated_data,
+    )
 
 
 def _active_count(activity: Activity) -> int:

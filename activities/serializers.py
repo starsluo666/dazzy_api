@@ -1,8 +1,67 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from rest_framework import serializers
 
 from mediafiles.services import build_media_url
 
-from .models import Activity, ActivityParticipation
+from .models import Activity, ActivityCategory, ActivityParticipation
+
+
+STANDARD_REFUND_SNAPSHOT = {
+    "version": "standard-v1",
+    "rules": [
+        {"before_hours": 12, "principal_refund_percent": 100, "service_fee_refund_percent": 100},
+        {"before_hours": 6, "principal_refund_percent": 100, "service_fee_refund_percent": 0},
+        {"before_hours": 2, "principal_refund_percent": 70, "service_fee_refund_percent": 0},
+        {"before_hours": 0, "principal_refund_percent": 0, "service_fee_refund_percent": 0},
+    ],
+}
+
+
+class ActivityCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ActivityCategory
+        fields = ("name", "slug")
+
+
+class ActivityCreateSerializer(serializers.Serializer):
+    category_slug = serializers.SlugField()
+    title = serializers.CharField(max_length=80)
+    starts_at = serializers.DateTimeField()
+    ends_at = serializers.DateTimeField()
+    formation_deadline = serializers.DateTimeField()
+    meeting_place_name = serializers.CharField(max_length=100)
+    meeting_address = serializers.CharField(max_length=255)
+    longitude = serializers.DecimalField(max_digits=10, decimal_places=7)
+    latitude = serializers.DecimalField(max_digits=10, decimal_places=7)
+    capacity = serializers.IntegerField(min_value=2, max_value=100)
+    min_participants = serializers.IntegerField(min_value=2, max_value=100)
+    description = serializers.CharField(max_length=2000)
+    participation_rules = serializers.CharField(max_length=2000)
+    aa_principal_amount = serializers.IntegerField(min_value=1, max_value=10_000_000)
+    refund_template_version = serializers.ChoiceField(choices=("standard-v1",))
+
+    def validate_category_slug(self, value):
+        try:
+            return ActivityCategory.objects.get(slug=value, is_active=True)
+        except ActivityCategory.DoesNotExist as exc:
+            raise serializers.ValidationError("活动分类不存在或已停用。") from exc
+
+    def validate(self, attrs):
+        now = timezone.now()
+        starts_at = attrs["starts_at"]
+        if starts_at < now + timedelta(hours=48):
+            raise serializers.ValidationError({"starts_at": "活动开始时间至少为发布后48小时。"})
+        if starts_at > now + timedelta(days=30):
+            raise serializers.ValidationError({"starts_at": "活动开始时间不得晚于发布后30天。"})
+        if attrs["ends_at"] <= starts_at:
+            raise serializers.ValidationError({"ends_at": "结束时间必须晚于开始时间。"})
+        if not now < attrs["formation_deadline"] < starts_at:
+            raise serializers.ValidationError({"formation_deadline": "成局截止时间须晚于当前时间且早于活动开始。"})
+        if attrs["min_participants"] > attrs["capacity"]:
+            raise serializers.ValidationError({"min_participants": "最少成局人数不能超过人数上限。"})
+        return attrs
 
 
 class ActivityListQuerySerializer(serializers.Serializer):

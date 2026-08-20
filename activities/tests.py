@@ -95,6 +95,17 @@ class ActivityModelTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_activity_draft_detail_is_only_visible_to_organizer(self):
+        activity = self.build_activity(status=Activity.Status.DRAFT)
+        activity.save()
+
+        anonymous = self.client.get(f"/api/v1/activities/{activity.pk}/")
+        self.client.force_login(self.organizer)
+        organizer = self.client.get(f"/api/v1/activities/{activity.pk}/")
+
+        self.assertEqual(anonymous.status_code, 404)
+        self.assertEqual(organizer.status_code, 200)
+
     def test_participation_join_is_idempotent_and_visible_in_detail(self):
         activity = self.build_activity(status=Activity.Status.RECRUITING)
         activity.save()
@@ -217,3 +228,62 @@ class ActivityModelTests(TestCase):
         item = response.json()["data"]["items"][0]
         self.assertEqual(item["title"], "我发起的活动")
         self.assertIsNone(item["participation_status"])
+
+    def activity_create_payload(self, **overrides):
+        starts_at = timezone.now() + timedelta(days=3)
+        payload = {
+            "category_slug": self.category.slug,
+            "title": "我发布的桌游活动",
+            "starts_at": starts_at.isoformat(),
+            "ends_at": (starts_at + timedelta(hours=3)).isoformat(),
+            "formation_deadline": (starts_at - timedelta(hours=12)).isoformat(),
+            "meeting_place_name": "美乐城桌游空间",
+            "meeting_address": "邯郸市丛台区人民路",
+            "longitude": "114.5389610",
+            "latitude": "36.6256570",
+            "capacity": 8,
+            "min_participants": 4,
+            "description": "轻松认识新朋友",
+            "participation_rules": "准时到场，文明参与",
+            "aa_principal_amount": 6800,
+            "refund_template_version": "standard-v1",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_verified_user_can_create_paid_activity_draft(self):
+        self.organizer.verification_status = User.VerificationStatus.VERIFIED
+        self.organizer.save(update_fields=("verification_status",))
+        self.client.force_login(self.organizer)
+
+        response = self.client.post(
+            "/api/v1/activities/", self.activity_create_payload(), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        activity = Activity.objects.get(title="我发布的桌游活动")
+        self.assertEqual(activity.status, Activity.Status.DRAFT)
+        self.assertEqual(activity.refund_template_version, "standard-v1")
+        self.assertEqual(response.json()["data"]["next_step"], "payment")
+
+    def test_activity_create_enforces_verification_and_start_window(self):
+        self.client.force_login(self.organizer)
+        unverified = self.client.post(
+            "/api/v1/activities/", self.activity_create_payload(), content_type="application/json"
+        )
+        self.assertEqual(unverified.status_code, 403)
+
+        self.organizer.verification_status = User.VerificationStatus.VERIFIED
+        self.organizer.save(update_fields=("verification_status",))
+        too_soon = timezone.now() + timedelta(hours=24)
+        invalid = self.client.post(
+            "/api/v1/activities/",
+            self.activity_create_payload(
+                starts_at=too_soon.isoformat(),
+                ends_at=(too_soon + timedelta(hours=2)).isoformat(),
+                formation_deadline=(too_soon - timedelta(hours=2)).isoformat(),
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("48小时", str(invalid.json()))

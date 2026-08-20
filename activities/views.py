@@ -10,21 +10,23 @@ from rest_framework.views import APIView
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
-from .models import Activity, ActivityParticipation
+from .models import Activity, ActivityCategory, ActivityParticipation
 from .selectors import upcoming_public_activities, with_participant_count
 from .services import cancel_activity_participation, join_activity
+from .services import create_activity_draft
 from .serializers import (
     ActivityDetailSerializer,
     ActivityListItemSerializer,
     ActivityListQuerySerializer,
     ActivityParticipationSerializer,
+    ActivityCategorySerializer,
+    ActivityCreateSerializer,
     MyActivityListItemSerializer,
     MyActivityListQuerySerializer,
 )
 
 
 class ActivityListView(APIView):
-    authentication_classes = []
     permission_classes = []
 
     @extend_schema(
@@ -60,17 +62,59 @@ class ActivityListView(APIView):
             page_size=page_size,
         )
 
+    def post(self, request):
+        if not request.user.is_authenticated:
+            return Response({"detail": "请登录后发布活动。"}, status=403)
+        if request.user.verification_status != request.user.VerificationStatus.VERIFIED:
+            return Response({"detail": "完成实名认证后才能发布活动。"}, status=403)
+        serializer = ActivityCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        activity = create_activity_draft(
+            organizer=request.user, validated_data=dict(serializer.validated_data)
+        )
+        return Response(
+            {
+                "data": {
+                    "id": activity.pk,
+                    "status": activity.status,
+                    "next_step": "payment",
+                    "payment_required": True,
+                }
+            },
+            status=201,
+        )
+
+
+class ActivityCategoryListView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        categories = ActivityCategory.objects.filter(is_active=True).order_by("sort_order", "id")
+        return Response({"data": {"items": ActivityCategorySerializer(categories, many=True).data}})
+
 
 class ActivityDetailView(APIView):
     permission_classes = []
 
     def get(self, request, pk):
+        visible_statuses = (
+            Activity.Status.RECRUITING,
+            Activity.Status.FORMED,
+            Activity.Status.IN_PROGRESS,
+            Activity.Status.COMPLETED,
+            Activity.Status.CANCELLED,
+            Activity.Status.FAILED_TO_FORM,
+        )
+        visibility = Q(status__in=visible_statuses)
+        if request.user.is_authenticated:
+            visibility |= Q(organizer=request.user)
         activity = get_object_or_404(
             with_participant_count(
                 Activity.objects.select_related(
                     "category", "organizer", "organizer__provider_profile", "cover"
                 )
-            ),
+            ).filter(visibility),
             pk=pk,
         )
         return Response(
