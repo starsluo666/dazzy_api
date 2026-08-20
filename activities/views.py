@@ -3,16 +3,19 @@ from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
 
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
 from .models import Activity
-from .selectors import upcoming_public_activities
+from .selectors import upcoming_public_activities, with_participant_count
+from .services import cancel_activity_participation, join_activity
 from .serializers import (
     ActivityDetailSerializer,
     ActivityListItemSerializer,
     ActivityListQuerySerializer,
+    ActivityParticipationSerializer,
 )
 
 
@@ -55,14 +58,38 @@ class ActivityListView(APIView):
 
 
 class ActivityDetailView(APIView):
-    authentication_classes = []
     permission_classes = []
 
     def get(self, request, pk):
         activity = get_object_or_404(
-            Activity.objects.select_related(
-                "category", "organizer", "organizer__provider_profile", "cover"
+            with_participant_count(
+                Activity.objects.select_related(
+                    "category", "organizer", "organizer__provider_profile", "cover"
+                )
             ),
             pk=pk,
         )
-        return Response({"data": ActivityDetailSerializer(activity).data})
+        return Response(
+            {"data": ActivityDetailSerializer(activity, context={"request": request}).data}
+        )
+
+
+class ActivityParticipationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        participation, participant_count, created = join_activity(pk, request.user)
+        return Response(
+            {
+                "data": {
+                    **ActivityParticipationSerializer(participation).data,
+                    "participant_count": participant_count,
+                    "activity_status": participation.activity.status,
+                }
+            },
+            status=201 if created else 200,
+        )
+
+    def delete(self, request, pk):
+        cancel_activity_participation(pk, request.user)
+        return Response(status=204)

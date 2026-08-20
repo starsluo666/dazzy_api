@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from mediafiles.services import build_media_url
 
-from .models import Activity
+from .models import Activity, ActivityParticipation
 
 
 class ActivityListQuerySerializer(serializers.Serializer):
@@ -33,6 +33,7 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
     organizer_avatar_url = serializers.SerializerMethodField()
     cover_url = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
+    participant_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Activity
@@ -53,6 +54,7 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
             "aa_principal_amount",
             "status",
             "distance_km",
+            "participant_count",
         )
 
     def get_organizer_avatar_url(self, obj) -> str | None:
@@ -73,7 +75,9 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
     formation_deadline = serializers.DateTimeField()
     refund_template_version = serializers.CharField()
     refund_rule_snapshot = serializers.JSONField()
-    participant_count = serializers.SerializerMethodField()
+    is_joined = serializers.SerializerMethodField()
+    is_organizer = serializers.SerializerMethodField()
+    participation_status = serializers.SerializerMethodField()
     platform_service_fee_amount = serializers.SerializerMethodField()
     payable_amount = serializers.SerializerMethodField()
     organizer_verified = serializers.SerializerMethodField()
@@ -87,15 +91,14 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
             "formation_deadline",
             "refund_template_version",
             "refund_rule_snapshot",
-            "participant_count",
+            "is_joined",
+            "is_organizer",
+            "participation_status",
             "platform_service_fee_amount",
             "payable_amount",
             "organizer_verified",
             "organizer_rating",
         )
-
-    def get_participant_count(self, obj) -> int:
-        return 0
 
     def get_platform_service_fee_amount(self, obj) -> int:
         return round(obj.aa_principal_amount * 0.1)
@@ -109,3 +112,33 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
     def get_organizer_rating(self, obj) -> str | None:
         profile = getattr(obj.organizer, "provider_profile", None)
         return str(profile.rating) if profile else None
+
+    def _participation(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        cache = self.context.setdefault("activity_participation_cache", {})
+        if obj.pk not in cache:
+            cache[obj.pk] = ActivityParticipation.objects.filter(
+                activity=obj,
+                user=request.user,
+            ).first()
+        return cache[obj.pk]
+
+    def get_is_joined(self, obj) -> bool:
+        participation = self._participation(obj)
+        return bool(participation and participation.status == ActivityParticipation.Status.ACTIVE)
+
+    def get_is_organizer(self, obj) -> bool:
+        request = self.context.get("request")
+        return bool(request and request.user.is_authenticated and obj.organizer_id == request.user.pk)
+
+    def get_participation_status(self, obj) -> str | None:
+        participation = self._participation(obj)
+        return participation.status if participation else None
+
+
+class ActivityParticipationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ActivityParticipation
+        fields = ("status", "joined_at")

@@ -39,10 +39,4 @@ class HomeProviderSerializer(ProviderListItemSerializer):
 
 
 class HomeActivitySerializer(ActivityListItemSerializer):
-    participant_count = serializers.SerializerMethodField()
-
-    class Meta(ActivityListItemSerializer.Meta):
-        fields = ActivityListItemSerializer.Meta.fields + ("participant_count",)
-
-    def get_participant_count(self, obj) -> int:
-        return 0
+    pass

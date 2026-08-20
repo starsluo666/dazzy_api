@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Activity, ActivityCategory
+from .models import Activity, ActivityCategory, ActivityParticipation
 
 
 @admin.register(ActivityCategory)
@@ -25,3 +25,11 @@ class ActivityAdmin(admin.ModelAdmin):
     search_fields = ("title", "organizer__phone", "organizer__nickname", "meeting_place_name")
     readonly_fields = ("created_at", "updated_at", "published_at")
     date_hierarchy = "starts_at"
+
+
+@admin.register(ActivityParticipation)
+class ActivityParticipationAdmin(admin.ModelAdmin):
+    list_display = ("activity", "user", "status", "joined_at", "cancelled_at")
+    list_filter = ("status",)
+    search_fields = ("activity__title", "user__phone", "user__nickname")
+    readonly_fields = ("joined_at", "created_at", "updated_at")

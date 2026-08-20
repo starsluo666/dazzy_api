@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from accounts.models import User
 
-from .models import Activity, ActivityCategory
+from .models import Activity, ActivityCategory, ActivityParticipation
 
 
 class ActivityModelTests(TestCase):
@@ -94,3 +94,77 @@ class ActivityModelTests(TestCase):
         response = self.client.get("/api/v1/activities/999999/")
 
         self.assertEqual(response.status_code, 404)
+
+    def test_participation_join_is_idempotent_and_visible_in_detail(self):
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(phone="13800000009", password="test")
+        self.client.force_login(participant)
+
+        first = self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+        second = self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+        detail = self.client.get(f"/api/v1/activities/{activity.pk}/")
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(ActivityParticipation.objects.count(), 1)
+        self.assertEqual(detail.json()["data"]["participant_count"], 1)
+        self.assertTrue(detail.json()["data"]["is_joined"])
+        self.assertEqual(detail.json()["data"]["participation_status"], "active")
+
+    def test_participation_forms_activity_and_cancel_reopens_it(self):
+        activity = self.build_activity(
+            status=Activity.Status.RECRUITING,
+            min_participants=2,
+            capacity=3,
+        )
+        activity.save()
+        first = User.objects.create_user(phone="13800000010", password="test")
+        second = User.objects.create_user(phone="13800000011", password="test")
+
+        self.client.force_login(first)
+        self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+        self.client.force_login(second)
+        joined = self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+        activity.refresh_from_db()
+
+        self.assertEqual(joined.status_code, 201)
+        self.assertEqual(activity.status, Activity.Status.FORMED)
+        self.assertEqual(joined.json()["data"]["participant_count"], 2)
+
+        cancelled = self.client.delete(f"/api/v1/activities/{activity.pk}/participation/")
+        activity.refresh_from_db()
+
+        self.assertEqual(cancelled.status_code, 204)
+        self.assertEqual(activity.status, Activity.Status.RECRUITING)
+        self.assertEqual(
+            ActivityParticipation.objects.filter(status="active").count(),
+            1,
+        )
+
+    def test_participation_rejects_organizer_and_full_activity(self):
+        activity = self.build_activity(
+            status=Activity.Status.RECRUITING,
+            min_participants=2,
+            capacity=2,
+        )
+        activity.save()
+        self.client.force_login(self.organizer)
+        organizer_response = self.client.post(
+            f"/api/v1/activities/{activity.pk}/participation/"
+        )
+        self.assertEqual(organizer_response.status_code, 403)
+
+        for suffix in (12, 13):
+            user = User.objects.create_user(phone=f"138000000{suffix}", password="test")
+            self.client.force_login(user)
+            self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+
+        extra = User.objects.create_user(phone="13800000014", password="test")
+        self.client.force_login(extra)
+        full_response = self.client.post(
+            f"/api/v1/activities/{activity.pk}/participation/"
+        )
+
+        self.assertEqual(full_response.status_code, 400)
+        self.assertIn("名额已满", str(full_response.json()))

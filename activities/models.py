@@ -118,3 +118,43 @@ class Activity(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+
+class ActivityParticipation(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "已报名"
+        CANCELLED = "cancelled", "已取消"
+
+    activity = models.ForeignKey(
+        Activity,
+        on_delete=models.CASCADE,
+        related_name="participations",
+        verbose_name="活动",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="activity_participations",
+        verbose_name="参与者",
+    )
+    status = models.CharField(
+        "状态", max_length=16, choices=Status, default=Status.ACTIVE
+    )
+    joined_at = models.DateTimeField("报名时间", auto_now_add=True)
+    cancelled_at = models.DateTimeField("取消时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "activity_participation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("activity", "user"), name="uniq_activity_participant"
+            )
+        ]
+        indexes = [models.Index(fields=("activity", "status"))]
+        verbose_name = "活动报名"
+        verbose_name_plural = verbose_name
+
+    def __str__(self) -> str:
+        return f"{self.activity} - {self.user}"
