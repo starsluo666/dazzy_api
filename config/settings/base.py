@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     "activities",
     "mediafiles",
     "locations",
+    "home",
     "health",
 ]
 MIDDLEWARE = [

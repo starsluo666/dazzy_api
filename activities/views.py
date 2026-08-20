@@ -1,6 +1,5 @@
 from django.contrib.gis.db.models.functions import Distance
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -9,6 +8,7 @@ from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
 from .models import Activity
+from .selectors import upcoming_public_activities
 from .serializers import (
     ActivityDetailSerializer,
     ActivityListItemSerializer,
@@ -29,10 +29,7 @@ class ActivityListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
 
-        queryset = Activity.objects.filter(
-            status__in=(Activity.Status.RECRUITING, Activity.Status.FORMED),
-            starts_at__gt=timezone.now(),
-        ).select_related("category", "organizer", "cover")
+        queryset = upcoming_public_activities()
         if category := params.get("category"):
             queryset = queryset.filter(category__slug=category)
         if "longitude" in params:
