@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Activity, ActivityCategory, ActivityParticipation
+from .models import Activity, ActivityCategory, ActivityParticipation, ActivityPublishOrder
 
 
 @admin.register(ActivityCategory)
@@ -33,3 +33,11 @@ class ActivityParticipationAdmin(admin.ModelAdmin):
     list_filter = ("status",)
     search_fields = ("activity__title", "user__phone", "user__nickname")
     readonly_fields = ("joined_at", "created_at", "updated_at")
+
+
+@admin.register(ActivityPublishOrder)
+class ActivityPublishOrderAdmin(admin.ModelAdmin):
+    list_display = ("order_no", "activity", "payer", "payable_amount", "status", "paid_at")
+    list_filter = ("status",)
+    search_fields = ("order_no", "activity__title", "payer__phone")
+    readonly_fields = ("created_at", "updated_at", "paid_at")

@@ -1,0 +1,153 @@
+import re
+
+from django.contrib.auth import authenticate, password_validation
+from django.db.models import F
+from rest_framework import serializers
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+
+from mediafiles.services import build_media_url
+
+from .models import User
+from .services import (
+    clear_auth_failures,
+    ensure_auth_attempt_allowed,
+    record_auth_failure,
+    verify_sms_code,
+)
+
+
+PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
+
+
+def validate_phone(value: str) -> str:
+    normalized = value.strip()
+    if not PHONE_PATTERN.fullmatch(normalized):
+        raise serializers.ValidationError("请输入正确的中国大陆手机号。")
+    return normalized
+
+
+def validate_password(value: str) -> str:
+    if not 8 <= len(value) <= 20:
+        raise serializers.ValidationError("密码长度须为 8–20 位。")
+    password_validation.validate_password(value)
+    return value
+
+
+class UserSerializer(serializers.ModelSerializer):
+    avatar_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            "public_id", "phone", "nickname", "gender", "birth_date", "avatar_url",
+            "verification_status", "account_status",
+        )
+        read_only_fields = ("public_id", "phone", "avatar_url", "verification_status", "account_status")
+
+    def get_avatar_url(self, obj) -> str | None:
+        return build_media_url(obj.avatar_object_key)
+
+
+class SmsCodeRequestSerializer(serializers.Serializer):
+    phone = serializers.CharField(validators=[validate_phone])
+    purpose = serializers.ChoiceField(choices=("register", "login", "reset_password"))
+
+    def validate(self, attrs):
+        exists = User.objects.filter(phone=attrs["phone"]).exists()
+        if attrs["purpose"] == "register" and exists:
+            raise serializers.ValidationError({"phone": "该手机号已注册，请直接登录。"})
+        if attrs["purpose"] != "register" and not exists:
+            raise serializers.ValidationError({"phone": "该手机号尚未注册。"})
+        return attrs
+
+
+class RegisterSerializer(serializers.Serializer):
+    phone = serializers.CharField(validators=[validate_phone])
+    code = serializers.CharField(min_length=6, max_length=6)
+    password = serializers.CharField(write_only=True, validators=[validate_password])
+
+    def validate_phone(self, value):
+        if User.objects.filter(phone=value).exists():
+            raise serializers.ValidationError("该手机号已注册。")
+        return value
+
+    def create(self, validated_data):
+        verify_sms_code(phone=validated_data["phone"], purpose="register", code=validated_data["code"])
+        return User.objects.create_user(
+            phone=validated_data["phone"], password=validated_data["password"],
+            nickname=f"用户{validated_data['phone'][-4:]}",
+        )
+
+
+class PasswordLoginSerializer(serializers.Serializer):
+    phone = serializers.CharField(validators=[validate_phone])
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        ensure_auth_attempt_allowed(phone=attrs["phone"], purpose="password_login")
+        user = authenticate(request=self.context.get("request"), phone=attrs["phone"], password=attrs["password"])
+        if not user:
+            record_auth_failure(phone=attrs["phone"], purpose="password_login")
+            raise serializers.ValidationError("手机号或密码错误。")
+        if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+            raise serializers.ValidationError("账号当前不可用，请联系客服。")
+        attrs["user"] = user
+        clear_auth_failures(phone=attrs["phone"], purpose="password_login")
+        return attrs
+
+
+class SmsLoginSerializer(serializers.Serializer):
+    phone = serializers.CharField(validators=[validate_phone])
+    code = serializers.CharField(min_length=6, max_length=6)
+
+    def validate(self, attrs):
+        try:
+            user = User.objects.get(phone=attrs["phone"])
+        except User.DoesNotExist as exc:
+            raise serializers.ValidationError({"phone": "该手机号尚未注册。"}) from exc
+        if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+            raise serializers.ValidationError("账号当前不可用，请联系客服。")
+        ensure_auth_attempt_allowed(phone=attrs["phone"], purpose="sms_login")
+        try:
+            verify_sms_code(phone=attrs["phone"], purpose="login", code=attrs["code"])
+        except serializers.ValidationError:
+            record_auth_failure(phone=attrs["phone"], purpose="sms_login")
+            raise
+        clear_auth_failures(phone=attrs["phone"], purpose="sms_login")
+        attrs["user"] = user
+        return attrs
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    phone = serializers.CharField(validators=[validate_phone])
+    code = serializers.CharField(min_length=6, max_length=6)
+    new_password = serializers.CharField(write_only=True, validators=[validate_password])
+
+    def validate(self, attrs):
+        try:
+            attrs["user"] = User.objects.get(phone=attrs["phone"])
+        except User.DoesNotExist as exc:
+            raise serializers.ValidationError({"phone": "该手机号尚未注册。"}) from exc
+        return attrs
+
+    def save(self, **kwargs):
+        phone = self.validated_data["phone"]
+        ensure_auth_attempt_allowed(phone=phone, purpose="reset_password")
+        try:
+            verify_sms_code(phone=phone, purpose="reset_password", code=self.validated_data["code"])
+        except serializers.ValidationError:
+            record_auth_failure(phone=phone, purpose="reset_password")
+            raise
+        clear_auth_failures(phone=phone, purpose="reset_password")
+        user = self.validated_data["user"]
+        user.set_password(self.validated_data["new_password"])
+        user.auth_version = F("auth_version") + 1
+        user.save(update_fields=("password", "auth_version"))
+        for token in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=token)
+        user.refresh_from_db(fields=("auth_version",))
+        return user
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField()

@@ -40,6 +40,7 @@ class User(AbstractUser):
     account_status = models.CharField(
         "账号状态", max_length=16, choices=AccountStatus, default=AccountStatus.ACTIVE
     )
+    auth_version = models.PositiveIntegerField("认证版本", default=1, editable=False)
 
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS: list[str] = []

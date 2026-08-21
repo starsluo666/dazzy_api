@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -16,6 +17,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "accounts",
     "providers",
@@ -110,11 +112,29 @@ COS_SIGNED_PRIVATE_URL_TTL = int(os.getenv("COS_SIGNED_PRIVATE_URL_TTL", "300"))
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        "config.authentication.VersionedJWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
         "config.authentication.DevelopmentUserAuthentication",
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+}
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
+}
+SMS_CODE_TTL_SECONDS = int(os.getenv("SMS_CODE_TTL_SECONDS", "300"))
+SMS_CODE_RESEND_SECONDS = int(os.getenv("SMS_CODE_RESEND_SECONDS", "60"))
+SMS_DEVELOPMENT_CODE = os.getenv("SMS_DEVELOPMENT_CODE", "123456")
+AUTH_FAILURE_LIMIT = int(os.getenv("AUTH_FAILURE_LIMIT", "5"))
+AUTH_LOCK_SECONDS = int(os.getenv("AUTH_LOCK_SECONDS", "900"))
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "auth_sms_send": os.getenv("AUTH_SMS_SEND_RATE", "10/min"),
+    "auth_login": os.getenv("AUTH_LOGIN_RATE", "30/min"),
+    "auth_password_reset": os.getenv("AUTH_PASSWORD_RESET_RATE", "10/min"),
 }
 DAZZY_DEMO_USER_PUBLIC_ID = os.getenv("DAZZY_DEMO_USER_PUBLIC_ID", "")
 TENCENT_MAP_WEB_SERVICE_KEY = os.environ["TENCENT_MAP_WEB_SERVICE_KEY"]

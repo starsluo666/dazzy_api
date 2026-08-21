@@ -1,8 +1,21 @@
 from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from accounts.models import User
+
+
+class VersionedJWTAuthentication(JWTAuthentication):
+    """Reject access tokens issued before a password reset or security logout."""
+
+    def get_user(self, validated_token):
+        user = super().get_user(validated_token)
+        if validated_token.get("auth_version") != user.auth_version:
+            raise AuthenticationFailed("登录状态已失效，请重新登录。")
+        if user.account_status != User.AccountStatus.ACTIVE:
+            raise AuthenticationFailed("账号当前不可用，请联系客服。")
+        return user
 
 
 class DevelopmentUserAuthentication(BaseAuthentication):

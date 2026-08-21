@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import ActivityCategoryListView, ActivityDetailView, ActivityListView, ActivityParticipationView, MyActivityListView
+from .views import ActivityCategoryListView, ActivityDetailView, ActivityListView, ActivityParticipationView, ActivityPublishOrderView, ActivityPublishPaymentView, MyActivityListView
 
 urlpatterns = [
     path("activities/", ActivityListView.as_view(), name="activity-list"),
@@ -12,4 +12,6 @@ urlpatterns = [
         ActivityParticipationView.as_view(),
         name="activity-participation",
     ),
+    path("activities/<int:pk>/publish-order/", ActivityPublishOrderView.as_view(), name="activity-publish-order"),
+    path("activities/<int:pk>/publish-order/simulate-payment/", ActivityPublishPaymentView.as_view(), name="activity-publish-payment"),
 ]

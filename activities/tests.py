@@ -3,18 +3,27 @@ from decimal import Decimal
 
 from django.contrib.gis.geos import Point
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
+from mediafiles.models import MediaAsset
 
-from .models import Activity, ActivityCategory, ActivityParticipation
+from .models import Activity, ActivityCategory, ActivityParticipation, ActivityPublishOrder
+from .services import calculate_publish_service_fee
 
 
 class ActivityModelTests(TestCase):
     def setUp(self):
         self.organizer = User.objects.create_user(phone="13800000002", password="test-password")
         self.category = ActivityCategory.objects.create(name="台球", slug="billiards")
+        self.cover = MediaAsset.objects.create(
+            owner=self.organizer,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.ACTIVITY_COVER,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="dazzy-test/public/activity-covers/test.webp",
+        )
 
     def build_activity(self, **overrides):
         starts_at = timezone.now() + timedelta(days=3)
@@ -36,6 +45,7 @@ class ActivityModelTests(TestCase):
             "participation_rules": "准时到场",
             "aa_principal_amount": 4800,
             "refund_template_version": "standard-v1",
+            "cover_id": str(self.cover.pk),
             "refund_rule_snapshot": {"version": "standard-v1"},
         }
         values.update(overrides)
@@ -48,6 +58,9 @@ class ActivityModelTests(TestCase):
 
         self.assertEqual(activity.aa_principal_amount, 4800)
         self.assertEqual(activity.meeting_point.srid, 4326)
+
+    def test_publish_service_fee_uses_half_up_rounding(self):
+        self.assertEqual(calculate_publish_service_fee(6805), 681)
 
     def test_minimum_participants_cannot_exceed_capacity(self):
         activity = self.build_activity(capacity=4, min_participants=5)
@@ -247,10 +260,12 @@ class ActivityModelTests(TestCase):
             "participation_rules": "准时到场，文明参与",
             "aa_principal_amount": 6800,
             "refund_template_version": "standard-v1",
+            "cover_id": str(self.cover.pk),
         }
         payload.update(overrides)
         return payload
 
+    @override_settings(DEBUG=True)
     def test_verified_user_can_create_paid_activity_draft(self):
         self.organizer.verification_status = User.VerificationStatus.VERIFIED
         self.organizer.save(update_fields=("verification_status",))
@@ -265,6 +280,31 @@ class ActivityModelTests(TestCase):
         self.assertEqual(activity.status, Activity.Status.DRAFT)
         self.assertEqual(activity.refund_template_version, "standard-v1")
         self.assertEqual(response.json()["data"]["next_step"], "payment")
+
+        payment_order = self.client.post(
+            f"/api/v1/activities/{activity.pk}/publish-order/"
+        )
+        first_order_no = payment_order.json()["data"]["order_no"]
+        ActivityPublishOrder.objects.filter(order_no=first_order_no).update(
+            status=ActivityPublishOrder.Status.CANCELLED
+        )
+        retry_order = self.client.post(f"/api/v1/activities/{activity.pk}/publish-order/")
+        paid = self.client.post(
+            f"/api/v1/activities/{activity.pk}/publish-order/simulate-payment/"
+        )
+        activity.refresh_from_db()
+        order = ActivityPublishOrder.objects.get(
+            activity=activity, status=ActivityPublishOrder.Status.PAID
+        )
+
+        self.assertEqual(payment_order.status_code, 201)
+        self.assertEqual(payment_order.json()["data"]["payable_amount"], 7480)
+        self.assertEqual(retry_order.status_code, 201)
+        self.assertNotEqual(retry_order.json()["data"]["order_no"], first_order_no)
+        self.assertEqual(ActivityPublishOrder.objects.filter(activity=activity).count(), 2)
+        self.assertEqual(paid.status_code, 200)
+        self.assertEqual(order.status, ActivityPublishOrder.Status.PAID)
+        self.assertEqual(activity.status, Activity.Status.PENDING_REVIEW)
 
     def test_activity_create_enforces_verification_and_start_window(self):
         self.client.force_login(self.organizer)

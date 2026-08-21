@@ -47,3 +47,14 @@ def upload_public_file(*, local_path: str, object_key: str, content_type: str) -
             CacheControl="public, max-age=31536000, immutable",
         )
     return response.get("ETag", "").strip('"')
+
+
+def upload_public_stream(*, body, object_key: str, content_type: str) -> str:
+    response = _cos_client().put_object(
+        Bucket=settings.COS_BUCKET,
+        Key=object_key,
+        Body=body,
+        ContentType=content_type,
+        CacheControl="public, max-age=31536000, immutable",
+    )
+    return response.get("ETag", "").strip('"')

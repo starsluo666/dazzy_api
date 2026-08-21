@@ -158,3 +158,42 @@ class ActivityParticipation(models.Model):
 
     def __str__(self) -> str:
         return f"{self.activity} - {self.user}"
+
+
+class ActivityPublishOrder(models.Model):
+    class Status(models.TextChoices):
+        PENDING_PAYMENT = "pending_payment", "待支付"
+        PAID = "paid", "已支付"
+        CANCELLED = "cancelled", "已取消"
+        REFUNDED = "refunded", "已退款"
+
+    order_no = models.CharField("订单号", max_length=32, unique=True)
+    activity = models.ForeignKey(
+        Activity, on_delete=models.PROTECT, related_name="publish_orders", verbose_name="活动"
+    )
+    payer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="activity_publish_orders",
+        verbose_name="付款人",
+    )
+    aa_principal_amount = models.PositiveBigIntegerField("发起人AA本金（分）")
+    platform_service_fee_amount = models.PositiveBigIntegerField("平台服务费（分）")
+    payable_amount = models.PositiveBigIntegerField("应付金额（分）")
+    pricing_snapshot = models.JSONField("计价规则快照")
+    status = models.CharField(
+        "状态", max_length=20, choices=Status, default=Status.PENDING_PAYMENT
+    )
+    paid_at = models.DateTimeField("支付时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "activity_publish_order"
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("payer", "status", "-created_at"))]
+        verbose_name = "活动发布支付单"
+        verbose_name_plural = verbose_name
+
+    def __str__(self) -> str:
+        return self.order_no

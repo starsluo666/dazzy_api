@@ -2,8 +2,10 @@ from django.contrib.gis.db.models.functions import Distance
 from django.db.models import CharField, DateTimeField, OuterRef, Q, Subquery, Value
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.conf import settings
 from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -13,7 +15,7 @@ from config.geospatial import gcj02_to_wgs84
 from .models import Activity, ActivityCategory, ActivityParticipation
 from .selectors import upcoming_public_activities, with_participant_count
 from .services import cancel_activity_participation, join_activity
-from .services import create_activity_draft
+from .services import create_activity_draft, get_or_create_publish_order, simulate_publish_payment
 from .serializers import (
     ActivityDetailSerializer,
     ActivityListItemSerializer,
@@ -21,6 +23,7 @@ from .serializers import (
     ActivityParticipationSerializer,
     ActivityCategorySerializer,
     ActivityCreateSerializer,
+    ActivityPublishOrderSerializer,
     MyActivityListItemSerializer,
     MyActivityListQuerySerializer,
 )
@@ -67,7 +70,7 @@ class ActivityListView(APIView):
             return Response({"detail": "请登录后发布活动。"}, status=403)
         if request.user.verification_status != request.user.VerificationStatus.VERIFIED:
             return Response({"detail": "完成实名认证后才能发布活动。"}, status=403)
-        serializer = ActivityCreateSerializer(data=request.data)
+        serializer = ActivityCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         activity = create_activity_draft(
             organizer=request.user, validated_data=dict(serializer.validated_data)
@@ -206,3 +209,21 @@ class ActivityParticipationView(APIView):
     def delete(self, request, pk):
         cancel_activity_participation(pk, request.user)
         return Response(status=204)
+
+
+class ActivityPublishOrderView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        order = get_or_create_publish_order(activity_id=pk, user=request.user)
+        return Response({"data": ActivityPublishOrderSerializer(order).data}, status=201)
+
+
+class ActivityPublishPaymentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not settings.DEBUG:
+            raise ValidationError("模拟支付仅在本地环境开放。")
+        order = simulate_publish_payment(activity_id=pk, user=request.user)
+        return Response({"data": ActivityPublishOrderSerializer(order).data})

@@ -3,9 +3,10 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import serializers
 
+from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 
-from .models import Activity, ActivityCategory, ActivityParticipation
+from .models import Activity, ActivityCategory, ActivityParticipation, ActivityPublishOrder
 
 
 STANDARD_REFUND_SNAPSHOT = {
@@ -25,6 +26,17 @@ class ActivityCategorySerializer(serializers.ModelSerializer):
         fields = ("name", "slug")
 
 
+class ActivityPublishOrderSerializer(serializers.ModelSerializer):
+    activity_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ActivityPublishOrder
+        fields = (
+            "order_no", "activity_id", "aa_principal_amount",
+            "platform_service_fee_amount", "payable_amount", "status", "paid_at",
+        )
+
+
 class ActivityCreateSerializer(serializers.Serializer):
     category_slug = serializers.SlugField()
     title = serializers.CharField(max_length=80)
@@ -41,6 +53,13 @@ class ActivityCreateSerializer(serializers.Serializer):
     participation_rules = serializers.CharField(max_length=2000)
     aa_principal_amount = serializers.IntegerField(min_value=1, max_value=10_000_000)
     refund_template_version = serializers.ChoiceField(choices=("standard-v1",))
+    cover_id = serializers.PrimaryKeyRelatedField(
+        source="cover",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.ACTIVITY_COVER,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+    )
 
     def validate_category_slug(self, value):
         try:
@@ -61,6 +80,9 @@ class ActivityCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError({"formation_deadline": "成局截止时间须晚于当前时间且早于活动开始。"})
         if attrs["min_participants"] > attrs["capacity"]:
             raise serializers.ValidationError({"min_participants": "最少成局人数不能超过人数上限。"})
+        request = self.context.get("request")
+        if not request or attrs["cover"].owner_id != request.user.pk:
+            raise serializers.ValidationError({"cover_id": "活动封面不存在或无权使用。"})
         return attrs
 
 
