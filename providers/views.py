@@ -74,13 +74,12 @@ class ProviderListView(APIView):
 
 
 class ProviderDetailView(APIView):
-    authentication_classes = []
     permission_classes = []
 
     def get(self, request, public_id):
         queryset = public_providers().filter(user__public_id=public_id)
         provider = get_object_or_404(queryset)
-        return Response({"data": ProviderDetailSerializer(provider).data})
+        return Response({"data": ProviderDetailSerializer(provider, context={"request": request}).data})
 
 
 class ProviderAvailabilityView(APIView):

@@ -9,6 +9,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from orders.models import ProviderOrder
+from engagements.models import ProviderFavorite
 
 from .serializers import (
     LogoutSerializer,
@@ -134,10 +135,10 @@ class CurrentUserOverviewView(APIView):
         return Response(
             {
                 "data": {
-                    # 钱包、优惠券和收藏模型尚未建立，返回 null，避免展示模拟数据。
+                    # 钱包和优惠券模型尚未建立，返回 null，避免展示模拟数据。
                     "balance_amount": None,
                     "coupon_count": None,
-                    "favorite_count": None,
+                    "favorite_count": ProviderFavorite.objects.filter(user=request.user).count(),
                     "order_count": orders.count(),
                     "pending_payment_count": total(ProviderOrder.Status.PENDING_PAYMENT),
                     "pending_service_count": total(

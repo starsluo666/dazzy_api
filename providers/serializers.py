@@ -91,6 +91,7 @@ class ProviderDetailSerializer(ProviderListItemSerializer):
     birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
     credit_score = serializers.IntegerField()
     max_service_radius_km = serializers.IntegerField()
+    is_favorited = serializers.SerializerMethodField()
 
     class Meta(ProviderListItemSerializer.Meta):
         fields = ProviderListItemSerializer.Meta.fields + (
@@ -98,4 +99,9 @@ class ProviderDetailSerializer(ProviderListItemSerializer):
             "birth_date",
             "credit_score",
             "max_service_radius_km",
+            "is_favorited",
         )
+
+    def get_is_favorited(self, obj) -> bool:
+        request = self.context.get("request")
+        return bool(request and request.user.is_authenticated and obj.favorited_by.filter(user=request.user).exists())

@@ -25,7 +25,7 @@ def _service_duration(service: ProviderService) -> int:
     return max(120, service.estimated_duration_minutes or 120)
 
 
-def _recommended_providers(params, point):
+def _recommended_providers(params, point, request):
     queryset = public_providers().annotate(
         starting_price_amount=Min(
             "services__price_amount", filter=Q(services__is_active=True)
@@ -55,7 +55,7 @@ def _recommended_providers(params, point):
     return HomeProviderSerializer(
         providers,
         many=True,
-        context={"earliest_by_provider": earliest_by_provider},
+        context={"earliest_by_provider": earliest_by_provider, "request": request},
     ).data
 
 
@@ -70,7 +70,6 @@ def _recommended_activities(point):
 
 
 class HomeDiscoveryView(APIView):
-    authentication_classes = []
     permission_classes = []
 
     @extend_schema(parameters=[HomeQuerySerializer])
@@ -91,7 +90,7 @@ class HomeDiscoveryView(APIView):
         loaders = {
             "card_assets": build_home_card_assets,
             "recommended_activities": lambda: _recommended_activities(point),
-            "recommended_providers": lambda: _recommended_providers(params, point),
+            "recommended_providers": lambda: _recommended_providers(params, point, request),
         }
         for section, loader in loaders.items():
             try:

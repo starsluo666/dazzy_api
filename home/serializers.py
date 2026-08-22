@@ -35,7 +35,8 @@ class HomeProviderSerializer(ProviderListItemSerializer):
         return slot["starts_at"] if slot else None
 
     def get_is_favorited(self, obj) -> bool:
-        return False
+        request = self.context.get("request")
+        return bool(request and request.user.is_authenticated and obj.favorited_by.filter(user=request.user).exists())
 
 
 class HomeActivitySerializer(ActivityListItemSerializer):

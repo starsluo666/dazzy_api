@@ -25,6 +25,7 @@ INSTALLED_APPS = [
     "activities",
     "mediafiles",
     "locations",
+    "engagements",
     "home",
     "health",
 ]
