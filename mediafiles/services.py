@@ -58,3 +58,7 @@ def upload_public_stream(*, body, object_key: str, content_type: str) -> str:
         CacheControl="public, max-age=31536000, immutable",
     )
     return response.get("ETag", "").strip('"')
+
+
+def delete_public_object(*, object_key: str) -> None:
+    _cos_client().delete_object(Bucket=settings.COS_BUCKET, Key=object_key)

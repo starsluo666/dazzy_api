@@ -19,6 +19,13 @@ class UserAddress(models.Model):
         db_table = "user_address"
         ordering = ("-is_default", "-updated_at")
         indexes = [models.Index(fields=("user", "-updated_at"))]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user",),
+                condition=models.Q(is_default=True),
+                name="uniq_default_address_per_user",
+            )
+        ]
         verbose_name = "用户地址"
         verbose_name_plural = verbose_name
 

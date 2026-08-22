@@ -2,6 +2,7 @@ import re
 
 from django.contrib.auth import authenticate, password_validation
 from django.db.models import F
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
@@ -46,6 +47,17 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_avatar_url(self, obj) -> str | None:
         return build_media_url(obj.avatar_object_key)
+
+    def validate_nickname(self, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise serializers.ValidationError("昵称不能为空。")
+        return normalized
+
+    def validate_birth_date(self, value):
+        if value and value > timezone.localdate():
+            raise serializers.ValidationError("生日不能晚于今天。")
+        return value
 
 
 class SmsCodeRequestSerializer(serializers.Serializer):

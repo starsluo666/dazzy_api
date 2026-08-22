@@ -69,6 +69,32 @@ class AuthenticationApiTests(APITestCase):
         )
         self.assertEqual(sms_response.status_code, 200)
 
+    def test_current_user_can_update_profile(self):
+        user = User.objects.create_user(phone=self.phone, password=self.password, nickname="旧昵称")
+        self.client.force_authenticate(user)
+
+        response = self.client.patch(
+            "/api/v1/users/me/",
+            {"nickname": "  新昵称  ", "gender": "female", "birth_date": "2000-05-20"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["nickname"], "新昵称")
+        self.assertEqual(response.data["data"]["gender"], "female")
+        self.assertEqual(response.data["data"]["birth_date"], "2000-05-20")
+
+    def test_current_user_cannot_set_future_birth_date(self):
+        user = User.objects.create_user(phone=self.phone, password=self.password)
+        self.client.force_authenticate(user)
+
+        response = self.client.patch(
+            "/api/v1/users/me/", {"birth_date": "2999-01-01"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("birth_date", response.data)
+
     def test_reset_password_consumes_code(self):
         user = User.objects.create_user(phone=self.phone, password=self.password)
         self.assertEqual(self.request_code("reset_password").status_code, 200)

@@ -5,6 +5,8 @@ from django.test import TestCase
 
 from accounts.models import User
 
+from .models import UserAddress
+
 
 class LocationApiTests(TestCase):
     def setUp(self):
@@ -34,3 +36,49 @@ class LocationApiTests(TestCase):
         item = listed.json()["data"]["items"][0]
         self.assertEqual(Decimal(item["longitude"]), Decimal("114.5120000"))
         self.assertTrue(item["is_default"])
+
+    def test_first_address_defaults_and_update_moves_default(self):
+        first = self.client.post(
+            "/api/v1/addresses/",
+            {
+                "name": "美乐城", "address": "人民东路456号", "city_name": "邯郸市",
+                "longitude": "114.5120000", "latitude": "36.6130000",
+            },
+            content_type="application/json",
+        )
+        second = self.client.post(
+            "/api/v1/addresses/",
+            {
+                "name": "博物馆", "address": "中华北大街45号", "city_name": "邯郸市",
+                "longitude": "114.5010000", "latitude": "36.6100000",
+            },
+            content_type="application/json",
+        )
+        self.assertTrue(first.json()["data"]["is_default"])
+        self.assertFalse(second.json()["data"]["is_default"])
+
+        changed = self.client.patch(
+            f"/api/v1/addresses/{second.json()['data']['id']}/",
+            {"is_default": True},
+            content_type="application/json",
+        )
+        self.assertEqual(changed.status_code, 200)
+        listed = self.client.get("/api/v1/addresses/").json()["data"]["items"]
+        self.assertEqual(sum(item["is_default"] for item in listed), 1)
+        self.assertEqual(listed[0]["id"], second.json()["data"]["id"])
+
+    def test_delete_default_promotes_remaining_address(self):
+        first = UserAddress.objects.create(
+            user=self.user, name="默认地址", address="地址1", city_name="邯郸市",
+            longitude="114.5120000", latitude="36.6130000", is_default=True,
+        )
+        second = UserAddress.objects.create(
+            user=self.user, name="备用地址", address="地址2", city_name="邯郸市",
+            longitude="114.5020000", latitude="36.6030000",
+        )
+
+        response = self.client.delete(f"/api/v1/addresses/{first.id}/")
+
+        self.assertEqual(response.status_code, 204)
+        second.refresh_from_db()
+        self.assertTrue(second.is_default)

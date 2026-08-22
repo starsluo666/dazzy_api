@@ -56,6 +56,37 @@ class MediaAssetTests(TestCase):
         self.assertEqual(asset.category, MediaAsset.Category.ACTIVITY_COVER)
         upload_stream.assert_called_once()
 
+    @patch("mediafiles.views.delete_public_object")
+    @patch("mediafiles.views.build_media_url", return_value="https://media.test/avatar.webp")
+    @patch("mediafiles.views.upload_public_stream", return_value="avatar-etag")
+    def test_authenticated_user_can_upload_avatar(
+        self, upload_stream, _build_url, delete_object
+    ):
+        user = User.objects.create_user(phone="13900000004")
+        old_asset = MediaAsset.objects.create(
+            owner=user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.AVATAR,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="public/avatars/old.webp",
+        )
+        user.avatar_object_key = old_asset.object_key
+        user.save(update_fields=("avatar_object_key",))
+        self.client.force_login(user)
+        image = SimpleUploadedFile("avatar.webp", self.valid_webp(), content_type="image/webp")
+
+        response = self.client.post("/api/v1/media/avatars/", {"file": image})
+
+        self.assertEqual(response.status_code, 201)
+        user.refresh_from_db()
+        asset = MediaAsset.objects.get(pk=response.json()["data"]["id"])
+        self.assertEqual(asset.category, MediaAsset.Category.AVATAR)
+        self.assertEqual(user.avatar_object_key, asset.object_key)
+        old_asset.refresh_from_db()
+        self.assertEqual(old_asset.status, MediaAsset.Status.DELETED)
+        upload_stream.assert_called_once()
+        delete_object.assert_called_once_with(object_key="public/avatars/old.webp")
+
     def test_activity_cover_rejects_unsupported_file_type(self):
         user = User.objects.create_user(phone="13900000002")
         self.client.force_login(user)
