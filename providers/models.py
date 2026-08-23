@@ -56,6 +56,8 @@ class ProviderProfile(models.Model):
     )
     service_city_code = models.CharField("服务城市编码", max_length=20, blank=True)
     service_city_name = models.CharField("服务城市", max_length=50, blank=True)
+    service_location_name = models.CharField("常驻服务地点", max_length=100, blank=True)
+    service_address = models.CharField("常驻服务地址", max_length=255, blank=True)
     map_source = models.CharField(
         "地图来源", max_length=16, choices=MapSource, default=MapSource.AMAP
     )

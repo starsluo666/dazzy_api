@@ -1,6 +1,8 @@
 from datetime import datetime, time, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
+from django.contrib.gis.geos import Point
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -394,6 +396,26 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(data["items"][0]["phone_masked"], "199****2222")
         self.assertEqual(data["summary"]["total"], 1)
         self.assertEqual(data["summary"]["accepting"], 1)
+
+    def test_provider_management_detail_includes_private_service_location(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.service_location_name = "邯郸美乐城"
+        self.handan.service_address = "河北省邯郸市丛台区人民东路456号"
+        self.handan.source_longitude = Decimal("114.5389610")
+        self.handan.source_latitude = Decimal("36.6256570")
+        self.handan.service_center = Point(114.5328, 36.6252, srid=4326)
+        self.handan.save()
+
+        response = self.client.get(
+            reverse("backoffice-provider-detail", args=(self.handan.id,))
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data["data"]
+        self.assertTrue(data["has_service_location"])
+        self.assertEqual(data["service_location_name"], "邯郸美乐城")
+        self.assertEqual(data["service_address"], "河北省邯郸市丛台区人民东路456号")
+        self.assertEqual(data["source_longitude"], "114.5389610")
 
     def test_user_and_provider_management_permissions_are_required(self):
         restricted_user = User.objects.create_user(
@@ -851,11 +873,26 @@ class BackofficeProviderReviewTests(APITestCase):
             starts_at=time(13),
             ends_at=time(17),
         )
-        provider_client.patch(
+        location_response = provider_client.put(
+            "/api/v1/providers/me/service-location/",
+            {
+                "service_city_code": "130400",
+                "service_city_name": "邯郸市",
+                "service_location_name": "邯郸美乐城",
+                "service_address": "河北省邯郸市丛台区人民东路456号",
+                "longitude": "114.5389610",
+                "latitude": "36.6256570",
+                "max_service_radius_km": 20,
+            },
+            format="json",
+        )
+        accepting_response = provider_client.patch(
             "/api/v1/providers/me/workbench/",
             {"is_accepting_orders": True},
             format="json",
         )
+        self.assertEqual(location_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(accepting_response.status_code, status.HTTP_200_OK)
 
         public_client = self.client_class()
         detail = public_client.get(f"/api/v1/providers/{self.handan_user.public_id}/")

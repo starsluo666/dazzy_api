@@ -38,11 +38,13 @@ from .serializers import (
     ProviderDateClosureSerializer,
     ProviderScheduleCreateSerializer,
     ProviderScheduleQuerySerializer,
+    ProviderServiceLocationSerializer,
 )
 from .services import (
     create_provider_schedule_periods,
     save_provider_application,
     submit_provider_application,
+    update_provider_service_location,
 )
 
 
@@ -276,6 +278,12 @@ class CurrentProviderWorkbenchView(APIView):
                     "is_accepting_orders": provider.is_accepting_orders,
                     "admin_order_restricted": provider.admin_order_restricted,
                     "admin_restriction_reason": provider.admin_restriction_reason,
+                    "has_service_location": bool(provider.service_center),
+                    "service_city_code": provider.service_city_code,
+                    "service_city_name": provider.service_city_name,
+                    "service_location_name": provider.service_location_name,
+                    "service_address": provider.service_address,
+                    "max_service_radius_km": provider.max_service_radius_km,
                     "today_order_count": today_count,
                     "month_income_amount": income,
                     "service_count": provider.service_count,
@@ -290,9 +298,30 @@ class CurrentProviderWorkbenchView(APIView):
         serializer.is_valid(raise_exception=True)
         if serializer.validated_data["is_accepting_orders"] and provider.admin_order_restricted:
             raise ValidationError({"is_accepting_orders": "平台当前限制接单，请联系客服处理。"})
+        if serializer.validated_data["is_accepting_orders"] and not provider.service_center:
+            raise ValidationError(
+                {"is_accepting_orders": "请先设置常驻服务地点，再开启接单。"}
+            )
         provider.is_accepting_orders = serializer.validated_data["is_accepting_orders"]
         provider.save(update_fields=("is_accepting_orders", "updated_at"))
         return Response({"data": {"is_accepting_orders": provider.is_accepting_orders}})
+
+
+class CurrentProviderServiceLocationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        provider = current_approved_provider(request)
+        return Response({"data": ProviderServiceLocationSerializer(provider).data})
+
+    def put(self, request):
+        provider = current_approved_provider(request)
+        serializer = ProviderServiceLocationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        provider = update_provider_service_location(
+            provider=provider, data=serializer.validated_data
+        )
+        return Response({"data": ProviderServiceLocationSerializer(provider).data})
 
 
 class CurrentProviderScheduleView(APIView):

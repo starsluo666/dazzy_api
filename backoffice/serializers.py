@@ -273,6 +273,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     lifestyle_photo_available = serializers.SerializerMethodField()
     lifestyle_photo_url = serializers.SerializerMethodField()
+    has_service_location = serializers.SerializerMethodField()
     service_names = serializers.SerializerMethodField()
     services = serializers.SerializerMethodField()
     weekly_availability = serializers.SerializerMethodField()
@@ -285,7 +286,9 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "birth_date", "verification_status", "verification_status_label",
             "account_status", "account_status_label", "status", "status_label", "bio",
             "lifestyle_photo_available", "lifestyle_photo_url", "service_city_code",
-            "service_city_name", "max_service_radius_km", "rating", "service_count",
+            "service_city_name", "service_location_name", "service_address", "map_source",
+            "source_longitude", "source_latitude", "has_service_location",
+            "max_service_radius_km", "rating", "service_count",
             "order_count", "credit_score", "is_accepting_orders", "admin_order_restricted",
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
             "credit_adjustments", "submitted_at", "reviewed_at", "rejection_reason",
@@ -302,6 +305,9 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
         if not obj.lifestyle_photo_id or not self.context.get("can_review", False):
             return None
         return build_media_url(obj.lifestyle_photo.object_key)
+
+    def get_has_service_location(self, obj):
+        return bool(obj.service_center)
 
     def get_service_names(self, obj):
         return [service.category.name for service in obj.services.all() if service.is_active]

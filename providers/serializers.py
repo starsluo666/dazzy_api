@@ -183,6 +183,40 @@ class ProviderAcceptingOrdersSerializer(serializers.Serializer):
     is_accepting_orders = serializers.BooleanField()
 
 
+class ProviderServiceLocationSerializer(serializers.ModelSerializer):
+    longitude = serializers.DecimalField(
+        source="source_longitude", max_digits=10, decimal_places=7, required=True
+    )
+    latitude = serializers.DecimalField(
+        source="source_latitude", max_digits=10, decimal_places=7, required=True
+    )
+    has_service_location = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProviderProfile
+        fields = (
+            "has_service_location",
+            "service_city_code",
+            "service_city_name",
+            "service_location_name",
+            "service_address",
+            "longitude",
+            "latitude",
+            "max_service_radius_km",
+        )
+        read_only_fields = ("has_service_location",)
+        extra_kwargs = {
+            "service_city_code": {"required": True, "allow_blank": False},
+            "service_city_name": {"required": True, "allow_blank": False},
+            "service_location_name": {"required": True, "allow_blank": False},
+            "service_address": {"required": True, "allow_blank": False},
+            "max_service_radius_km": {"required": True},
+        }
+
+    def get_has_service_location(self, obj) -> bool:
+        return bool(obj.service_center)
+
+
 class ProviderServiceSummarySerializer(serializers.ModelSerializer):
     category = serializers.CharField(source="category.name")
     category_slug = serializers.CharField(source="category.slug")

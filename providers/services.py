@@ -2,6 +2,8 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from config.geospatial import gcj02_to_wgs84
+
 from .models import (
     ProviderDateAvailability,
     ProviderDateClosure,
@@ -56,6 +58,33 @@ def submit_provider_application(*, user) -> ProviderProfile:
         )
     )
     return profile
+
+
+@transaction.atomic
+def update_provider_service_location(
+    *, provider: ProviderProfile, data: dict
+) -> ProviderProfile:
+    locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
+    values = dict(data)
+    longitude = values.pop("source_longitude")
+    latitude = values.pop("source_latitude")
+    for field, value in values.items():
+        setattr(locked, field, value)
+    locked.map_source = ProviderProfile.MapSource.TENCENT
+    locked.source_longitude = longitude
+    locked.source_latitude = latitude
+    locked.service_center = gcj02_to_wgs84(longitude, latitude)
+    locked.save(
+        update_fields=(
+            *values.keys(),
+            "map_source",
+            "source_longitude",
+            "source_latitude",
+            "service_center",
+            "updated_at",
+        )
+    )
+    return locked
 
 
 def _ensure_no_overlap(queryset, *, starts_at, ends_at, field: str) -> None:

@@ -30,7 +30,7 @@ def _transform_longitude(longitude: float, latitude: float) -> float:
 
 
 def gcj02_to_wgs84(longitude: Decimal | float, latitude: Decimal | float) -> Point:
-    """Convert an AMap GCJ-02 coordinate into a WGS84 GeoDjango point."""
+    """Convert a GCJ-02 coordinate into a WGS84 GeoDjango point."""
     gcj_lng = float(longitude)
     gcj_lat = float(latitude)
     if _outside_china(gcj_lng, gcj_lat):

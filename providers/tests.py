@@ -345,6 +345,58 @@ class ProviderSelfManagementTests(TestCase):
         self.user.provider_profile.refresh_from_db()
         self.assertFalse(self.user.provider_profile.is_accepting_orders)
 
+    def test_approved_provider_can_set_service_location(self):
+        provider = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            is_accepting_orders=False,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+
+        response = self.client.put(
+            "/api/v1/providers/me/service-location/",
+            {
+                "service_city_code": "130400",
+                "service_city_name": "邯郸市",
+                "service_location_name": "邯郸美乐城",
+                "service_address": "河北省邯郸市丛台区人民东路456号",
+                "longitude": "114.5389610",
+                "latitude": "36.6256570",
+                "max_service_radius_km": 25,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["data"]["has_service_location"])
+        provider.refresh_from_db()
+        self.assertEqual(provider.service_location_name, "邯郸美乐城")
+        self.assertEqual(provider.map_source, ProviderProfile.MapSource.TENCENT)
+        self.assertEqual(provider.source_longitude, Decimal("114.5389610"))
+        self.assertIsNotNone(provider.service_center)
+
+        workbench = self.client.get("/api/v1/providers/me/workbench/")
+        self.assertEqual(workbench.status_code, 200)
+        self.assertTrue(workbench.json()["data"]["has_service_location"])
+        self.assertEqual(workbench.json()["data"]["service_location_name"], "邯郸美乐城")
+
+    def test_provider_must_set_service_location_before_enabling_orders(self):
+        ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            is_accepting_orders=False,
+        )
+
+        response = self.client.patch(
+            "/api/v1/providers/me/workbench/",
+            {"is_accepting_orders": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("常驻服务地点", str(response.json()))
+
     def test_availability_returns_only_configured_future_slots(self):
         user = User.objects.create_user(phone="13800000006", password="test", nickname="小雨")
         provider = ProviderProfile.objects.create(user=user, status=ProviderProfile.Status.APPROVED)
