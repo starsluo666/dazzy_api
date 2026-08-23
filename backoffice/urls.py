@@ -1,0 +1,117 @@
+from django.urls import path
+
+from .views import (
+    AdminMeView,
+    AdminOverviewView,
+    AdminUserAccountActionView,
+    AdminUserDetailView,
+    AdminUserListView,
+    AdminUserRiskActionView,
+    AuditLogListView,
+    OrganizationListView,
+    OrganizationMemberListView,
+    ProviderAdminActionView,
+    ProviderAdminDetailView,
+    ProviderAdminListView,
+    ProviderCreditAdjustmentView,
+    ProviderOrderAfterSalesActionView,
+    ProviderOrderAfterSalesDetailView,
+    ProviderOrderAfterSalesListView,
+    ProviderOrderAdminDetailView,
+    ProviderOrderAdminListView,
+    ProviderOrderEvidenceView,
+    ProviderOrderSupportNoteView,
+    ProviderApplicationDetailView,
+    ProviderApplicationListView,
+    ProviderApplicationReviewView,
+)
+
+urlpatterns = [
+    path("me/", AdminMeView.as_view(), name="backoffice-me"),
+    path("overview/", AdminOverviewView.as_view(), name="backoffice-overview"),
+    path("users/", AdminUserListView.as_view(), name="backoffice-users"),
+    path(
+        "users/<uuid:public_id>/",
+        AdminUserDetailView.as_view(),
+        name="backoffice-user-detail",
+    ),
+    path(
+        "users/<uuid:public_id>/account-action/",
+        AdminUserAccountActionView.as_view(),
+        name="backoffice-user-account-action",
+    ),
+    path(
+        "users/<uuid:public_id>/risk-action/",
+        AdminUserRiskActionView.as_view(),
+        name="backoffice-user-risk-action",
+    ),
+    path("providers/", ProviderAdminListView.as_view(), name="backoffice-providers"),
+    path(
+        "providers/<int:profile_id>/",
+        ProviderAdminDetailView.as_view(),
+        name="backoffice-provider-detail",
+    ),
+    path(
+        "providers/<int:profile_id>/action/",
+        ProviderAdminActionView.as_view(),
+        name="backoffice-provider-action",
+    ),
+    path(
+        "providers/<int:profile_id>/credit-adjustment/",
+        ProviderCreditAdjustmentView.as_view(),
+        name="backoffice-provider-credit-adjustment",
+    ),
+    path(
+        "provider-applications/",
+        ProviderApplicationListView.as_view(),
+        name="backoffice-provider-applications",
+    ),
+    path(
+        "provider-applications/<int:profile_id>/",
+        ProviderApplicationDetailView.as_view(),
+        name="backoffice-provider-application-detail",
+    ),
+    path(
+        "provider-applications/<int:profile_id>/review/",
+        ProviderApplicationReviewView.as_view(),
+        name="backoffice-provider-application-review",
+    ),
+    path(
+        "provider-orders/",
+        ProviderOrderAdminListView.as_view(),
+        name="backoffice-provider-orders",
+    ),
+    path(
+        "provider-orders/<str:order_no>/",
+        ProviderOrderAdminDetailView.as_view(),
+        name="backoffice-provider-order-detail",
+    ),
+    path(
+        "provider-orders/<str:order_no>/evidence/",
+        ProviderOrderEvidenceView.as_view(),
+        name="backoffice-provider-order-evidence",
+    ),
+    path(
+        "provider-orders/<str:order_no>/support-notes/",
+        ProviderOrderSupportNoteView.as_view(),
+        name="backoffice-provider-order-support-note",
+    ),
+    path(
+        "order-after-sales/",
+        ProviderOrderAfterSalesListView.as_view(),
+        name="backoffice-provider-order-after-sales",
+    ),
+    path(
+        "order-after-sales/<str:case_no>/",
+        ProviderOrderAfterSalesDetailView.as_view(),
+        name="backoffice-provider-order-after-sales-detail",
+    ),
+    path(
+        "order-after-sales/<str:case_no>/action/",
+        ProviderOrderAfterSalesActionView.as_view(),
+        name="backoffice-provider-order-after-sales-action",
+    ),
+    path("organizations/", OrganizationListView.as_view(), name="backoffice-organizations"),
+    path("members/", OrganizationMemberListView.as_view(), name="backoffice-members"),
+    path("audit-logs/", AuditLogListView.as_view(), name="backoffice-audit-logs"),
+]

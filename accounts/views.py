@@ -145,12 +145,13 @@ class CurrentUserOverviewView(APIView):
                         ProviderOrder.Status.PENDING_ACCEPTANCE,
                         ProviderOrder.Status.PENDING_SUPPORT,
                         ProviderOrder.Status.PENDING_SERVICE,
-                        ProviderOrder.Status.DEPARTED,
                     ),
                     "in_service_count": total(
+                        ProviderOrder.Status.DEPARTED,
                         ProviderOrder.Status.IN_SERVICE,
                         ProviderOrder.Status.PENDING_CONFIRMATION,
                     ),
+                    "pending_review_count": total(ProviderOrder.Status.PENDING_REVIEW),
                     "after_sales_count": total(
                         ProviderOrder.Status.AFTER_SALES,
                         ProviderOrder.Status.REFUNDED,

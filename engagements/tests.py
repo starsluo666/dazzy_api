@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from activities.models import Activity, ActivityCategory
-from providers.models import ProviderProfile
+from providers.models import ProviderProfile, ProviderService, ServiceCategory
 
 from .models import BrowsingHistory, ProviderFavorite
 
@@ -18,6 +18,13 @@ class EngagementApiTests(TestCase):
         provider_user = User.objects.create_user(phone="13900000102", nickname="收藏达人")
         self.provider = ProviderProfile.objects.create(
             user=provider_user, status=ProviderProfile.Status.APPROVED, service_city_name="邯郸市"
+        )
+        category = ServiceCategory.objects.create(name="收藏测试服务", slug="favorite-service")
+        ProviderService.objects.create(
+            provider=self.provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=12800,
         )
         self.client.force_login(self.user)
 

@@ -10,7 +10,9 @@ def public_providers():
             status=ProviderProfile.Status.APPROVED,
             user__is_active=True,
             user__account_status="active",
+            services__is_active=True,
         )
-        .select_related("user")
+        .select_related("user", "lifestyle_photo")
         .prefetch_related(Prefetch("services", queryset=active_services))
+        .distinct()
     )

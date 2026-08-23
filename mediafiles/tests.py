@@ -8,6 +8,7 @@ from PIL import Image
 from accounts.models import User
 
 from .models import MediaAsset
+from .services import upload_private_stream
 
 
 class MediaAssetTests(TestCase):
@@ -16,6 +17,23 @@ class MediaAssetTests(TestCase):
         output = BytesIO()
         Image.new("RGB", (1280, 720), "#18c7c6").save(output, format="WEBP")
         return output.getvalue()
+
+    @patch("mediafiles.services._cos_client")
+    def test_private_upload_forces_private_object_acl(self, cos_client):
+        cos_client.return_value.put_object.return_value = {"ETag": '"private-etag"'}
+
+        etag = upload_private_stream(
+            body=BytesIO(b"private evidence"),
+            object_key="private/order-evidence/test.webp",
+            content_type="image/webp",
+        )
+
+        self.assertEqual(etag, "private-etag")
+        self.assertEqual(cos_client.return_value.put_object.call_args.kwargs["ACL"], "private")
+        self.assertEqual(
+            cos_client.return_value.put_object.call_args.kwargs["CacheControl"],
+            "private, no-store",
+        )
 
     def test_private_identity_asset(self):
         user = User.objects.create_user(phone="13900000000")
@@ -54,6 +72,46 @@ class MediaAssetTests(TestCase):
         self.assertEqual(asset.owner, user)
         self.assertEqual(asset.status, MediaAsset.Status.UPLOADED)
         self.assertEqual(asset.category, MediaAsset.Category.ACTIVITY_COVER)
+        upload_stream.assert_called_once()
+
+    @patch("mediafiles.views.build_media_url", return_value="https://media.test/lifestyle.webp")
+    @patch("mediafiles.views.upload_public_stream", return_value="lifestyle-etag")
+    def test_authenticated_user_can_upload_provider_lifestyle_photo(
+        self, upload_stream, _build_url
+    ):
+        user = User.objects.create_user(phone="13900000005")
+        self.client.force_login(user)
+        image = SimpleUploadedFile("lifestyle.webp", self.valid_webp(), content_type="image/webp")
+
+        response = self.client.post(
+            "/api/v1/media/provider-lifestyle-photos/", {"file": image}
+        )
+
+        self.assertEqual(response.status_code, 201)
+        asset = MediaAsset.objects.get(pk=response.json()["data"]["id"])
+        self.assertEqual(asset.owner, user)
+        self.assertEqual(asset.category, MediaAsset.Category.PROVIDER_PHOTO)
+        self.assertEqual(asset.status, MediaAsset.Status.UPLOADED)
+        upload_stream.assert_called_once()
+
+    @patch("mediafiles.views.build_media_url", return_value="https://media.test/evidence.webp")
+    @patch("mediafiles.views.upload_private_stream", return_value="evidence-etag")
+    def test_authenticated_user_can_upload_private_order_evidence(
+        self, upload_stream, _build_url
+    ):
+        user = User.objects.create_user(phone="13900000006")
+        self.client.force_login(user)
+        image = SimpleUploadedFile("arrival.webp", self.valid_webp(), content_type="image/webp")
+
+        response = self.client.post("/api/v1/media/order-evidence/", {"file": image})
+
+        self.assertEqual(response.status_code, 201)
+        asset = MediaAsset.objects.get(pk=response.json()["data"]["id"])
+        self.assertEqual(asset.owner, user)
+        self.assertEqual(asset.scope, MediaAsset.Scope.PRIVATE)
+        self.assertEqual(asset.category, MediaAsset.Category.ORDER_EVIDENCE)
+        self.assertEqual(asset.status, MediaAsset.Status.UPLOADED)
+        self.assertIn("private/order-evidence", asset.object_key)
         upload_stream.assert_called_once()
 
     @patch("mediafiles.views.delete_public_object")

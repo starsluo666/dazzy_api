@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from .models import ProviderProfile, ProviderService, ProviderWeeklyAvailability, ServiceCategory
+from .models import (
+    ProviderDateAvailability,
+    ProviderDateClosure,
+    ProviderProfile,
+    ProviderService,
+    ProviderWeeklyAvailability,
+    ServiceCategory,
+)
 
 
 @admin.register(ServiceCategory)
@@ -29,10 +36,11 @@ class ProviderProfileAdmin(admin.ModelAdmin):
         "max_service_radius_km",
         "rating",
         "credit_score",
+        "submitted_at",
     )
     list_filter = ("status", "service_city_code")
     search_fields = ("user__phone", "user__nickname", "service_city_name")
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("submitted_at", "agreement_accepted_at", "created_at", "updated_at")
     inlines = (ProviderServiceInline, ProviderWeeklyAvailabilityInline)
 
 
@@ -48,3 +56,7 @@ class ProviderWeeklyAvailabilityAdmin(admin.ModelAdmin):
     list_display = ("provider", "weekday", "starts_at", "ends_at", "is_active")
     list_filter = ("weekday", "is_active")
     search_fields = ("provider__user__phone", "provider__user__nickname")
+
+
+admin.site.register(ProviderDateAvailability)
+admin.site.register(ProviderDateClosure)

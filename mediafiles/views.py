@@ -13,7 +13,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import MediaAsset
-from .services import build_home_card_assets, build_media_url, delete_public_object, upload_public_stream
+from .services import (
+    build_home_card_assets,
+    build_media_url,
+    delete_public_object,
+    upload_private_stream,
+    upload_public_stream,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -36,7 +42,12 @@ class PublicImageUploadView(APIView):
     max_size = 10 * 1024 * 1024
     folder = "images"
     category = MediaAsset.Category.OTHER
+    scope = MediaAsset.Scope.PUBLIC
+    prefix_setting = "COS_PUBLIC_PREFIX"
     field_label = "图片"
+
+    def upload_stream(self, *, body, object_key: str, content_type: str) -> str:
+        return upload_public_stream(body=body, object_key=object_key, content_type=content_type)
 
     def validate_image_content(self, uploaded) -> None:
         try:
@@ -68,14 +79,14 @@ class PublicImageUploadView(APIView):
             raise ValidationError({"file": f"{self.field_label}大小不能超过{size_mb}MB。"})
         self.validate_image_content(uploaded)
         object_key = str(
-            PurePosixPath(settings.COS_PUBLIC_PREFIX)
+            PurePosixPath(getattr(settings, self.prefix_setting))
             / self.folder
             / str(request.user.public_id)
             / f"{uuid4().hex}{extension}"
         )
         asset = MediaAsset.objects.create(
             owner=request.user,
-            scope=MediaAsset.Scope.PUBLIC,
+            scope=self.scope,
             category=self.category,
             object_key=object_key,
             original_filename=uploaded.name,
@@ -83,7 +94,7 @@ class PublicImageUploadView(APIView):
             size_bytes=uploaded.size,
         )
         try:
-            asset.etag = upload_public_stream(
+            asset.etag = self.upload_stream(
                 body=uploaded, object_key=object_key, content_type=uploaded.content_type
             )
         except Exception:
@@ -105,6 +116,44 @@ class ActivityCoverUploadView(PublicImageUploadView):
         asset = self.create_asset(request)
         return Response(
             {"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key)}},
+            status=201,
+        )
+
+
+class ProviderLifestylePhotoUploadView(PublicImageUploadView):
+    max_size = 8 * 1024 * 1024
+    folder = "provider-photos"
+    category = MediaAsset.Category.PROVIDER_PHOTO
+    field_label = "生活照"
+
+    def post(self, request):
+        asset = self.create_asset(request)
+        return Response(
+            {"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key)}},
+            status=201,
+        )
+
+
+class OrderEvidenceUploadView(PublicImageUploadView):
+    max_size = 8 * 1024 * 1024
+    folder = "order-evidence"
+    category = MediaAsset.Category.ORDER_EVIDENCE
+    scope = MediaAsset.Scope.PRIVATE
+    prefix_setting = "COS_PRIVATE_PREFIX"
+    field_label = "履约照片"
+
+    def upload_stream(self, *, body, object_key: str, content_type: str) -> str:
+        return upload_private_stream(body=body, object_key=object_key, content_type=content_type)
+
+    def post(self, request):
+        asset = self.create_asset(request)
+        return Response(
+            {
+                "data": {
+                    "id": str(asset.pk),
+                    "url": build_media_url(asset.object_key, private=True),
+                }
+            },
             status=201,
         )
 

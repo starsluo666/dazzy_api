@@ -9,7 +9,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
@@ -18,78 +17,218 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name='ServiceCategory',
+            name="ServiceCategory",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(max_length=30, verbose_name='名称')),
-                ('slug', models.SlugField(max_length=40, unique=True, verbose_name='标识')),
-                ('icon_object_key', models.CharField(blank=True, max_length=512, verbose_name='图标对象键')),
-                ('city_codes', models.JSONField(blank=True, default=list, verbose_name='展示城市编码')),
-                ('sort_order', models.PositiveIntegerField(default=0, verbose_name='排序')),
-                ('is_active', models.BooleanField(default=True, verbose_name='启用')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                ("name", models.CharField(max_length=30, verbose_name="名称")),
+                ("slug", models.SlugField(max_length=40, unique=True, verbose_name="标识")),
+                (
+                    "icon_object_key",
+                    models.CharField(blank=True, max_length=512, verbose_name="图标对象键"),
+                ),
+                (
+                    "city_codes",
+                    models.JSONField(blank=True, default=list, verbose_name="展示城市编码"),
+                ),
+                ("sort_order", models.PositiveIntegerField(default=0, verbose_name="排序")),
+                ("is_active", models.BooleanField(default=True, verbose_name="启用")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'verbose_name': '达人服务分类',
-                'verbose_name_plural': '达人服务分类',
-                'db_table': 'provider_service_category',
-                'ordering': ('sort_order', 'id'),
+                "verbose_name": "达人服务分类",
+                "verbose_name_plural": "达人服务分类",
+                "db_table": "provider_service_category",
+                "ordering": ("sort_order", "id"),
             },
         ),
         migrations.CreateModel(
-            name='ProviderProfile',
+            name="ProviderProfile",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('status', models.CharField(choices=[('draft', '草稿'), ('pending', '待审核'), ('approved', '已通过'), ('rejected', '已驳回'), ('suspended', '已暂停')], default='draft', max_length=16, verbose_name='审核状态')),
-                ('bio', models.TextField(blank=True, verbose_name='个人简介')),
-                ('service_city_code', models.CharField(blank=True, max_length=20, verbose_name='服务城市编码')),
-                ('service_city_name', models.CharField(blank=True, max_length=50, verbose_name='服务城市')),
-                ('map_source', models.CharField(choices=[('amap', '高德地图')], default='amap', max_length=16, verbose_name='地图来源')),
-                ('source_longitude', models.DecimalField(blank=True, decimal_places=7, max_digits=10, null=True, verbose_name='原始GCJ-02经度')),
-                ('source_latitude', models.DecimalField(blank=True, decimal_places=7, max_digits=10, null=True, verbose_name='原始GCJ-02纬度')),
-                ('service_center', django.contrib.gis.db.models.fields.PointField(blank=True, geography=True, null=True, srid=4326, verbose_name='服务中心点（WGS84）')),
-                ('max_service_radius_km', models.PositiveSmallIntegerField(default=10, verbose_name='最大服务半径（公里）')),
-                ('rating', models.DecimalField(decimal_places=2, default=Decimal('0.00'), max_digits=3, validators=[django.core.validators.MinValueValidator(Decimal('0.00'))], verbose_name='评分')),
-                ('service_count', models.PositiveIntegerField(default=0, verbose_name='服务次数')),
-                ('order_count', models.PositiveIntegerField(default=0, verbose_name='接单量')),
-                ('credit_score', models.PositiveSmallIntegerField(default=100, verbose_name='信用分')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('user', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='provider_profile', to=settings.AUTH_USER_MODEL, verbose_name='用户')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("draft", "草稿"),
+                            ("pending", "待审核"),
+                            ("approved", "已通过"),
+                            ("rejected", "已驳回"),
+                            ("suspended", "已暂停"),
+                        ],
+                        default="draft",
+                        max_length=16,
+                        verbose_name="审核状态",
+                    ),
+                ),
+                ("bio", models.TextField(blank=True, verbose_name="个人简介")),
+                (
+                    "service_city_code",
+                    models.CharField(blank=True, max_length=20, verbose_name="服务城市编码"),
+                ),
+                (
+                    "service_city_name",
+                    models.CharField(blank=True, max_length=50, verbose_name="服务城市"),
+                ),
+                (
+                    "map_source",
+                    models.CharField(
+                        choices=[("amap", "高德地图")],
+                        default="amap",
+                        max_length=16,
+                        verbose_name="地图来源",
+                    ),
+                ),
+                (
+                    "source_longitude",
+                    models.DecimalField(
+                        blank=True,
+                        decimal_places=7,
+                        max_digits=10,
+                        null=True,
+                        verbose_name="原始GCJ-02经度",
+                    ),
+                ),
+                (
+                    "source_latitude",
+                    models.DecimalField(
+                        blank=True,
+                        decimal_places=7,
+                        max_digits=10,
+                        null=True,
+                        verbose_name="原始GCJ-02纬度",
+                    ),
+                ),
+                (
+                    "service_center",
+                    django.contrib.gis.db.models.fields.PointField(
+                        blank=True,
+                        geography=True,
+                        null=True,
+                        srid=4326,
+                        verbose_name="服务中心点（WGS84）",
+                    ),
+                ),
+                (
+                    "max_service_radius_km",
+                    models.PositiveSmallIntegerField(
+                        default=10, verbose_name="最大服务半径（公里）"
+                    ),
+                ),
+                (
+                    "rating",
+                    models.DecimalField(
+                        decimal_places=2,
+                        default=Decimal("0.00"),
+                        max_digits=3,
+                        validators=[django.core.validators.MinValueValidator(Decimal("0.00"))],
+                        verbose_name="评分",
+                    ),
+                ),
+                ("service_count", models.PositiveIntegerField(default=0, verbose_name="服务次数")),
+                ("order_count", models.PositiveIntegerField(default=0, verbose_name="接单量")),
+                (
+                    "credit_score",
+                    models.PositiveSmallIntegerField(default=100, verbose_name="信用分"),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "user",
+                    models.OneToOneField(
+                        on_delete=django.db.models.deletion.PROTECT,
+                        related_name="provider_profile",
+                        to=settings.AUTH_USER_MODEL,
+                        verbose_name="用户",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': '达人资料',
-                'verbose_name_plural': '达人资料',
-                'db_table': 'provider_profile',
+                "verbose_name": "达人资料",
+                "verbose_name_plural": "达人资料",
+                "db_table": "provider_profile",
             },
         ),
         migrations.CreateModel(
-            name='ProviderService',
+            name="ProviderService",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('billing_type', models.CharField(choices=[('hourly', '按小时'), ('per_session', '按次')], max_length=16, verbose_name='计费方式')),
-                ('price_amount', models.PositiveBigIntegerField(validators=[django.core.validators.MinValueValidator(1)], verbose_name='价格（分）')),
-                ('estimated_duration_minutes', models.PositiveIntegerField(blank=True, null=True, verbose_name='预计服务时长（分钟）')),
-                ('description', models.TextField(blank=True, verbose_name='服务说明')),
-                ('is_active', models.BooleanField(default=True, verbose_name='启用')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('provider', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='services', to='providers.providerprofile', verbose_name='达人')),
-                ('category', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='provider_services', to='providers.servicecategory', verbose_name='分类')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                (
+                    "billing_type",
+                    models.CharField(
+                        choices=[("hourly", "按小时"), ("per_session", "按次")],
+                        max_length=16,
+                        verbose_name="计费方式",
+                    ),
+                ),
+                (
+                    "price_amount",
+                    models.PositiveBigIntegerField(
+                        validators=[django.core.validators.MinValueValidator(1)],
+                        verbose_name="价格（分）",
+                    ),
+                ),
+                (
+                    "estimated_duration_minutes",
+                    models.PositiveIntegerField(
+                        blank=True, null=True, verbose_name="预计服务时长（分钟）"
+                    ),
+                ),
+                ("description", models.TextField(blank=True, verbose_name="服务说明")),
+                ("is_active", models.BooleanField(default=True, verbose_name="启用")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "provider",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="services",
+                        to="providers.providerprofile",
+                        verbose_name="达人",
+                    ),
+                ),
+                (
+                    "category",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.PROTECT,
+                        related_name="provider_services",
+                        to="providers.servicecategory",
+                        verbose_name="分类",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': '达人服务',
-                'verbose_name_plural': '达人服务',
-                'db_table': 'provider_service',
+                "verbose_name": "达人服务",
+                "verbose_name_plural": "达人服务",
+                "db_table": "provider_service",
             },
         ),
         migrations.AddIndex(
-            model_name='providerprofile',
-            index=models.Index(fields=['status', 'service_city_code'], name='provider_pr_status_8585f9_idx'),
+            model_name="providerprofile",
+            index=models.Index(
+                fields=["status", "service_city_code"], name="provider_pr_status_8585f9_idx"
+            ),
         ),
         migrations.AddConstraint(
-            model_name='providerservice',
-            constraint=models.UniqueConstraint(fields=('provider', 'category', 'billing_type'), name='uniq_provider_category_billing'),
+            model_name="providerservice",
+            constraint=models.UniqueConstraint(
+                fields=("provider", "category", "billing_type"),
+                name="uniq_provider_category_billing",
+            ),
         ),
     ]

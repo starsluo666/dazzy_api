@@ -4,15 +4,19 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('providers', '0002_providerweeklyavailability'),
+        ("providers", "0002_providerweeklyavailability"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='providerprofile',
-            name='map_source',
-            field=models.CharField(choices=[('amap', '高德地图'), ('tencent', '腾讯地图')], default='amap', max_length=16, verbose_name='地图来源'),
+            model_name="providerprofile",
+            name="map_source",
+            field=models.CharField(
+                choices=[("amap", "高德地图"), ("tencent", "腾讯地图")],
+                default="amap",
+                max_length=16,
+                verbose_name="地图来源",
+            ),
         ),
     ]

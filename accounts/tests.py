@@ -50,6 +50,7 @@ class AuthenticationApiTests(APITestCase):
         overview = self.client.get("/api/v1/users/me/overview/")
         self.assertEqual(overview.status_code, 200)
         self.assertEqual(overview.data["data"]["order_count"], 0)
+        self.assertEqual(overview.data["data"]["pending_review_count"], 0)
         self.assertIsNone(overview.data["data"]["balance_amount"])
 
     def test_password_and_sms_login(self):

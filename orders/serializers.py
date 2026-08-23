@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from rest_framework import serializers
 
 from mediafiles.services import build_media_url
@@ -28,6 +30,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
                 id=attrs["service_id"],
                 is_active=True,
                 provider__status=ProviderProfile.Status.APPROVED,
+                provider__is_accepting_orders=True,
             )
         except ProviderService.DoesNotExist as exc:
             raise serializers.ValidationError({"service_id": "服务不存在或不可预约。"}) from exc
@@ -63,6 +66,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source="service_name_snapshot")
     status_label = serializers.CharField(source="get_status_display")
     contact_phone_masked = serializers.SerializerMethodField()
+    arrival_photo_url = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrder
@@ -73,6 +77,8 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "contact_name", "contact_phone_masked", "note", "service_fee_amount",
             "transport_fee_amount", "other_fee_amount", "discount_amount", "payable_amount",
             "pricing_snapshot", "payment_expires_at", "paid_at", "created_at",
+            "accepted_at", "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
+            "service_started_at", "completion_submitted_at", "customer_confirmed_at",
         )
 
     def get_provider_avatar_url(self, obj):
@@ -81,6 +87,48 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     def get_contact_phone_masked(self, obj):
         phone = obj.contact_phone
         return f"{phone[:3]}****{phone[-4:]}" if len(phone) == 11 else phone
+
+    def get_arrival_photo_url(self, obj):
+        if not obj.arrival_photo_id:
+            return None
+        return build_media_url(obj.arrival_photo.object_key, private=True)
+
+
+class ProviderOrderArrivalEvidenceInputSerializer(serializers.Serializer):
+    photo_id = serializers.UUIDField()
+    longitude = serializers.DecimalField(
+        max_digits=10, decimal_places=7, min_value=-180, max_value=180
+    )
+    latitude = serializers.DecimalField(
+        max_digits=10, decimal_places=7, min_value=-90, max_value=90
+    )
+    accuracy_m = serializers.DecimalField(
+        required=False, allow_null=True, max_digits=8, decimal_places=2, min_value=0
+    )
+
+
+class ProviderOrderManageQuerySerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        required=False,
+        allow_blank=True,
+        choices=ProviderOrder.Status.choices,
+    )
+
+
+class ProviderOrderManageSerializer(ProviderOrderSerializer):
+    customer_name = serializers.CharField(source="customer.nickname")
+    acceptance_expires_at = serializers.SerializerMethodField()
+
+    class Meta(ProviderOrderSerializer.Meta):
+        fields = ProviderOrderSerializer.Meta.fields + (
+            "customer_name",
+            "acceptance_expires_at",
+        )
+
+    def get_acceptance_expires_at(self, obj):
+        if not obj.paid_at:
+            return None
+        return obj.paid_at + timedelta(minutes=30)
 
 
 def quote_payload(validated_data):

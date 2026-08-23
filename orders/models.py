@@ -69,6 +69,30 @@ class ProviderOrder(models.Model):
     )
     payment_expires_at = models.DateTimeField("支付及档期锁定截止时间")
     paid_at = models.DateTimeField("支付时间", null=True, blank=True)
+    accepted_at = models.DateTimeField("达人接单时间", null=True, blank=True)
+    departed_at = models.DateTimeField("达人出发时间", null=True, blank=True)
+    arrival_photo = models.OneToOneField(
+        "mediafiles.MediaAsset",
+        on_delete=models.PROTECT,
+        related_name="provider_order_arrival_evidence",
+        null=True,
+        blank=True,
+        limit_choices_to={"category": "order_evidence"},
+        verbose_name="集合地点照片",
+    )
+    arrival_photo_uploaded_at = models.DateTimeField("集合照绑定时间", null=True, blank=True)
+    arrival_longitude = models.DecimalField(
+        "集合照GCJ-02经度", max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    arrival_latitude = models.DecimalField(
+        "集合照GCJ-02纬度", max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    arrival_location_accuracy_m = models.DecimalField(
+        "集合照定位精度（米）", max_digits=8, decimal_places=2, null=True, blank=True
+    )
+    service_started_at = models.DateTimeField("服务开始时间", null=True, blank=True)
+    completion_submitted_at = models.DateTimeField("达人提交完成时间", null=True, blank=True)
+    customer_confirmed_at = models.DateTimeField("用户确认完成时间", null=True, blank=True)
     cancelled_at = models.DateTimeField("取消时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -79,6 +103,12 @@ class ProviderOrder(models.Model):
             models.Index(fields=("customer", "status", "-created_at")),
             models.Index(fields=("provider", "starts_at", "ends_at")),
             models.Index(fields=("status", "payment_expires_at")),
+            models.Index(fields=("created_at",), name="provider_order_created_idx"),
+            models.Index(
+                fields=("paid_at",),
+                condition=Q(paid_at__isnull=False),
+                name="provider_order_paid_idx",
+            ),
         ]
         constraints = [
             models.CheckConstraint(condition=Q(ends_at__gt=models.F("starts_at")), name="order_end_after_start"),

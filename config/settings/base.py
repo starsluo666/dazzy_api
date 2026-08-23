@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "engagements",
     "home",
     "health",
+    "backoffice",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -110,6 +111,7 @@ COS_PUBLIC_PREFIX = os.getenv("COS_PUBLIC_PREFIX", "dazzy-test/public/")
 COS_PRIVATE_PREFIX = os.getenv("COS_PRIVATE_PREFIX", "dazzy-test/private/")
 COS_SIGNED_PUBLIC_URL_TTL = int(os.getenv("COS_SIGNED_PUBLIC_URL_TTL", "3600"))
 COS_SIGNED_PRIVATE_URL_TTL = int(os.getenv("COS_SIGNED_PRIVATE_URL_TTL", "300"))
+PROVIDER_ORDER_AUTO_CONFIRM_DAYS = int(os.getenv("PROVIDER_ORDER_AUTO_CONFIRM_DAYS", "3"))
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [

@@ -60,5 +60,17 @@ def upload_public_stream(*, body, object_key: str, content_type: str) -> str:
     return response.get("ETag", "").strip('"')
 
 
+def upload_private_stream(*, body, object_key: str, content_type: str) -> str:
+    response = _cos_client().put_object(
+        Bucket=settings.COS_BUCKET,
+        Key=object_key,
+        Body=body,
+        ContentType=content_type,
+        CacheControl="private, no-store",
+        ACL="private",
+    )
+    return response.get("ETag", "").strip('"')
+
+
 def delete_public_object(*, object_key: str) -> None:
     _cos_client().delete_object(Bucket=settings.COS_BUCKET, Key=object_key)

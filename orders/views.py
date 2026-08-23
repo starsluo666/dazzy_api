@@ -5,19 +5,35 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from mediafiles.models import MediaAsset
 from providers.models import ProviderProfile
 
 from .models import ProviderOrder
-from .serializers import ProviderOrderInputSerializer, ProviderOrderSerializer, quote_payload
+from .serializers import (
+    ProviderOrderInputSerializer,
+    ProviderOrderArrivalEvidenceInputSerializer,
+    ProviderOrderManageQuerySerializer,
+    ProviderOrderManageSerializer,
+    ProviderOrderSerializer,
+    quote_payload,
+)
 from .services import PAYMENT_LOCK_MINUTES, ensure_slot_available, expire_pending_orders
 
 
 def make_order_no():
     return f"DZY{timezone.now():%Y%m%d%H%M%S%f}"
+
+
+def current_approved_provider(request):
+    provider = get_object_or_404(ProviderProfile, user=request.user)
+    if provider.status != ProviderProfile.Status.APPROVED:
+        raise PermissionDenied("仅审核通过的达人可以管理订单。")
+    return provider
 
 
 class ProviderOrderPreviewView(APIView):
@@ -36,7 +52,7 @@ class ProviderOrderListCreateView(APIView):
         customer_orders = ProviderOrder.objects.filter(customer=request.user)
         expire_pending_orders(customer_orders)
         orders = customer_orders.select_related(
-            "provider__user", "service__category"
+            "provider__user", "service__category", "arrival_photo"
         )[:50]
         return Response({"data": {"items": ProviderOrderSerializer(orders, many=True).data}})
 
@@ -76,7 +92,9 @@ class ProviderOrderDetailView(APIView):
     def get_object(self, request, order_no):
         expire_pending_orders(ProviderOrder.objects.filter(customer=request.user, order_no=order_no))
         return get_object_or_404(
-            ProviderOrder.objects.select_related("provider__user", "service__category"),
+            ProviderOrder.objects.select_related(
+                "provider__user", "service__category", "arrival_photo"
+            ),
             order_no=order_no, customer=request.user,
         )
 
@@ -116,4 +134,158 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
         order.status = ProviderOrder.Status.PENDING_ACCEPTANCE
         order.paid_at = timezone.now()
         order.save(update_fields=("status", "paid_at", "updated_at"))
+        return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class CurrentProviderOrderListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        provider = current_approved_provider(request)
+        query = ProviderOrderManageQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        orders = ProviderOrder.objects.filter(
+            provider=provider,
+            paid_at__isnull=False,
+        ).select_related("customer", "provider__user", "service__category", "arrival_photo")
+        if order_status := query.validated_data.get("status"):
+            orders = orders.filter(status=order_status)
+        return Response(
+            {"data": {"items": ProviderOrderManageSerializer(orders[:50], many=True).data}}
+        )
+
+
+class CurrentProviderOrderDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, request, order_no, *, for_update=False):
+        provider = current_approved_provider(request)
+        queryset = ProviderOrder.objects
+        if for_update:
+            queryset = queryset.select_for_update(of=("self",))
+        return get_object_or_404(
+            queryset.select_related(
+                "customer", "provider__user", "service__category", "arrival_photo"
+            ),
+            provider=provider,
+            paid_at__isnull=False,
+            order_no=order_no,
+        )
+
+    def get(self, request, order_no):
+        order = self.get_object(request, order_no)
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status == ProviderOrder.Status.PENDING_SERVICE and order.accepted_at:
+            return Response({"data": ProviderOrderManageSerializer(order).data})
+        if order.status != ProviderOrder.Status.PENDING_ACCEPTANCE:
+            raise ValidationError({"status": "订单不在待接单状态。"})
+        if not order.paid_at or order.paid_at + timedelta(minutes=30) <= timezone.now():
+            raise ValidationError({"status": "订单已超过30分钟接单时限，请联系客服。"})
+        order.status = ProviderOrder.Status.PENDING_SERVICE
+        order.accepted_at = timezone.now()
+        order.save(update_fields=("status", "accepted_at", "updated_at"))
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status == ProviderOrder.Status.DEPARTED and order.departed_at:
+            return Response({"data": ProviderOrderManageSerializer(order).data})
+        if order.status != ProviderOrder.Status.PENDING_SERVICE:
+            raise ValidationError({"status": "订单不在待服务状态。"})
+        order.status = ProviderOrder.Status.DEPARTED
+        order.departed_at = timezone.now()
+        order.save(update_fields=("status", "departed_at", "updated_at"))
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class CurrentProviderOrderArrivalEvidenceView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status != ProviderOrder.Status.DEPARTED:
+            raise ValidationError({"status": "仅已出发订单可上传集合照。"})
+        serializer = ProviderOrderArrivalEvidenceInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            photo = MediaAsset.objects.get(
+                pk=data["photo_id"],
+                owner=request.user,
+                category=MediaAsset.Category.ORDER_EVIDENCE,
+                status=MediaAsset.Status.UPLOADED,
+            )
+        except MediaAsset.DoesNotExist as exc:
+            raise ValidationError({"photo_id": "集合照不存在或不可用。"}) from exc
+        if ProviderOrder.objects.exclude(pk=order.pk).filter(arrival_photo=photo).exists():
+            raise ValidationError({"photo_id": "该照片已绑定其他订单。"})
+        order.arrival_photo = photo
+        order.arrival_photo_uploaded_at = timezone.now()
+        order.arrival_longitude = data["longitude"]
+        order.arrival_latitude = data["latitude"]
+        order.arrival_location_accuracy_m = data.get("accuracy_m")
+        order.save(
+            update_fields=(
+                "arrival_photo", "arrival_photo_uploaded_at", "arrival_longitude",
+                "arrival_latitude", "arrival_location_accuracy_m", "updated_at",
+            )
+        )
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status == ProviderOrder.Status.IN_SERVICE and order.service_started_at:
+            return Response({"data": ProviderOrderManageSerializer(order).data})
+        if order.status != ProviderOrder.Status.DEPARTED:
+            raise ValidationError({"status": "订单不在已出发状态。"})
+        if not order.arrival_photo_id:
+            raise ValidationError({"arrival_photo": "请先上传集合地点照片。"})
+        order.status = ProviderOrder.Status.IN_SERVICE
+        order.service_started_at = timezone.now()
+        order.save(update_fields=("status", "service_started_at", "updated_at"))
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class CurrentProviderOrderCompleteView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status == ProviderOrder.Status.PENDING_CONFIRMATION and order.completion_submitted_at:
+            return Response({"data": ProviderOrderManageSerializer(order).data})
+        if order.status != ProviderOrder.Status.IN_SERVICE:
+            raise ValidationError({"status": "订单不在服务中状态。"})
+        order.status = ProviderOrder.Status.PENDING_CONFIRMATION
+        order.completion_submitted_at = timezone.now()
+        order.save(update_fields=("status", "completion_submitted_at", "updated_at"))
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = get_object_or_404(
+            ProviderOrder.objects.select_related(
+                "provider__user", "service__category", "arrival_photo"
+            ).select_for_update(of=("self",)),
+            order_no=order_no,
+            customer=request.user,
+        )
+        if order.status == ProviderOrder.Status.PENDING_REVIEW and order.customer_confirmed_at:
+            return Response({"data": ProviderOrderSerializer(order).data})
+        if order.status != ProviderOrder.Status.PENDING_CONFIRMATION:
+            raise ValidationError({"status": "订单不在待确认状态。"})
+        order.status = ProviderOrder.Status.PENDING_REVIEW
+        order.customer_confirmed_at = timezone.now()
+        order.save(update_fields=("status", "customer_confirmed_at", "updated_at"))
         return Response({"data": ProviderOrderSerializer(order).data})
