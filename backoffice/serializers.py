@@ -517,6 +517,7 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
     service_city_code = serializers.CharField(source="provider.service_city_code")
     service_city_name = serializers.CharField(source="provider.service_city_name")
     contact_phone_masked = serializers.SerializerMethodField()
+    contact_gender_label = serializers.CharField(source="get_contact_gender_display")
     arrival_photo_available = serializers.SerializerMethodField()
     arrival_location = serializers.SerializerMethodField()
     anomalies = serializers.SerializerMethodField()
@@ -529,7 +530,8 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "public_id", "order_no", "status", "status_label", "customer_public_id",
             "customer_name", "customer_phone_masked", "provider_public_id", "provider_name",
             "provider_phone_masked", "service_name", "service_city_code", "service_city_name",
-            "starts_at", "ends_at", "duration_minutes", "meeting_address", "contact_name",
+            "starts_at", "ends_at", "duration_minutes", "meeting_location_name",
+            "meeting_address", "contact_name", "contact_gender", "contact_gender_label",
             "contact_phone_masked", "note", "unit_price_amount", "service_fee_amount",
             "transport_fee_amount", "other_fee_amount", "discount_amount",
             "payable_amount", "paid_at", "accepted_at",

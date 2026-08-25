@@ -16,6 +16,7 @@ from providers.models import (
     ServiceCategory,
 )
 from locations.tencent import RouteResult
+from locations.models import UserAddress
 
 from .models import ProviderOrder
 
@@ -53,6 +54,18 @@ class ProviderOrderApiTests(TestCase):
             ]
         )
         self.client.force_login(self.customer)
+        self.address = UserAddress.objects.create(
+            user=self.customer,
+            name="邯郸美乐城",
+            address="人民东路456号",
+            city_name="邯郸市",
+            contact_name="张三",
+            contact_gender=UserAddress.ContactGender.MR,
+            contact_phone="13812346688",
+            longitude="114.5060000",
+            latitude="36.6200000",
+            is_default=True,
+        )
         self.route_patcher = patch(
             "orders.serializers.tencent_map.driving_route",
             return_value=RouteResult(distance_km=Decimal("6.80"), duration_minutes=18),
@@ -68,11 +81,7 @@ class ProviderOrderApiTests(TestCase):
             "service_id": self.service.id,
             "starts_at": starts_at.isoformat(),
             "duration_minutes": 120,
-            "meeting_address": "邯郸市丛台区美乐城南门",
-            "longitude": "114.5060000",
-            "latitude": "36.6200000",
-            "contact_name": "张三",
-            "contact_phone": "13812346688",
+            "address_id": self.address.id,
             "note": "请提前联系",
         }
 
@@ -104,6 +113,8 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(create.status_code, 201)
         order_no = create.json()["data"]["order_no"]
         self.assertEqual(create.json()["data"]["status"], ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertEqual(create.json()["data"]["meeting_location_name"], "邯郸美乐城")
+        self.assertEqual(create.json()["data"]["contact_gender_label"], "先生")
 
         conflict = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
@@ -113,6 +124,39 @@ class ProviderOrderApiTests(TestCase):
         paid = self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
         self.assertEqual(paid.status_code, 200)
         self.assertEqual(paid.json()["data"]["status"], ProviderOrder.Status.PENDING_ACCEPTANCE)
+
+    def test_order_uses_owned_address_and_keeps_snapshot(self):
+        create = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        self.assertEqual(create.status_code, 201)
+        order = ProviderOrder.objects.get(order_no=create.json()["data"]["order_no"])
+
+        self.address.contact_name = "修改后联系人"
+        self.address.address = "修改后的详细地址"
+        self.address.save(update_fields=("contact_name", "address", "updated_at"))
+
+        order.refresh_from_db()
+        self.assertEqual(order.contact_name, "张三")
+        self.assertEqual(order.meeting_address, "人民东路456号")
+
+        other_user = User.objects.create_user(phone="13800000103", password="test")
+        other_address = UserAddress.objects.create(
+            user=other_user,
+            name="他人地址",
+            address="测试路1号",
+            contact_name="他人",
+            contact_gender=UserAddress.ContactGender.MS,
+            contact_phone="13912346688",
+            longitude="114.5060000",
+            latitude="36.6200000",
+        )
+        payload = self.payload()
+        payload["address_id"] = other_address.id
+        denied = self.client.post(
+            "/api/v1/provider-orders/preview/", payload, content_type="application/json"
+        )
+        self.assertEqual(denied.status_code, 400)
 
     def test_rejects_invalid_duration_and_distant_date(self):
         payload = self.payload()

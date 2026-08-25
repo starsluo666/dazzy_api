@@ -459,6 +459,23 @@ class AdminUserDetailView(APIView):
             }
             for activity in activities
         ]
+        data["addresses"] = [
+            {
+                "id": address.id,
+                "name": address.name,
+                "address": address.address,
+                "city_name": address.city_name,
+                "contact_name": address.contact_name,
+                "contact_gender": address.contact_gender,
+                "contact_gender_label": address.get_contact_gender_display(),
+                "contact_phone": address.contact_phone,
+                "longitude": address.longitude,
+                "latitude": address.latitude,
+                "is_default": address.is_default,
+                "updated_at": address.updated_at,
+            }
+            for address in user.addresses.all()[:20]
+        ]
         return Response({"data": data})
 
 

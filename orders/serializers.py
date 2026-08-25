@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from mediafiles.services import build_media_url
 from locations.tencent import tencent_map
+from locations.models import UserAddress
 from providers.models import ProviderProfile, ProviderService
 from providers.availability import ensure_booking_within_schedule
 
@@ -15,14 +16,24 @@ class ProviderOrderInputSerializer(serializers.Serializer):
     service_id = serializers.IntegerField(min_value=1)
     starts_at = serializers.DateTimeField()
     duration_minutes = serializers.IntegerField(min_value=30, max_value=480)
-    meeting_address = serializers.CharField(max_length=255)
-    longitude = serializers.DecimalField(max_digits=10, decimal_places=7)
-    latitude = serializers.DecimalField(max_digits=10, decimal_places=7)
-    contact_name = serializers.CharField(max_length=30)
-    contact_phone = serializers.RegexField(r"^1\d{10}$")
+    address_id = serializers.IntegerField(min_value=1)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
     def validate(self, attrs):
+        request = self.context.get("request")
+        if request is None:
+            raise serializers.ValidationError({"address_id": "缺少当前用户信息。"})
+        try:
+            address = UserAddress.objects.get(id=attrs["address_id"], user=request.user)
+        except UserAddress.DoesNotExist as exc:
+            raise serializers.ValidationError({"address_id": "常用地址不存在。"}) from exc
+        if not (
+            address.contact_name.strip()
+            and address.contact_gender in UserAddress.ContactGender.values
+            and address.contact_phone.isdigit()
+            and len(address.contact_phone) == 11
+        ):
+            raise serializers.ValidationError({"address_id": "请先补全该地址的联系人信息。"})
         try:
             service = ProviderService.objects.select_related(
                 "provider__user", "category"
@@ -44,14 +55,22 @@ class ProviderOrderInputSerializer(serializers.Serializer):
         route = tencent_map.driving_route(
             provider.source_longitude,
             provider.source_latitude,
-            attrs["longitude"],
-            attrs["latitude"],
+            address.longitude,
+            address.latitude,
         )
         if route.distance_km > provider.max_service_radius_km:
             raise serializers.ValidationError(
-                {"meeting_address": f"该地点距达人约{route.distance_km}公里，超出{provider.max_service_radius_km}公里服务范围。"}
+                {"address_id": f"该地点距达人约{route.distance_km}公里，超出{provider.max_service_radius_km}公里服务范围。"}
             )
         attrs["service"] = service
+        attrs["address"] = address
+        attrs["meeting_location_name"] = address.name
+        attrs["meeting_address"] = address.address
+        attrs["longitude"] = address.longitude
+        attrs["latitude"] = address.latitude
+        attrs["contact_name"] = address.contact_name
+        attrs["contact_gender"] = address.contact_gender
+        attrs["contact_phone"] = address.contact_phone
         attrs["duration_minutes"] = duration
         attrs["ends_at"] = ends_at
         attrs["route"] = route
@@ -65,6 +84,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     provider_avatar_url = serializers.SerializerMethodField()
     service_name = serializers.CharField(source="service_name_snapshot")
     status_label = serializers.CharField(source="get_status_display")
+    contact_gender_label = serializers.CharField(source="get_contact_gender_display")
     contact_phone_masked = serializers.SerializerMethodField()
     arrival_photo_url = serializers.SerializerMethodField()
 
@@ -73,8 +93,9 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
         fields = (
             "public_id", "order_no", "status", "status_label", "provider_public_id",
             "provider_name", "provider_avatar_url", "service_name", "billing_type_snapshot",
-            "unit_price_amount", "starts_at", "ends_at", "duration_minutes", "meeting_address",
-            "contact_name", "contact_phone_masked", "note", "service_fee_amount",
+            "unit_price_amount", "starts_at", "ends_at", "duration_minutes",
+            "meeting_location_name", "meeting_address", "contact_name", "contact_gender",
+            "contact_gender_label", "contact_phone_masked", "note", "service_fee_amount",
             "transport_fee_amount", "other_fee_amount", "discount_amount", "payable_amount",
             "pricing_snapshot", "payment_expires_at", "paid_at", "created_at",
             "accepted_at", "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
@@ -151,6 +172,7 @@ def quote_payload(validated_data):
         "starts_at": validated_data["starts_at"],
         "ends_at": validated_data["ends_at"],
         "duration_minutes": validated_data["duration_minutes"],
+        "meeting_location_name": validated_data["meeting_location_name"],
         "meeting_address": validated_data["meeting_address"],
         "route_distance_km": validated_data["route"].distance_km,
         "route_duration_minutes": validated_data["route"].duration_minutes,

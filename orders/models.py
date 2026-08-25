@@ -26,6 +26,10 @@ class ProviderOrder(models.Model):
         HOURLY = "hourly", "按小时"
         PER_SESSION = "per_session", "按次"
 
+    class ContactGender(models.TextChoices):
+        MR = "mr", "先生"
+        MS = "ms", "女士"
+
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     order_no = models.CharField("订单号", max_length=32, unique=True)
     customer = models.ForeignKey(
@@ -45,6 +49,9 @@ class ProviderOrder(models.Model):
     ends_at = models.DateTimeField("服务结束时间")
     duration_minutes = models.PositiveIntegerField("服务时长（分钟）")
     map_source = models.CharField("地图来源", max_length=16, default="amap")
+    meeting_location_name = models.CharField(
+        "集合地点名称快照", max_length=100, blank=True, default=""
+    )
     meeting_address = models.CharField("集合地点", max_length=255)
     source_longitude = models.DecimalField(
         "原始GCJ-02经度", max_digits=10, decimal_places=7, null=True, blank=True
@@ -56,6 +63,9 @@ class ProviderOrder(models.Model):
         "单程路线距离（公里）", max_digits=7, decimal_places=2, null=True, blank=True
     )
     contact_name = models.CharField("联系人", max_length=30)
+    contact_gender = models.CharField(
+        "联系人称谓", max_length=8, choices=ContactGender, blank=True, default=""
+    )
     contact_phone = models.CharField("联系电话", max_length=20)
     note = models.CharField("备注", max_length=500, blank=True)
     service_fee_amount = models.PositiveBigIntegerField("服务费（分）")
@@ -113,6 +123,10 @@ class ProviderOrder(models.Model):
         constraints = [
             models.CheckConstraint(condition=Q(ends_at__gt=models.F("starts_at")), name="order_end_after_start"),
             models.CheckConstraint(condition=Q(payable_amount__gte=0), name="order_payable_nonnegative"),
+            models.CheckConstraint(
+                condition=Q(contact_gender__in=("", "mr", "ms")),
+                name="provider_order_contact_gender_valid",
+            ),
         ]
         ordering = ("-created_at",)
         verbose_name = "达人订单"

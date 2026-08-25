@@ -28,6 +28,7 @@ class LocationApiTests(TestCase):
     def test_create_and_list_saved_address(self):
         payload = {
             "name": "邯郸美乐城", "address": "人民东路456号", "city_name": "邯郸市",
+            "contact_name": "张三", "contact_gender": "mr", "contact_phone": "13812346688",
             "longitude": "114.5120000", "latitude": "36.6130000", "is_default": True,
         }
         created = self.client.post("/api/v1/addresses/", payload, content_type="application/json")
@@ -35,6 +36,7 @@ class LocationApiTests(TestCase):
         listed = self.client.get("/api/v1/addresses/")
         item = listed.json()["data"]["items"][0]
         self.assertEqual(Decimal(item["longitude"]), Decimal("114.5120000"))
+        self.assertEqual(item["contact_gender_label"], "先生")
         self.assertTrue(item["is_default"])
 
     def test_first_address_defaults_and_update_moves_default(self):
@@ -42,6 +44,7 @@ class LocationApiTests(TestCase):
             "/api/v1/addresses/",
             {
                 "name": "美乐城", "address": "人民东路456号", "city_name": "邯郸市",
+                "contact_name": "张三", "contact_gender": "mr", "contact_phone": "13812346688",
                 "longitude": "114.5120000", "latitude": "36.6130000",
             },
             content_type="application/json",
@@ -50,6 +53,7 @@ class LocationApiTests(TestCase):
             "/api/v1/addresses/",
             {
                 "name": "博物馆", "address": "中华北大街45号", "city_name": "邯郸市",
+                "contact_name": "李女士", "contact_gender": "ms", "contact_phone": "13912346688",
                 "longitude": "114.5010000", "latitude": "36.6100000",
             },
             content_type="application/json",
@@ -82,3 +86,16 @@ class LocationApiTests(TestCase):
         self.assertEqual(response.status_code, 204)
         second.refresh_from_db()
         self.assertTrue(second.is_default)
+
+    def test_create_requires_complete_contact_information(self):
+        response = self.client.post(
+            "/api/v1/addresses/",
+            {
+                "name": "美乐城", "address": "人民东路456号", "city_name": "邯郸市",
+                "longitude": "114.5120000", "latitude": "36.6130000",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contact_name", str(response.json()))

@@ -5,11 +5,19 @@ from .models import UserAddress
 
 
 class UserAddressSerializer(serializers.ModelSerializer):
+    contact_name = serializers.CharField(max_length=30)
+    contact_gender = serializers.ChoiceField(choices=UserAddress.ContactGender.choices)
+    contact_gender_label = serializers.CharField(
+        source="get_contact_gender_display", read_only=True
+    )
+    contact_phone = serializers.RegexField(r"^1\d{10}$")
+
     class Meta:
         model = UserAddress
         fields = (
-            "id", "name", "address", "city_name", "longitude", "latitude",
-            "is_default", "created_at", "updated_at",
+            "id", "name", "address", "city_name", "contact_name",
+            "contact_gender", "contact_gender_label", "contact_phone",
+            "longitude", "latitude", "is_default", "created_at", "updated_at",
         )
         read_only_fields = ("id", "created_at", "updated_at")
 

@@ -40,7 +40,7 @@ class ProviderOrderPreviewView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        serializer = ProviderOrderInputSerializer(data=request.data)
+        serializer = ProviderOrderInputSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         return Response({"data": quote_payload(serializer.validated_data)})
 
@@ -58,7 +58,7 @@ class ProviderOrderListCreateView(APIView):
 
     @transaction.atomic
     def post(self, request):
-        serializer = ProviderOrderInputSerializer(data=request.data)
+        serializer = ProviderOrderInputSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         service = data["service"]
@@ -72,10 +72,13 @@ class ProviderOrderListCreateView(APIView):
             billing_type_snapshot=service.billing_type,
             unit_price_amount=service.price_amount,
             starts_at=data["starts_at"], ends_at=data["ends_at"],
-            duration_minutes=data["duration_minutes"], meeting_address=data["meeting_address"],
+            duration_minutes=data["duration_minutes"],
+            meeting_location_name=data["meeting_location_name"],
+            meeting_address=data["meeting_address"],
             source_longitude=data.get("longitude"), source_latitude=data.get("latitude"),
             route_distance_km=data["route"].distance_km, map_source="tencent",
             contact_name=data["contact_name"],
+            contact_gender=data["contact_gender"],
             contact_phone=data["contact_phone"], note=data.get("note", ""),
             service_fee_amount=quote.service_fee_amount,
             transport_fee_amount=quote.transport_fee_amount,

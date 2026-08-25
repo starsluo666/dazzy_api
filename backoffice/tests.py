@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import User
+from locations.models import UserAddress
 from mediafiles.models import MediaAsset
 from orders.models import ProviderOrder
 from providers.models import (
@@ -263,6 +264,30 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(data["summary"]["total"], 1)
         self.assertEqual(data["summary"]["verified"], 1)
         self.assertEqual(data["summary"]["providers"], 1)
+
+    def test_user_detail_includes_address_contact_and_coordinates(self):
+        UserAddress.objects.create(
+            user=self.handan_user,
+            name="邯郸美乐城",
+            address="人民东路456号",
+            city_name="邯郸市",
+            contact_name="王女士",
+            contact_gender=UserAddress.ContactGender.MS,
+            contact_phone="18800006666",
+            longitude="114.5120000",
+            latitude="36.6130000",
+            is_default=True,
+        )
+
+        response = self.client.get(
+            reverse("backoffice-user-detail", args=(self.handan_user.public_id,))
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        address = response.data["data"]["addresses"][0]
+        self.assertEqual(address["contact_gender_label"], "女士")
+        self.assertEqual(address["contact_phone"], "18800006666")
+        self.assertEqual(Decimal(address["longitude"]), Decimal("114.5120000"))
 
     def test_user_suspend_revokes_existing_tokens_and_writes_audit(self):
         auth_version = self.handan_user.auth_version
