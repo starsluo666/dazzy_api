@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -7,7 +9,9 @@ from config.geospatial import gcj02_to_wgs84
 from .models import (
     ProviderDateAvailability,
     ProviderDateClosure,
+    ProviderLiveLocation,
     ProviderProfile,
+    ProviderService,
     ProviderWeeklyAvailability,
 )
 
@@ -60,30 +64,69 @@ def submit_provider_application(*, user) -> ProviderProfile:
     return profile
 
 
+def _location_values(data: dict, *, session_id, now) -> dict:
+    longitude = data["longitude"]
+    latitude = data["latitude"]
+    return {
+        "session_id": session_id,
+        "source_longitude": longitude,
+        "source_latitude": latitude,
+        "position": gcj02_to_wgs84(longitude, latitude),
+        "accuracy_m": data["accuracy_m"],
+        "speed_mps": data.get("speed_mps"),
+        "located_at": data.get("located_at") or now,
+        "received_at": now,
+    }
+
+
 @transaction.atomic
-def update_provider_service_location(
+def start_provider_online(
     *, provider: ProviderProfile, data: dict
-) -> ProviderProfile:
+) -> tuple[ProviderProfile, ProviderLiveLocation]:
     locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
-    values = dict(data)
-    longitude = values.pop("source_longitude")
-    latitude = values.pop("source_latitude")
-    for field, value in values.items():
-        setattr(locked, field, value)
-    locked.map_source = ProviderProfile.MapSource.TENCENT
-    locked.source_longitude = longitude
-    locked.source_latitude = latitude
-    locked.service_center = gcj02_to_wgs84(longitude, latitude)
-    locked.save(
-        update_fields=(
-            *values.keys(),
-            "map_source",
-            "source_longitude",
-            "source_latitude",
-            "service_center",
-            "updated_at",
-        )
+    if locked.admin_order_restricted:
+        raise ValidationError({"detail": "平台当前限制接单，请联系客服处理。"})
+    if not ProviderService.objects.filter(provider=locked, is_active=True).exists():
+        raise ValidationError({"detail": "请先添加并启用至少一项服务。"})
+
+    now = timezone.now()
+    session_id = uuid.uuid4()
+    location, _ = ProviderLiveLocation.objects.update_or_create(
+        provider=locked,
+        defaults=_location_values(data, session_id=session_id, now=now),
     )
+    locked.is_accepting_orders = True
+    locked.save(update_fields=("is_accepting_orders", "updated_at"))
+    return locked, location
+
+
+@transaction.atomic
+def update_provider_live_location(
+    *, provider: ProviderProfile, session_id, data: dict
+) -> tuple[ProviderProfile, ProviderLiveLocation]:
+    locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
+    if not locked.is_accepting_orders or locked.admin_order_restricted:
+        raise ValidationError({"detail": "当前接单会话已停止，请重新开启接单。"})
+    try:
+        location = ProviderLiveLocation.objects.select_for_update().get(provider=locked)
+    except ProviderLiveLocation.DoesNotExist as exc:
+        raise ValidationError({"detail": "接单会话不存在，请重新开启接单。"}) from exc
+    if location.session_id != session_id:
+        raise ValidationError({"session_id": "接单会话已失效，请重新开启接单。"})
+
+    now = timezone.now()
+    for field, value in _location_values(data, session_id=session_id, now=now).items():
+        setattr(location, field, value)
+    location.save()
+    return locked, location
+
+
+@transaction.atomic
+def stop_provider_online(*, provider: ProviderProfile) -> ProviderProfile:
+    locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
+    locked.is_accepting_orders = False
+    locked.save(update_fields=("is_accepting_orders", "updated_at"))
+    ProviderLiveLocation.objects.filter(provider=locked).update(session_id=None)
     return locked
 
 

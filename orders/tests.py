@@ -1,3 +1,4 @@
+import uuid
 from datetime import time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from django.utils import timezone
 from accounts.models import User
 from mediafiles.models import MediaAsset
 from providers.models import (
+    ProviderLiveLocation,
     ProviderProfile,
     ProviderService,
     ProviderWeeklyAvailability,
@@ -34,9 +36,17 @@ class ProviderOrderApiTests(TestCase):
             is_accepting_orders=True,
             service_city_code="130400",
             service_city_name="邯郸市",
+        )
+        now = timezone.now()
+        self.live_location = ProviderLiveLocation.objects.create(
+            provider=self.provider,
+            session_id=uuid.uuid4(),
             source_longitude=Decimal("114.4907000"),
             source_latitude=Decimal("36.6123000"),
-            service_center=Point(114.4907, 36.6123, srid=4326),
+            position=Point(114.4907, 36.6123, srid=4326),
+            accuracy_m=Decimal("12.00"),
+            located_at=now,
+            received_at=now,
         )
         category = ServiceCategory.objects.create(name="旅游陪伴", slug="travel-order")
         self.service = ProviderService.objects.create(
@@ -393,3 +403,15 @@ class ProviderOrderApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_order_creation_rejects_stale_provider_location(self):
+        ProviderLiveLocation.objects.filter(pk=self.live_location.pk).update(
+            received_at=timezone.now() - timedelta(minutes=31)
+        )
+
+        response = self.client.post(
+            "/api/v1/provider-orders/preview/", self.payload(), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("不在线", str(response.json()))

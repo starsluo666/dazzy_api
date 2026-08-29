@@ -1,13 +1,15 @@
+from datetime import date, time, timedelta
+
 from django.contrib.gis.db.models.functions import Distance
 from django.db.models import Min, Q, Sum
-from datetime import date, time, timedelta
-from django.utils import timezone
+from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.views import APIView
 
 from config.api import paginated_response
@@ -34,17 +36,27 @@ from .serializers import (
     ProviderApplicationSubmitSerializer,
     ProviderServiceManageSerializer,
     ServiceCategorySerializer,
-    ProviderAcceptingOrdersSerializer,
     ProviderDateClosureSerializer,
+    ProviderLiveLocationInputSerializer,
+    ProviderLiveLocationUpdateSerializer,
     ProviderScheduleCreateSerializer,
     ProviderScheduleQuerySerializer,
-    ProviderServiceLocationSerializer,
+)
+from .presence import (
+    ONLINE_TIMEOUT_MINUTES,
+    RECOMMENDED_REPORT_INTERVAL_SECONDS,
+    get_provider_live_location,
+    location_expires_at,
+    online_provider_query,
+    provider_is_online,
 )
 from .services import (
     create_provider_schedule_periods,
     save_provider_application,
+    start_provider_online,
+    stop_provider_online,
     submit_provider_application,
-    update_provider_service_location,
+    update_provider_live_location,
 )
 
 
@@ -61,7 +73,7 @@ class ProviderListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
 
-        queryset = public_providers().annotate(
+        queryset = public_providers().filter(online_provider_query()).annotate(
             starting_price_amount=Min("services__price_amount", filter=Q(services__is_active=True))
         )
         if category := params.get("category"):
@@ -71,9 +83,7 @@ class ProviderListView(APIView):
 
         if "longitude" in params:
             point = gcj02_to_wgs84(params["longitude"], params["latitude"])
-            queryset = queryset.exclude(service_center=None).annotate(
-                distance=Distance("service_center", point)
-            )
+            queryset = queryset.annotate(distance=Distance("live_location__position", point))
 
         ordering = params["ordering"]
         if ordering == "distance":
@@ -231,7 +241,7 @@ class CurrentProviderServiceDetailView(APIView):
 def current_approved_provider(request):
     profile = get_object_or_404(ProviderProfile.objects.select_related("user"), user=request.user)
     if profile.status != ProviderProfile.Status.APPROVED:
-        raise PermissionDenied("仅审核通过的达人可以使用达人工作台。")
+        raise PermissionDenied("仅审核通过的达人可以使用达人端功能。")
     return profile
 
 
@@ -240,35 +250,94 @@ class CurrentProviderWorkbenchView(APIView):
 
     def get(self, request):
         provider = current_approved_provider(request)
+        location = get_provider_live_location(provider)
         today = timezone.localdate()
         day_start = _local_datetime(today, time.min)
         day_end = day_start + timedelta(days=1)
         month_start = day_start.replace(day=1)
         orders = ProviderOrder.objects.filter(provider=provider)
+        excluded_statuses = (ProviderOrder.Status.CANCELLED, ProviderOrder.Status.REFUNDED)
+        fulfilled_statuses = (
+            ProviderOrder.Status.PENDING_CONFIRMATION,
+            ProviderOrder.Status.PENDING_REVIEW,
+            ProviderOrder.Status.COMPLETED,
+        )
         today_count = (
             orders.filter(starts_at__gte=day_start, starts_at__lt=day_end)
-            .exclude(status__in=(ProviderOrder.Status.CANCELLED, ProviderOrder.Status.REFUNDED))
+            .exclude(status__in=excluded_statuses)
             .count()
         )
+        pending_acceptance_count = orders.filter(
+            status=ProviderOrder.Status.PENDING_ACCEPTANCE,
+            paid_at__isnull=False,
+        ).count()
+        paid_month_orders = orders.filter(
+            paid_at__isnull=False,
+            paid_at__gte=month_start,
+        ).exclude(status__in=excluded_statuses)
         income = (
-            orders.filter(paid_at__isnull=False, paid_at__gte=month_start).aggregate(
+            paid_month_orders.aggregate(
                 total=Sum("service_fee_amount")
             )["total"]
             or 0
         )
+        month_order_count = paid_month_orders.count()
+        month_service_minutes = (
+            orders.filter(
+                starts_at__gte=month_start,
+                status__in=fulfilled_statuses,
+            ).aggregate(total=Sum("duration_minutes"))["total"]
+            or 0
+        )
+
+        trend_start_date = today - timedelta(days=today.weekday())
+        trend_start = _local_datetime(trend_start_date, time.min)
+        trend_end = trend_start + timedelta(days=7)
+        trend_rows = (
+            orders.filter(
+                starts_at__gte=trend_start,
+                starts_at__lt=trend_end,
+                status__in=fulfilled_statuses,
+            )
+            .annotate(service_date=TruncDate("starts_at", tzinfo=timezone.get_current_timezone()))
+            .values("service_date")
+            .annotate(total_minutes=Sum("duration_minutes"))
+        )
+        trend_minutes = {
+            row["service_date"]: row["total_minutes"] or 0 for row in trend_rows
+        }
+        weekday_labels = "一二三四五六日"
+        service_trend = []
+        for offset in range(7):
+            service_date = trend_start_date + timedelta(days=offset)
+            service_trend.append(
+                {
+                    "date": service_date.isoformat(),
+                    "label": weekday_labels[service_date.weekday()],
+                    "service_hours": round(trend_minutes.get(service_date, 0) / 60, 1),
+                }
+            )
         upcoming = (
-            orders.filter(starts_at__gte=timezone.now())
-            .exclude(status__in=(ProviderOrder.Status.CANCELLED, ProviderOrder.Status.REFUNDED))
+            orders.filter(starts_at__gte=timezone.now(), paid_at__isnull=False)
+            .exclude(status__in=excluded_statuses)
+            .select_related("customer")
             .order_by("starts_at")
             .first()
         )
         upcoming_data = None
         if upcoming:
             upcoming_data = {
+                "public_id": upcoming.public_id,
                 "order_no": upcoming.order_no,
                 "starts_at": upcoming.starts_at,
                 "ends_at": upcoming.ends_at,
                 "service_name": upcoming.service_name_snapshot,
+                "customer_name": upcoming.contact_name or upcoming.customer.nickname,
+                "customer_gender_label": upcoming.get_contact_gender_display(),
+                "meeting_location_name": (
+                    upcoming.meeting_location_name or upcoming.meeting_address
+                ),
+                "status": upcoming.status,
             }
         return Response(
             {
@@ -276,52 +345,85 @@ class CurrentProviderWorkbenchView(APIView):
                     "nickname": provider.user.nickname,
                     "avatar_url": build_media_url(provider.user.avatar_object_key),
                     "is_accepting_orders": provider.is_accepting_orders,
+                    "is_online": provider_is_online(provider),
+                    "session_id": (
+                        str(location.session_id) if location and location.session_id else None
+                    ),
                     "admin_order_restricted": provider.admin_order_restricted,
                     "admin_restriction_reason": provider.admin_restriction_reason,
-                    "has_service_location": bool(provider.service_center),
                     "service_city_code": provider.service_city_code,
                     "service_city_name": provider.service_city_name,
-                    "service_location_name": provider.service_location_name,
-                    "service_address": provider.service_address,
                     "max_service_radius_km": provider.max_service_radius_km,
+                    "location_updated_at": location.received_at if location else None,
+                    "location_accuracy_m": location.accuracy_m if location else None,
+                    "location_expires_at": location_expires_at(location),
+                    "online_timeout_minutes": ONLINE_TIMEOUT_MINUTES,
+                    "recommended_report_interval_seconds": RECOMMENDED_REPORT_INTERVAL_SECONDS,
                     "today_order_count": today_count,
+                    "pending_acceptance_order_count": pending_acceptance_count,
                     "month_income_amount": income,
+                    "month_order_count": month_order_count,
+                    "month_service_hours": round(month_service_minutes / 60, 1),
+                    "last_7_days_service_trend": service_trend,
                     "service_count": provider.service_count,
                     "upcoming_order": upcoming_data,
                 }
             }
         )
 
-    def patch(self, request):
-        provider = current_approved_provider(request)
-        serializer = ProviderAcceptingOrdersSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        if serializer.validated_data["is_accepting_orders"] and provider.admin_order_restricted:
-            raise ValidationError({"is_accepting_orders": "平台当前限制接单，请联系客服处理。"})
-        if serializer.validated_data["is_accepting_orders"] and not provider.service_center:
-            raise ValidationError(
-                {"is_accepting_orders": "请先设置常驻服务地点，再开启接单。"}
-            )
-        provider.is_accepting_orders = serializer.validated_data["is_accepting_orders"]
-        provider.save(update_fields=("is_accepting_orders", "updated_at"))
-        return Response({"data": {"is_accepting_orders": provider.is_accepting_orders}})
 
 
-class CurrentProviderServiceLocationView(APIView):
+def _online_payload(provider, location=None):
+    location = location or get_provider_live_location(provider)
+    return {
+        "is_accepting_orders": provider.is_accepting_orders,
+        "is_online": provider_is_online(provider),
+        "session_id": str(location.session_id) if location and location.session_id else None,
+        "location_updated_at": location.received_at if location else None,
+        "location_accuracy_m": location.accuracy_m if location else None,
+        "location_expires_at": location_expires_at(location),
+        "online_timeout_minutes": ONLINE_TIMEOUT_MINUTES,
+        "recommended_report_interval_seconds": RECOMMENDED_REPORT_INTERVAL_SECONDS,
+    }
+
+
+class CurrentProviderOnlineStartView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
+    def post(self, request):
         provider = current_approved_provider(request)
-        return Response({"data": ProviderServiceLocationSerializer(provider).data})
+        serializer = ProviderLiveLocationInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        provider, location = start_provider_online(
+            provider=provider,
+            data=serializer.validated_data,
+        )
+        return Response({"data": _online_payload(provider, location)})
+
+
+class CurrentProviderOnlineLocationView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def put(self, request):
         provider = current_approved_provider(request)
-        serializer = ProviderServiceLocationSerializer(data=request.data)
+        serializer = ProviderLiveLocationUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        provider = update_provider_service_location(
-            provider=provider, data=serializer.validated_data
+        data = dict(serializer.validated_data)
+        session_id = data.pop("session_id")
+        provider, location = update_provider_live_location(
+            provider=provider,
+            session_id=session_id,
+            data=data,
         )
-        return Response({"data": ProviderServiceLocationSerializer(provider).data})
+        return Response({"data": _online_payload(provider, location)})
+
+
+class CurrentProviderOnlineStopView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        provider = stop_provider_online(provider=current_approved_provider(request))
+        return Response({"data": _online_payload(provider)})
 
 
 class CurrentProviderScheduleView(APIView):

@@ -1,3 +1,4 @@
+import uuid
 from datetime import time, timedelta
 from decimal import Decimal
 
@@ -8,19 +9,36 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from mediafiles.models import MediaAsset
+from orders.models import ProviderOrder
 
-from .models import ProviderProfile, ProviderService, ProviderWeeklyAvailability, ServiceCategory
+from .models import (
+    ProviderLiveLocation,
+    ProviderProfile,
+    ProviderService,
+    ProviderWeeklyAvailability,
+    ServiceCategory,
+)
+
+
+def create_live_location(provider, *, received_at=None, accuracy_m="12.50"):
+    now = received_at or timezone.now()
+    return ProviderLiveLocation.objects.create(
+        provider=provider,
+        session_id=uuid.uuid4(),
+        source_longitude=Decimal("116.4039810"),
+        source_latitude=Decimal("39.9150010"),
+        position=Point(116.397755, 39.913873, srid=4326),
+        accuracy_m=Decimal(accuracy_m),
+        located_at=now,
+        received_at=now,
+    )
 
 
 class ProviderModelTests(TestCase):
-    def test_provider_service_uses_integer_minor_units_and_wgs84_point(self):
+    def test_provider_service_uses_integer_minor_units_and_live_wgs84_point(self):
         user = User.objects.create_user(phone="13800000001", password="test-password")
-        provider = ProviderProfile.objects.create(
-            user=user,
-            source_longitude=Decimal("116.4039810"),
-            source_latitude=Decimal("39.9150010"),
-            service_center=Point(116.397755, 39.913873, srid=4326),
-        )
+        provider = ProviderProfile.objects.create(user=user)
+        location = create_live_location(provider)
         category = ServiceCategory.objects.create(name="台球陪玩", slug="billiards")
         service = ProviderService.objects.create(
             provider=provider,
@@ -30,8 +48,8 @@ class ProviderModelTests(TestCase):
         )
 
         self.assertEqual(service.price_amount, 17800)
-        self.assertEqual(provider.service_center.srid, 4326)
-        self.assertEqual(provider.source_longitude, Decimal("116.4039810"))
+        self.assertEqual(location.position.srid, 4326)
+        self.assertEqual(location.source_longitude, Decimal("116.4039810"))
 
     def test_provider_list_supports_gcj02_distance(self):
         user = User.objects.create_user(
@@ -40,10 +58,11 @@ class ProviderModelTests(TestCase):
         provider = ProviderProfile.objects.create(
             user=user,
             status=ProviderProfile.Status.APPROVED,
+            is_accepting_orders=True,
             service_city_code="110100",
             service_city_name="北京市",
-            service_center=Point(116.397755, 39.913873, srid=4326),
         )
+        create_live_location(provider)
         category = ServiceCategory.objects.create(name="台球陪玩", slug="billiards-list")
         ProviderService.objects.create(
             provider=provider,
@@ -66,6 +85,12 @@ class ProviderModelTests(TestCase):
         self.assertEqual(response.json()["data"]["pagination"]["total"], 1)
         self.assertEqual(response.json()["data"]["items"][0]["nickname"], "晓晓")
         self.assertIsNotNone(response.json()["data"]["items"][0]["distance_km"])
+
+        ProviderLiveLocation.objects.filter(provider=provider).update(
+            received_at=timezone.now() - timedelta(minutes=31)
+        )
+        stale_response = self.client.get("/api/v1/providers/")
+        self.assertEqual(stale_response.json()["data"]["pagination"]["total"], 0)
 
     def test_provider_detail_returns_public_profile_and_active_services(self):
         user = User.objects.create_user(
@@ -280,7 +305,7 @@ class ProviderSelfManagementTests(TestCase):
             format="json",
         )
         self.assertEqual(created.status_code, 201)
-        self.assertEqual(provider.weekly_availability.count(), 2)
+        self.assertEqual(provider.weekly_availability.count(), len({day.weekday(), 4}))
 
         schedule = self.client.get(
             "/api/v1/providers/me/schedule/", {"start_date": day.isoformat(), "days": 1}
@@ -334,72 +359,186 @@ class ProviderSelfManagementTests(TestCase):
         self.assertEqual(overlap.status_code, 400)
         self.assertEqual(past.status_code, 400)
 
-    def test_workbench_can_toggle_accepting_orders(self):
-        ProviderProfile.objects.create(user=self.user, status=ProviderProfile.Status.APPROVED)
-        response = self.client.patch(
-            "/api/v1/providers/me/workbench/",
-            {"is_accepting_orders": False},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.user.provider_profile.refresh_from_db()
-        self.assertFalse(self.user.provider_profile.is_accepting_orders)
-
-    def test_approved_provider_can_set_service_location(self):
+    def test_approved_provider_can_start_update_and_stop_online_session(self):
         provider = ProviderProfile.objects.create(
             user=self.user,
             status=ProviderProfile.Status.APPROVED,
-            is_accepting_orders=False,
             service_city_code="130400",
             service_city_name="邯郸市",
         )
+        category = ServiceCategory.objects.create(name="城市陪伴", slug="online-session")
+        ProviderService.objects.create(
+            provider=provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=16800,
+        )
 
-        response = self.client.put(
-            "/api/v1/providers/me/service-location/",
+        started = self.client.post(
+            "/api/v1/providers/me/online/start/",
             {
-                "service_city_code": "130400",
-                "service_city_name": "邯郸市",
-                "service_location_name": "邯郸美乐城",
-                "service_address": "河北省邯郸市丛台区人民东路456号",
                 "longitude": "114.5389610",
                 "latitude": "36.6256570",
-                "max_service_radius_km": 25,
+                "accuracy_m": "18.50",
             },
             format="json",
         )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["data"]["has_service_location"])
+        self.assertEqual(started.status_code, 200)
+        self.assertTrue(started.json()["data"]["is_online"])
+        session_id = started.json()["data"]["session_id"]
         provider.refresh_from_db()
-        self.assertEqual(provider.service_location_name, "邯郸美乐城")
-        self.assertEqual(provider.map_source, ProviderProfile.MapSource.TENCENT)
-        self.assertEqual(provider.source_longitude, Decimal("114.5389610"))
-        self.assertIsNotNone(provider.service_center)
+        self.assertTrue(provider.is_accepting_orders)
+        self.assertEqual(provider.live_location.source_longitude, Decimal("114.5389610"))
 
         workbench = self.client.get("/api/v1/providers/me/workbench/")
         self.assertEqual(workbench.status_code, 200)
-        self.assertTrue(workbench.json()["data"]["has_service_location"])
-        self.assertEqual(workbench.json()["data"]["service_location_name"], "邯郸美乐城")
+        self.assertTrue(workbench.json()["data"]["is_online"])
+        self.assertEqual(workbench.json()["data"]["session_id"], session_id)
+        self.assertEqual(workbench.json()["data"]["online_timeout_minutes"], 30)
+        self.assertEqual(workbench.json()["data"]["recommended_report_interval_seconds"], 300)
 
-    def test_provider_must_set_service_location_before_enabling_orders(self):
+        ProviderLiveLocation.objects.filter(provider=provider).update(
+            received_at=timezone.now() - timedelta(minutes=31)
+        )
+        stale_workbench = self.client.get("/api/v1/providers/me/workbench/")
+        self.assertFalse(stale_workbench.json()["data"]["is_online"])
+
+        updated = self.client.put(
+            "/api/v1/providers/me/online/location/",
+            {
+                "session_id": session_id,
+                "longitude": "114.5399610",
+                "latitude": "36.6266570",
+                "accuracy_m": "15.00",
+            },
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(updated.json()["data"]["is_online"])
+        provider.live_location.refresh_from_db()
+        self.assertEqual(provider.live_location.source_longitude, Decimal("114.5399610"))
+
+        stopped = self.client.post("/api/v1/providers/me/online/stop/", {}, format="json")
+        self.assertEqual(stopped.status_code, 200)
+        self.assertFalse(stopped.json()["data"]["is_online"])
+        self.assertIsNone(stopped.json()["data"]["session_id"])
+
+    def test_workbench_returns_month_metrics_trend_and_upcoming_order_details(self):
+        provider = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+        customer = User.objects.create_user(
+            phone="13800000022", password="test-password", nickname="订单用户"
+        )
+        category = ServiceCategory.objects.create(name="旅游陪伴", slug="travel-workbench")
+        service = ProviderService.objects.create(
+            provider=provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=16800,
+        )
+        now = timezone.localtime()
+        starts_at = now + timedelta(days=1)
+        order = ProviderOrder.objects.create(
+            order_no="WB202608280001",
+            customer=customer,
+            provider=provider,
+            service=service,
+            provider_name_snapshot=self.user.nickname,
+            service_name_snapshot=category.name,
+            billing_type_snapshot=ProviderOrder.BillingType.HOURLY,
+            unit_price_amount=16800,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=2),
+            duration_minutes=120,
+            meeting_location_name="邯郸美乐城",
+            meeting_address="人民东路456号",
+            contact_name="张",
+            contact_gender=ProviderOrder.ContactGender.MS,
+            contact_phone="13812346688",
+            service_fee_amount=33600,
+            payable_amount=33600,
+            status=ProviderOrder.Status.PENDING_SERVICE,
+            payment_expires_at=now + timedelta(hours=1),
+            paid_at=now,
+        )
+        week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        completed_starts_at = max(now - timedelta(hours=2), week_start)
+        ProviderOrder.objects.create(
+            order_no="WB202608280002",
+            customer=customer,
+            provider=provider,
+            service=service,
+            provider_name_snapshot=self.user.nickname,
+            service_name_snapshot=category.name,
+            billing_type_snapshot=ProviderOrder.BillingType.HOURLY,
+            unit_price_amount=16800,
+            starts_at=completed_starts_at,
+            ends_at=completed_starts_at + timedelta(hours=2),
+            duration_minutes=120,
+            meeting_location_name="丛台公园",
+            meeting_address="中华北大街159号",
+            contact_name="李",
+            contact_gender=ProviderOrder.ContactGender.MR,
+            contact_phone="13812346689",
+            service_fee_amount=33600,
+            payable_amount=33600,
+            status=ProviderOrder.Status.COMPLETED,
+            payment_expires_at=now - timedelta(days=2),
+            paid_at=now,
+        )
+
+        response = self.client.get("/api/v1/providers/me/workbench/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["month_income_amount"], 67200)
+        self.assertEqual(data["month_order_count"], 2)
+        self.assertEqual(data["month_service_hours"], 2.0)
+        self.assertEqual(data["pending_acceptance_order_count"], 0)
+        self.assertEqual(len(data["last_7_days_service_trend"]), 7)
+        self.assertEqual(
+            sum(item["service_hours"] for item in data["last_7_days_service_trend"]),
+            2.0,
+        )
+        self.assertEqual(data["upcoming_order"]["public_id"], str(order.public_id))
+        self.assertEqual(data["upcoming_order"]["customer_name"], "张")
+        self.assertEqual(data["upcoming_order"]["customer_gender_label"], "女士")
+        self.assertEqual(data["upcoming_order"]["meeting_location_name"], "邯郸美乐城")
+
+    def test_provider_needs_active_service_and_accurate_first_location_to_start(self):
         ProviderProfile.objects.create(
             user=self.user,
             status=ProviderProfile.Status.APPROVED,
-            is_accepting_orders=False,
         )
 
-        response = self.client.patch(
-            "/api/v1/providers/me/workbench/",
-            {"is_accepting_orders": True},
+        no_service = self.client.post(
+            "/api/v1/providers/me/online/start/",
+            {"longitude": "114.5389610", "latitude": "36.6256570", "accuracy_m": "20"},
+            format="json",
+        )
+        inaccurate = self.client.post(
+            "/api/v1/providers/me/online/start/",
+            {"longitude": "114.5389610", "latitude": "36.6256570", "accuracy_m": "201"},
             format="json",
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("常驻服务地点", str(response.json()))
+        self.assertEqual(no_service.status_code, 400)
+        self.assertIn("至少一项服务", str(no_service.json()))
+        self.assertEqual(inaccurate.status_code, 400)
 
     def test_availability_returns_only_configured_future_slots(self):
         user = User.objects.create_user(phone="13800000006", password="test", nickname="小雨")
-        provider = ProviderProfile.objects.create(user=user, status=ProviderProfile.Status.APPROVED)
+        provider = ProviderProfile.objects.create(
+            user=user,
+            status=ProviderProfile.Status.APPROVED,
+            is_accepting_orders=True,
+        )
         category = ServiceCategory.objects.create(name="摄影陪伴", slug="photo-availability")
         service = ProviderService.objects.create(
             provider=provider,

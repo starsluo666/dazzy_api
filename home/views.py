@@ -12,6 +12,7 @@ from config.geospatial import gcj02_to_wgs84
 from mediafiles.services import build_home_card_assets
 from providers.availability import build_availability
 from providers.models import ProviderService
+from providers.presence import online_provider_query
 from providers.selectors import public_providers
 
 from .serializers import HomeActivitySerializer, HomeProviderSerializer, HomeQuerySerializer
@@ -26,7 +27,7 @@ def _service_duration(service: ProviderService) -> int:
 
 
 def _recommended_providers(params, point, request):
-    queryset = public_providers().annotate(
+    queryset = public_providers().filter(online_provider_query()).annotate(
         starting_price_amount=Min(
             "services__price_amount", filter=Q(services__is_active=True)
         )
@@ -34,8 +35,8 @@ def _recommended_providers(params, point, request):
     if city_code := params.get("city_code"):
         queryset = queryset.filter(service_city_code=city_code)
     if point:
-        queryset = queryset.exclude(service_center=None).annotate(
-            distance=Distance("service_center", point)
+        queryset = queryset.annotate(
+            distance=Distance("live_location__position", point)
         )
     providers = list(
         queryset.order_by("-rating", "-service_count", "id").distinct()[:4]

@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError
 
 from accounts.models import User
 from orders.models import ProviderOrder
-from providers.models import ProviderProfile
+from providers.models import ProviderLiveLocation, ProviderProfile
 
 from .access import client_ip
 from .models import (
@@ -108,6 +108,9 @@ def change_user_account_status(*, public_id, action, reason, actor, access, requ
     user.account_status = target
     user.auth_version += 1
     user.save(update_fields=("account_status", "auth_version"))
+    if target != User.AccountStatus.ACTIVE:
+        ProviderProfile.objects.filter(user=user).update(is_accepting_orders=False)
+        ProviderLiveLocation.objects.filter(provider__user=user).update(session_id=None)
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),
@@ -229,6 +232,8 @@ def change_provider_operational_status(*, profile_id, action, reason, actor, acc
             "admin_restriction_reason", "updated_at",
         )
     )
+    if not profile.is_accepting_orders:
+        ProviderLiveLocation.objects.filter(provider=profile).update(session_id=None)
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),

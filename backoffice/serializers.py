@@ -9,6 +9,11 @@ from accounts.serializers import UserSerializer
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
 from providers.models import ProviderProfile
+from providers.presence import (
+    get_provider_live_location,
+    location_expires_at,
+    provider_is_online,
+)
 
 from .models import (
     AdminAuditLog,
@@ -273,7 +278,13 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     lifestyle_photo_available = serializers.SerializerMethodField()
     lifestyle_photo_url = serializers.SerializerMethodField()
-    has_service_location = serializers.SerializerMethodField()
+    is_online = serializers.SerializerMethodField()
+    has_live_location = serializers.SerializerMethodField()
+    current_longitude = serializers.SerializerMethodField()
+    current_latitude = serializers.SerializerMethodField()
+    location_accuracy_m = serializers.SerializerMethodField()
+    location_updated_at = serializers.SerializerMethodField()
+    location_expires_at = serializers.SerializerMethodField()
     service_names = serializers.SerializerMethodField()
     services = serializers.SerializerMethodField()
     weekly_availability = serializers.SerializerMethodField()
@@ -286,8 +297,9 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "birth_date", "verification_status", "verification_status_label",
             "account_status", "account_status_label", "status", "status_label", "bio",
             "lifestyle_photo_available", "lifestyle_photo_url", "service_city_code",
-            "service_city_name", "service_location_name", "service_address", "map_source",
-            "source_longitude", "source_latitude", "has_service_location",
+            "service_city_name", "is_online", "has_live_location", "current_longitude",
+            "current_latitude", "location_accuracy_m", "location_updated_at",
+            "location_expires_at",
             "max_service_radius_km", "rating", "service_count",
             "order_count", "credit_score", "is_accepting_orders", "admin_order_restricted",
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
@@ -306,8 +318,30 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             return None
         return build_media_url(obj.lifestyle_photo.object_key)
 
-    def get_has_service_location(self, obj):
-        return bool(obj.service_center)
+    def get_is_online(self, obj):
+        return provider_is_online(obj)
+
+    def get_has_live_location(self, obj):
+        return get_provider_live_location(obj) is not None
+
+    def get_current_longitude(self, obj):
+        location = get_provider_live_location(obj)
+        return str(location.source_longitude) if location else None
+
+    def get_current_latitude(self, obj):
+        location = get_provider_live_location(obj)
+        return str(location.source_latitude) if location else None
+
+    def get_location_accuracy_m(self, obj):
+        location = get_provider_live_location(obj)
+        return str(location.accuracy_m) if location else None
+
+    def get_location_updated_at(self, obj):
+        location = get_provider_live_location(obj)
+        return location.received_at if location else None
+
+    def get_location_expires_at(self, obj):
+        return location_expires_at(get_provider_live_location(obj))
 
     def get_service_names(self, obj):
         return [service.category.name for service in obj.services.all() if service.is_active]

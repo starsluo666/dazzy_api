@@ -1,3 +1,4 @@
+import uuid
 from datetime import time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from accounts.models import User
 from activities.models import Activity, ActivityCategory
 from providers.models import (
     ProviderProfile,
+    ProviderLiveLocation,
     ProviderService,
     ProviderWeeklyAvailability,
     ServiceCategory,
@@ -33,9 +35,20 @@ class HomeDiscoveryTests(TestCase):
                 status=ProviderProfile.Status.APPROVED,
                 service_city_code="130400",
                 service_city_name="邯郸市",
-                service_center=Point(114.518 + index * 0.001, 36.607, srid=4326),
+                is_accepting_orders=True,
                 rating=Decimal("4.90") - Decimal(index) / 100,
                 service_count=20 - index,
+            )
+            now = timezone.now()
+            ProviderLiveLocation.objects.create(
+                provider=provider,
+                session_id=uuid.uuid4(),
+                source_longitude=Decimal("114.5240070") + Decimal(index) / 1000,
+                source_latitude=Decimal("36.6074460"),
+                position=Point(114.518 + index * 0.001, 36.607, srid=4326),
+                accuracy_m=Decimal("12.00"),
+                located_at=now,
+                received_at=now,
             )
             ProviderService.objects.create(
                 provider=provider,

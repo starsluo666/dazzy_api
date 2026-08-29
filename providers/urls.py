@@ -12,7 +12,9 @@ from .views import (
     CurrentProviderScheduleDayView,
     CurrentProviderSchedulePeriodView,
     CurrentProviderScheduleView,
-    CurrentProviderServiceLocationView,
+    CurrentProviderOnlineLocationView,
+    CurrentProviderOnlineStartView,
+    CurrentProviderOnlineStopView,
     CurrentProviderWorkbenchView,
 )
 
@@ -43,9 +45,19 @@ urlpatterns = [
         "providers/me/workbench/", CurrentProviderWorkbenchView.as_view(), name="provider-workbench"
     ),
     path(
-        "providers/me/service-location/",
-        CurrentProviderServiceLocationView.as_view(),
-        name="provider-service-location",
+        "providers/me/online/start/",
+        CurrentProviderOnlineStartView.as_view(),
+        name="provider-online-start",
+    ),
+    path(
+        "providers/me/online/location/",
+        CurrentProviderOnlineLocationView.as_view(),
+        name="provider-online-location",
+    ),
+    path(
+        "providers/me/online/stop/",
+        CurrentProviderOnlineStopView.as_view(),
+        name="provider-online-stop",
     ),
     path("providers/me/schedule/", CurrentProviderScheduleView.as_view(), name="provider-schedule"),
     path(

@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from locations.models import UserAddress
 from mediafiles.models import MediaAsset
 from orders.models import ProviderOrder
 from providers.models import (
+    ProviderLiveLocation,
     ProviderProfile,
     ProviderService,
     ProviderWeeklyAvailability,
@@ -110,6 +112,19 @@ class BackofficeProviderReviewTests(APITestCase):
 
     def setUp(self):
         self.client.force_authenticate(self.admin_user)
+
+    def create_live_location(self, provider, *, accuracy_m="16.00"):
+        now = timezone.now()
+        return ProviderLiveLocation.objects.create(
+            provider=provider,
+            session_id=uuid.uuid4(),
+            source_longitude=Decimal("114.5389610"),
+            source_latitude=Decimal("36.6256570"),
+            position=Point(114.5328, 36.6252, srid=4326),
+            accuracy_m=Decimal(accuracy_m),
+            located_at=now,
+            received_at=now,
+        )
 
     def create_fulfillment_order(
         self, *, order_no, provider, status=ProviderOrder.Status.PENDING_CONFIRMATION,
@@ -355,9 +370,9 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertFalse(self.handan.is_accepting_orders)
         provider_client = self.client_class()
         provider_client.force_authenticate(self.handan_user)
-        reopen = provider_client.patch(
-            "/api/v1/providers/me/workbench/",
-            {"is_accepting_orders": True},
+        reopen = provider_client.post(
+            "/api/v1/providers/me/online/start/",
+            {"longitude": "114.5389610", "latitude": "36.6256570", "accuracy_m": "16"},
             format="json",
         )
         self.assertEqual(reopen.status_code, status.HTTP_400_BAD_REQUEST)
@@ -412,6 +427,7 @@ class BackofficeProviderReviewTests(APITestCase):
         self.handan.status = ProviderProfile.Status.APPROVED
         self.handan.is_accepting_orders = True
         self.handan.save(update_fields=("status", "is_accepting_orders", "updated_at"))
+        self.create_live_location(self.handan)
 
         response = self.client.get(reverse("backoffice-providers"))
 
@@ -422,14 +438,11 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(data["summary"]["total"], 1)
         self.assertEqual(data["summary"]["accepting"], 1)
 
-    def test_provider_management_detail_includes_private_service_location(self):
+    def test_provider_management_detail_includes_current_live_location(self):
         self.handan.status = ProviderProfile.Status.APPROVED
-        self.handan.service_location_name = "邯郸美乐城"
-        self.handan.service_address = "河北省邯郸市丛台区人民东路456号"
-        self.handan.source_longitude = Decimal("114.5389610")
-        self.handan.source_latitude = Decimal("36.6256570")
-        self.handan.service_center = Point(114.5328, 36.6252, srid=4326)
-        self.handan.save()
+        self.handan.is_accepting_orders = True
+        self.handan.save(update_fields=("status", "is_accepting_orders", "updated_at"))
+        self.create_live_location(self.handan)
 
         response = self.client.get(
             reverse("backoffice-provider-detail", args=(self.handan.id,))
@@ -437,10 +450,11 @@ class BackofficeProviderReviewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         data = response.data["data"]
-        self.assertTrue(data["has_service_location"])
-        self.assertEqual(data["service_location_name"], "邯郸美乐城")
-        self.assertEqual(data["service_address"], "河北省邯郸市丛台区人民东路456号")
-        self.assertEqual(data["source_longitude"], "114.5389610")
+        self.assertTrue(data["is_online"])
+        self.assertTrue(data["has_live_location"])
+        self.assertEqual(data["current_longitude"], "114.5389610")
+        self.assertEqual(data["location_accuracy_m"], "16.00")
+        self.assertIsNotNone(data["location_updated_at"])
 
     def test_user_and_provider_management_permissions_are_required(self):
         restricted_user = User.objects.create_user(
@@ -898,25 +912,15 @@ class BackofficeProviderReviewTests(APITestCase):
             starts_at=time(13),
             ends_at=time(17),
         )
-        location_response = provider_client.put(
-            "/api/v1/providers/me/service-location/",
+        accepting_response = provider_client.post(
+            "/api/v1/providers/me/online/start/",
             {
-                "service_city_code": "130400",
-                "service_city_name": "邯郸市",
-                "service_location_name": "邯郸美乐城",
-                "service_address": "河北省邯郸市丛台区人民东路456号",
                 "longitude": "114.5389610",
                 "latitude": "36.6256570",
-                "max_service_radius_km": 20,
+                "accuracy_m": "16.00",
             },
             format="json",
         )
-        accepting_response = provider_client.patch(
-            "/api/v1/providers/me/workbench/",
-            {"is_accepting_orders": True},
-            format="json",
-        )
-        self.assertEqual(location_response.status_code, status.HTTP_200_OK)
         self.assertEqual(accepting_response.status_code, status.HTTP_200_OK)
 
         public_client = self.client_class()

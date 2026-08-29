@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from django.utils import timezone
 
@@ -5,6 +7,7 @@ from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 
 from .models import ProviderProfile, ProviderService, ServiceCategory
+from .presence import MAX_LOCATION_ACCURACY_M, provider_is_online
 
 
 class ProviderListQuerySerializer(serializers.Serializer):
@@ -179,42 +182,38 @@ class ProviderDateClosureSerializer(serializers.Serializer):
     is_closed = serializers.BooleanField()
 
 
-class ProviderAcceptingOrdersSerializer(serializers.Serializer):
-    is_accepting_orders = serializers.BooleanField()
-
-
-class ProviderServiceLocationSerializer(serializers.ModelSerializer):
+class ProviderLiveLocationInputSerializer(serializers.Serializer):
     longitude = serializers.DecimalField(
-        source="source_longitude", max_digits=10, decimal_places=7, required=True
+        max_digits=10,
+        decimal_places=7,
+        min_value=Decimal("-180"),
+        max_value=Decimal("180"),
     )
     latitude = serializers.DecimalField(
-        source="source_latitude", max_digits=10, decimal_places=7, required=True
+        max_digits=10,
+        decimal_places=7,
+        min_value=Decimal("-90"),
+        max_value=Decimal("90"),
     )
-    has_service_location = serializers.SerializerMethodField()
+    accuracy_m = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        min_value=Decimal("0"),
+        max_value=MAX_LOCATION_ACCURACY_M,
+    )
+    speed_mps = serializers.DecimalField(
+        required=False,
+        allow_null=True,
+        max_digits=8,
+        decimal_places=2,
+        min_value=Decimal("0"),
+        max_value=Decimal("100"),
+    )
+    located_at = serializers.DateTimeField(required=False)
 
-    class Meta:
-        model = ProviderProfile
-        fields = (
-            "has_service_location",
-            "service_city_code",
-            "service_city_name",
-            "service_location_name",
-            "service_address",
-            "longitude",
-            "latitude",
-            "max_service_radius_km",
-        )
-        read_only_fields = ("has_service_location",)
-        extra_kwargs = {
-            "service_city_code": {"required": True, "allow_blank": False},
-            "service_city_name": {"required": True, "allow_blank": False},
-            "service_location_name": {"required": True, "allow_blank": False},
-            "service_address": {"required": True, "allow_blank": False},
-            "max_service_radius_km": {"required": True},
-        }
 
-    def get_has_service_location(self, obj) -> bool:
-        return bool(obj.service_center)
+class ProviderLiveLocationUpdateSerializer(ProviderLiveLocationInputSerializer):
+    session_id = serializers.UUIDField()
 
 
 class ProviderServiceSummarySerializer(serializers.ModelSerializer):
@@ -239,6 +238,7 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
     birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
     avatar_url = serializers.SerializerMethodField()
     verified = serializers.SerializerMethodField()
+    is_online = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
     services = ProviderServiceSummarySerializer(many=True)
 
@@ -250,6 +250,7 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
             "birth_date",
             "avatar_url",
             "verified",
+            "is_online",
             "service_city_name",
             "bio",
             "rating",
@@ -264,6 +265,9 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
 
     def get_verified(self, obj) -> bool:
         return obj.user.verification_status == obj.user.VerificationStatus.VERIFIED
+
+    def get_is_online(self, obj) -> bool:
+        return provider_is_online(obj)
 
     def get_distance_km(self, obj) -> float | None:
         distance = getattr(obj, "distance", None)

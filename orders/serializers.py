@@ -7,6 +7,7 @@ from locations.tencent import tencent_map
 from locations.models import UserAddress
 from providers.models import ProviderProfile, ProviderService
 from providers.availability import ensure_booking_within_schedule
+from providers.presence import get_provider_live_location, provider_is_online
 
 from .models import ProviderOrder
 from .services import build_quote, validate_booking
@@ -36,7 +37,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
             raise serializers.ValidationError({"address_id": "请先补全该地址的联系人信息。"})
         try:
             service = ProviderService.objects.select_related(
-                "provider__user", "category"
+                "provider__user", "provider__live_location", "category"
             ).get(
                 id=attrs["service_id"],
                 is_active=True,
@@ -50,11 +51,12 @@ class ProviderOrderInputSerializer(serializers.Serializer):
         )
         ensure_booking_within_schedule(service.provider, attrs["starts_at"], ends_at)
         provider = service.provider
-        if provider.source_longitude is None or provider.source_latitude is None:
-            raise serializers.ValidationError({"service_id": "达人尚未配置服务中心，暂时无法预约。"})
+        location = get_provider_live_location(provider)
+        if not provider_is_online(provider) or location is None:
+            raise serializers.ValidationError({"service_id": "达人当前不在线，暂时无法预约。"})
         route = tencent_map.driving_route(
-            provider.source_longitude,
-            provider.source_latitude,
+            location.source_longitude,
+            location.source_latitude,
             address.longitude,
             address.latitude,
         )

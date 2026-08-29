@@ -12,7 +12,7 @@ def public_providers():
             user__account_status="active",
             services__is_active=True,
         )
-        .select_related("user", "lifestyle_photo")
+        .select_related("user", "lifestyle_photo", "live_location")
         .prefetch_related(Prefetch("services", queryset=active_services))
         .distinct()
     )

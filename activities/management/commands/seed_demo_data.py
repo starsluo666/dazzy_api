@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 from decimal import Decimal
+import uuid
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -7,6 +8,7 @@ from django.utils import timezone
 from accounts.models import User
 from config.geospatial import gcj02_to_wgs84
 from providers.models import (
+    ProviderLiveLocation,
     ProviderProfile,
     ProviderService,
     ProviderWeeklyAvailability,
@@ -93,13 +95,24 @@ class Command(BaseCommand):
                     "bio": "认真生活，也认真陪你体验城市里的好时光。",
                     "service_city_code": "130400",
                     "service_city_name": "邯郸市",
-                    "source_longitude": Decimal(lng),
-                    "source_latitude": Decimal(lat),
-                    "service_center": gcj02_to_wgs84(Decimal(lng), Decimal(lat)),
                     "max_service_radius_km": 20,
                     "rating": Decimal(rating),
                     "service_count": 32 - index * 3,
                     "order_count": 36 - index * 3,
+                    "is_accepting_orders": True,
+                },
+            )
+            now = timezone.now()
+            ProviderLiveLocation.objects.update_or_create(
+                provider=provider,
+                defaults={
+                    "session_id": uuid.uuid4(),
+                    "source_longitude": Decimal(lng),
+                    "source_latitude": Decimal(lat),
+                    "position": gcj02_to_wgs84(Decimal(lng), Decimal(lat)),
+                    "accuracy_m": Decimal("10.00"),
+                    "located_at": now,
+                    "received_at": now,
                 },
             )
             ProviderService.objects.update_or_create(
@@ -140,15 +153,26 @@ class Command(BaseCommand):
                 "bio": "喜欢旅行、桌游与城市探索，可根据你的计划灵活选择服务。",
                 "service_city_code": "130400",
                 "service_city_name": "邯郸市",
-                "source_longitude": Decimal(demo["longitude"]),
-                "source_latitude": Decimal(demo["latitude"]),
-                "service_center": gcj02_to_wgs84(
-                    Decimal(demo["longitude"]), Decimal(demo["latitude"])
-                ),
                 "max_service_radius_km": 30,
                 "rating": Decimal("4.95"),
                 "service_count": 48,
                 "order_count": 53,
+                "is_accepting_orders": True,
+            },
+        )
+        now = timezone.now()
+        ProviderLiveLocation.objects.update_or_create(
+            provider=multi_provider,
+            defaults={
+                "session_id": uuid.uuid4(),
+                "source_longitude": Decimal(demo["longitude"]),
+                "source_latitude": Decimal(demo["latitude"]),
+                "position": gcj02_to_wgs84(
+                    Decimal(demo["longitude"]), Decimal(demo["latitude"])
+                ),
+                "accuracy_m": Decimal("10.00"),
+                "located_at": now,
+                "received_at": now,
             },
         )
         for category_slug, billing_type, price, duration, description in demo["services"]:

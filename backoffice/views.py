@@ -16,6 +16,7 @@ from config.api import paginated_response
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
 from providers.models import ProviderProfile
+from providers.presence import online_provider_query
 
 from .access import client_ip, resolve_admin_access
 from .models import (
@@ -101,7 +102,7 @@ def admin_user_queryset(access):
 def provider_admin_queryset(access):
     return (
         scoped_providers(access)
-        .select_related("user", "lifestyle_photo")
+        .select_related("user", "lifestyle_photo", "live_location")
         .prefetch_related(
             "services__category",
             "weekly_availability",
@@ -536,13 +537,10 @@ class ProviderAdminListView(APIView):
                 Q(user__nickname__icontains=keyword) | Q(user__phone__icontains=keyword)
             )
         summary_queryset = queryset
+        online_query = online_provider_query(timezone.now())
         summary = {
             "total": summary_queryset.count(),
-            "accepting": summary_queryset.filter(
-                status=ProviderProfile.Status.APPROVED,
-                is_accepting_orders=True,
-                admin_order_restricted=False,
-            ).count(),
+            "accepting": summary_queryset.filter(online_query).count(),
             "restricted": summary_queryset.filter(admin_order_restricted=True).count(),
             "suspended": summary_queryset.filter(
                 status=ProviderProfile.Status.SUSPENDED
@@ -554,17 +552,12 @@ class ProviderAdminListView(APIView):
         if verification_status := params.get("verification_status"):
             queryset = queryset.filter(user__verification_status=verification_status)
         if params["accepting"] == "accepting":
-            queryset = queryset.filter(
-                status=ProviderProfile.Status.APPROVED,
-                is_accepting_orders=True,
-                admin_order_restricted=False,
-            )
+            queryset = queryset.filter(online_query)
         elif params["accepting"] == "paused":
             queryset = queryset.filter(
                 status=ProviderProfile.Status.APPROVED,
-                is_accepting_orders=False,
                 admin_order_restricted=False,
-            )
+            ).exclude(online_query)
         elif params["accepting"] == "restricted":
             queryset = queryset.filter(admin_order_restricted=True)
         page = params["page"]

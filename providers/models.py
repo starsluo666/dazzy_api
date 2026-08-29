@@ -2,8 +2,8 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.gis.db import models
-from django.core.validators import MaxValueValidator, MinValueValidator
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 
 
 class ServiceCategory(models.Model):
@@ -34,10 +34,6 @@ class ProviderProfile(models.Model):
         REJECTED = "rejected", "已驳回"
         SUSPENDED = "suspended", "已暂停"
 
-    class MapSource(models.TextChoices):
-        AMAP = "amap", "高德地图"
-        TENCENT = "tencent", "腾讯地图"
-
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -56,20 +52,6 @@ class ProviderProfile(models.Model):
     )
     service_city_code = models.CharField("服务城市编码", max_length=20, blank=True)
     service_city_name = models.CharField("服务城市", max_length=50, blank=True)
-    service_location_name = models.CharField("常驻服务地点", max_length=100, blank=True)
-    service_address = models.CharField("常驻服务地址", max_length=255, blank=True)
-    map_source = models.CharField(
-        "地图来源", max_length=16, choices=MapSource, default=MapSource.AMAP
-    )
-    source_longitude = models.DecimalField(
-        "原始GCJ-02经度", max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    source_latitude = models.DecimalField(
-        "原始GCJ-02纬度", max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    service_center = models.PointField(
-        "服务中心点（WGS84）", geography=True, srid=4326, null=True, blank=True
-    )
     max_service_radius_km = models.PositiveSmallIntegerField(
         "最大服务半径（公里）",
         default=10,
@@ -90,7 +72,7 @@ class ProviderProfile(models.Model):
     submitted_at = models.DateTimeField("申请提交时间", null=True, blank=True)
     reviewed_at = models.DateTimeField("审核时间", null=True, blank=True)
     rejection_reason = models.CharField("驳回原因", max_length=500, blank=True)
-    is_accepting_orders = models.BooleanField("允许新预约", default=True)
+    is_accepting_orders = models.BooleanField("已开启接单", default=False)
     admin_order_restricted = models.BooleanField("后台限制接单", default=False)
     admin_restriction_reason = models.CharField("后台限制原因", max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -111,6 +93,46 @@ class ProviderProfile(models.Model):
 
     def __str__(self) -> str:
         return str(self.user)
+
+
+class ProviderLiveLocation(models.Model):
+    provider = models.OneToOneField(
+        ProviderProfile,
+        on_delete=models.CASCADE,
+        related_name="live_location",
+        verbose_name="达人",
+    )
+    session_id = models.UUIDField("接单会话ID", unique=True, null=True, blank=True)
+    source_longitude = models.DecimalField("GCJ-02经度", max_digits=10, decimal_places=7)
+    source_latitude = models.DecimalField("GCJ-02纬度", max_digits=10, decimal_places=7)
+    position = models.PointField("实时位置（WGS84）", geography=True, srid=4326)
+    accuracy_m = models.DecimalField(
+        "定位精度（米）",
+        max_digits=8,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    speed_mps = models.DecimalField(
+        "速度（米/秒）",
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    located_at = models.DateTimeField("客户端定位时间")
+    received_at = models.DateTimeField("服务端接收时间")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_live_location"
+        indexes = [models.Index(fields=("received_at",))]
+        verbose_name = "达人实时位置"
+        verbose_name_plural = verbose_name
+
+    def __str__(self) -> str:
+        return f"{self.provider} @ {self.received_at:%Y-%m-%d %H:%M:%S}"
 
 
 class ProviderService(models.Model):
