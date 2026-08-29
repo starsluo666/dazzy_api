@@ -29,7 +29,8 @@ def _service_duration(service: ProviderService) -> int:
 def _recommended_providers(params, point, request):
     queryset = public_providers().filter(online_provider_query()).annotate(
         starting_price_amount=Min(
-            "services__price_amount", filter=Q(services__is_active=True)
+            "services__price_amount",
+            filter=Q(services__is_active=True, services__category__is_active=True),
         )
     )
     if city_code := params.get("city_code"):

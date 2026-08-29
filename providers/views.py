@@ -74,10 +74,17 @@ class ProviderListView(APIView):
         params = query.validated_data
 
         queryset = public_providers().filter(online_provider_query()).annotate(
-            starting_price_amount=Min("services__price_amount", filter=Q(services__is_active=True))
+            starting_price_amount=Min(
+                "services__price_amount",
+                filter=Q(services__is_active=True, services__category__is_active=True),
+            )
         )
         if category := params.get("category"):
-            queryset = queryset.filter(services__category__slug=category, services__is_active=True)
+            queryset = queryset.filter(
+                services__category__slug=category,
+                services__category__is_active=True,
+                services__is_active=True,
+            )
         if city_code := params.get("city_code"):
             queryset = queryset.filter(service_city_code=city_code)
 
@@ -132,6 +139,7 @@ class ProviderAvailabilityView(APIView):
             id=params["service_id"],
             provider=provider,
             is_active=True,
+            category__is_active=True,
         )
         duration = params.get("duration_minutes")
         if service.billing_type == ProviderService.BillingType.PER_SESSION:

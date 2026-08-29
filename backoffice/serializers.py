@@ -6,9 +6,10 @@ from rest_framework import serializers
 
 from accounts.models import User
 from accounts.serializers import UserSerializer
+from activities.models import Activity, ActivityParticipation
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
-from providers.models import ProviderProfile
+from providers.models import ProviderProfile, ServiceCategory
 from providers.presence import (
     get_provider_live_location,
     location_expires_at,
@@ -32,6 +33,172 @@ def mask_phone(phone):
 
 class AdminOverviewQuerySerializer(serializers.Serializer):
     days = serializers.ChoiceField(required=False, default=7, choices=(7, 30))
+
+
+class AdminServiceCategoryQuerySerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        required=False,
+        default="all",
+        choices=("all", "active", "inactive"),
+    )
+    search = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
+class AdminServiceCategorySerializer(serializers.ModelSerializer):
+    icon_url = serializers.SerializerMethodField()
+    service_count = serializers.IntegerField(read_only=True, default=0)
+    active_service_count = serializers.IntegerField(read_only=True, default=0)
+    provider_count = serializers.IntegerField(read_only=True, default=0)
+    city_codes = serializers.ListField(
+        child=serializers.CharField(max_length=20, trim_whitespace=True),
+        required=False,
+        allow_empty=True,
+    )
+
+    class Meta:
+        model = ServiceCategory
+        fields = (
+            "id", "name", "slug", "icon_object_key", "icon_url", "city_codes",
+            "sort_order", "is_active", "service_count", "active_service_count",
+            "provider_count", "created_at", "updated_at",
+        )
+        read_only_fields = ("id", "icon_url", "created_at", "updated_at")
+
+    def get_icon_url(self, obj):
+        return build_media_url(obj.icon_object_key) if obj.icon_object_key else None
+
+    def validate_city_codes(self, value):
+        normalized = []
+        for code in value:
+            code = code.strip()
+            if code and code not in normalized:
+                normalized.append(code)
+        return normalized
+
+    def validate_slug(self, value):
+        normalized = value.strip().lower()
+        queryset = ServiceCategory.objects.filter(slug__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("该分类标识已存在。")
+        return normalized
+
+    def validate(self, attrs):
+        instance = self.instance
+        next_slug = attrs.get("slug")
+        if (
+            instance
+            and next_slug
+            and next_slug != instance.slug
+            and instance.provider_services.exists()
+        ):
+            raise serializers.ValidationError(
+                {"slug": "该分类已有达人服务关联，标识不可修改。"}
+            )
+        return attrs
+
+
+class AdminActivityQuerySerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        required=False,
+        allow_blank=True,
+        choices=Activity.Status.choices,
+    )
+    city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    category = serializers.SlugField(required=False, allow_blank=True, max_length=40)
+    search = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
+class AdminActivityReviewSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=("approve", "reject"))
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+    def validate(self, attrs):
+        if attrs["decision"] == "reject" and len(attrs.get("reason", "").strip()) < 2:
+            raise serializers.ValidationError({"reason": "驳回活动时请填写明确原因。"})
+        return attrs
+
+
+class AdminActivitySerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    category_name = serializers.CharField(source="category.name")
+    category_slug = serializers.CharField(source="category.slug")
+    organizer_public_id = serializers.UUIDField(source="organizer.public_id")
+    organizer_name = serializers.CharField(source="organizer.nickname")
+    organizer_phone_masked = serializers.SerializerMethodField()
+    organizer_verification_status = serializers.CharField(source="organizer.verification_status")
+    organizer_verification_status_label = serializers.CharField(
+        source="organizer.get_verification_status_display"
+    )
+    organizer_account_status = serializers.CharField(source="organizer.account_status")
+    organizer_account_status_label = serializers.CharField(
+        source="organizer.get_account_status_display"
+    )
+    cover_url = serializers.SerializerMethodField()
+    participant_count = serializers.IntegerField(read_only=True, default=0)
+    reviewed_by_name = serializers.CharField(
+        source="reviewed_by.nickname",
+        allow_null=True,
+    )
+    publish_order = serializers.SerializerMethodField()
+    participants = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Activity
+        fields = (
+            "id", "title", "status", "status_label", "category_name", "category_slug",
+            "organizer_public_id", "organizer_name", "organizer_phone_masked",
+            "organizer_verification_status", "organizer_verification_status_label",
+            "organizer_account_status", "organizer_account_status_label", "cover_url",
+            "city_code", "city_name", "starts_at", "ends_at", "formation_deadline",
+            "meeting_place_name", "meeting_address", "source_longitude", "source_latitude",
+            "capacity", "min_participants", "participant_count", "description",
+            "participation_rules", "aa_principal_amount", "refund_template_version",
+            "refund_rule_snapshot", "publish_order", "published_at", "reviewed_by_name",
+            "reviewed_at", "rejection_reason", "participants", "created_at", "updated_at",
+        )
+
+    def get_organizer_phone_masked(self, obj):
+        return mask_phone(obj.organizer.phone)
+
+    def get_cover_url(self, obj):
+        return build_media_url(obj.cover.object_key) if obj.cover_id else None
+
+    def get_publish_order(self, obj):
+        order = next(iter(obj.publish_orders.all()), None)
+        if not order:
+            return None
+        return {
+            "order_no": order.order_no,
+            "status": order.status,
+            "status_label": order.get_status_display(),
+            "aa_principal_amount": order.aa_principal_amount,
+            "platform_service_fee_amount": order.platform_service_fee_amount,
+            "payable_amount": order.payable_amount,
+            "pricing_snapshot": order.pricing_snapshot,
+            "paid_at": order.paid_at,
+        }
+
+    def get_participants(self, obj):
+        if not self.context.get("include_detail"):
+            return []
+        return [
+            {
+                "public_id": participation.user.public_id,
+                "nickname": participation.user.nickname,
+                "phone_masked": mask_phone(participation.user.phone),
+                "status": participation.status,
+                "status_label": participation.get_status_display(),
+                "joined_at": participation.joined_at,
+                "cancelled_at": participation.cancelled_at,
+            }
+            for participation in obj.participations.all()
+        ]
 
 
 class AdminOrganizationSerializer(serializers.ModelSerializer):

@@ -41,6 +41,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
             ).get(
                 id=attrs["service_id"],
                 is_active=True,
+                category__is_active=True,
                 provider__status=ProviderProfile.Status.APPROVED,
                 provider__is_accepting_orders=True,
             )

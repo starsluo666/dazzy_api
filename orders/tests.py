@@ -116,6 +116,20 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(data["discount_amount"], 0)
         self.assertEqual(data["payable_amount"], 36600)
 
+    def test_inactive_service_category_cannot_be_booked(self):
+        category = self.service.category
+        category.is_active = False
+        category.save(update_fields=("is_active", "updated_at"))
+
+        response = self.client.post(
+            "/api/v1/provider-orders/preview/",
+            self.payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("服务不存在或不可预约", response.json()["service_id"][0])
+
     def test_create_locks_slot_and_simulated_payment_moves_to_pending_acceptance(self):
         create = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"

@@ -86,6 +86,15 @@ class ProviderModelTests(TestCase):
         self.assertEqual(response.json()["data"]["items"][0]["nickname"], "晓晓")
         self.assertIsNotNone(response.json()["data"]["items"][0]["distance_km"])
 
+        category.is_active = False
+        category.save(update_fields=("is_active", "updated_at"))
+        inactive_category_response = self.client.get("/api/v1/providers/")
+        self.assertEqual(
+            inactive_category_response.json()["data"]["pagination"]["total"], 0
+        )
+        category.is_active = True
+        category.save(update_fields=("is_active", "updated_at"))
+
         ProviderLiveLocation.objects.filter(provider=provider).update(
             received_at=timezone.now() - timedelta(minutes=31)
         )

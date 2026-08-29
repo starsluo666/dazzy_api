@@ -160,6 +160,7 @@ class MyActivityListView(APIView):
 
         now = timezone.now()
         terminal_statuses = (
+            Activity.Status.REJECTED,
             Activity.Status.COMPLETED,
             Activity.Status.CANCELLED,
             Activity.Status.FAILED_TO_FORM,

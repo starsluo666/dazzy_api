@@ -86,7 +86,11 @@ def start_provider_online(
     locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
     if locked.admin_order_restricted:
         raise ValidationError({"detail": "平台当前限制接单，请联系客服处理。"})
-    if not ProviderService.objects.filter(provider=locked, is_active=True).exists():
+    if not ProviderService.objects.filter(
+        provider=locked,
+        is_active=True,
+        category__is_active=True,
+    ).exists():
         raise ValidationError({"detail": "请先添加并启用至少一项服务。"})
 
     now = timezone.now()

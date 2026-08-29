@@ -28,6 +28,7 @@ class Activity(models.Model):
     class Status(models.TextChoices):
         DRAFT = "draft", "草稿"
         PENDING_REVIEW = "pending_review", "待审核"
+        REJECTED = "rejected", "已驳回"
         RECRUITING = "recruiting", "报名中"
         FORMED = "formed", "已成局"
         IN_PROGRESS = "in_progress", "进行中"
@@ -61,6 +62,8 @@ class Activity(models.Model):
     formation_deadline = models.DateTimeField("成局截止时间")
     meeting_place_name = models.CharField("集合地点名称", max_length=100)
     meeting_address = models.CharField("集合地点地址", max_length=255)
+    city_code = models.CharField("活动城市编码", max_length=20, blank=True)
+    city_name = models.CharField("活动城市", max_length=50, blank=True)
     map_source = models.CharField(
         "地图来源", max_length=16, choices=MapSource, default=MapSource.AMAP
     )
@@ -80,6 +83,16 @@ class Activity(models.Model):
     refund_rule_snapshot = models.JSONField("退款规则快照")
     status = models.CharField("状态", max_length=20, choices=Status, default=Status.DRAFT)
     published_at = models.DateTimeField("发布时间", null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="reviewed_activities",
+        null=True,
+        blank=True,
+        verbose_name="审核人",
+    )
+    reviewed_at = models.DateTimeField("审核时间", null=True, blank=True)
+    rejection_reason = models.CharField("驳回原因", max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

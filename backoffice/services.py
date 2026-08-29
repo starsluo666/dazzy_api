@@ -5,6 +5,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from accounts.models import User
+from activities.models import Activity, ActivityPublishOrder
 from orders.models import ProviderOrder
 from providers.models import ProviderLiveLocation, ProviderProfile
 
@@ -29,6 +30,80 @@ def _scoped_users(access):
             | Q(provider_profile__service_city_code__in=access.city_codes)
         )
     return queryset.distinct()
+
+
+@transaction.atomic
+def review_activity(*, activity_id, decision, reason, actor, access, request):
+    queryset = Activity.objects.select_for_update().select_related(
+        "category", "organizer"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(city_code__in=access.city_codes)
+    activity = get_object_or_404(queryset, id=activity_id)
+    if activity.status != Activity.Status.PENDING_REVIEW:
+        raise ValidationError("仅待审核活动可以执行审核。")
+
+    publish_order = (
+        ActivityPublishOrder.objects.select_for_update()
+        .filter(activity=activity)
+        .order_by("-created_at")
+        .first()
+    )
+    if not publish_order or publish_order.status != ActivityPublishOrder.Status.PAID:
+        raise ValidationError("活动发布支付单未支付，暂不能审核。")
+
+    now = timezone.now()
+    if decision == "approve":
+        if not activity.category.is_active:
+            raise ValidationError({"decision": "活动分类已停用，不能通过审核。"})
+        if activity.organizer.verification_status != User.VerificationStatus.VERIFIED:
+            raise ValidationError({"decision": "发起人尚未完成实名认证。"})
+        if activity.organizer.account_status != User.AccountStatus.ACTIVE:
+            raise ValidationError({"decision": "发起人账号当前不可用。"})
+        if activity.formation_deadline <= now or activity.starts_at <= now:
+            raise ValidationError({"decision": "活动报名或开始时间已经过期。"})
+
+    before = {
+        "status": activity.status,
+        "rejection_reason": activity.rejection_reason,
+        "publish_order_status": publish_order.status,
+    }
+    activity.status = (
+        Activity.Status.RECRUITING
+        if decision == "approve"
+        else Activity.Status.REJECTED
+    )
+    activity.reviewed_by = actor
+    activity.reviewed_at = now
+    activity.rejection_reason = reason.strip() if decision == "reject" else ""
+    activity.published_at = now if decision == "approve" else None
+    activity.save(
+        update_fields=(
+            "status", "reviewed_by", "reviewed_at", "rejection_reason",
+            "published_at", "updated_at",
+        )
+    )
+    if decision == "reject":
+        # 当前支付链路为模拟支付；真实支付接入后在此替换为退款单和异步回调。
+        publish_order.status = ActivityPublishOrder.Status.REFUNDED
+        publish_order.save(update_fields=("status", "updated_at"))
+
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"activity.review.{decision}",
+        target_type="activity",
+        target_id=str(activity.id),
+        before=before,
+        after={
+            "status": activity.status,
+            "rejection_reason": activity.rejection_reason,
+            "publish_order_status": publish_order.status,
+        },
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return activity
 
 
 @transaction.atomic

@@ -1,8 +1,13 @@
 from django.urls import path
 
 from .views import (
+    AdminActivityDetailView,
+    AdminActivityListView,
+    AdminActivityReviewView,
     AdminMeView,
     AdminOverviewView,
+    AdminServiceCategoryDetailView,
+    AdminServiceCategoryListView,
     AdminUserAccountActionView,
     AdminUserDetailView,
     AdminUserListView,
@@ -29,6 +34,27 @@ from .views import (
 urlpatterns = [
     path("me/", AdminMeView.as_view(), name="backoffice-me"),
     path("overview/", AdminOverviewView.as_view(), name="backoffice-overview"),
+    path("activities/", AdminActivityListView.as_view(), name="backoffice-activities"),
+    path(
+        "activities/<int:activity_id>/",
+        AdminActivityDetailView.as_view(),
+        name="backoffice-activity-detail",
+    ),
+    path(
+        "activities/<int:activity_id>/review/",
+        AdminActivityReviewView.as_view(),
+        name="backoffice-activity-review",
+    ),
+    path(
+        "service-categories/",
+        AdminServiceCategoryListView.as_view(),
+        name="backoffice-service-categories",
+    ),
+    path(
+        "service-categories/<int:category_id>/",
+        AdminServiceCategoryDetailView.as_view(),
+        name="backoffice-service-category-detail",
+    ),
     path("users/", AdminUserListView.as_view(), name="backoffice-users"),
     path(
         "users/<uuid:public_id>/",

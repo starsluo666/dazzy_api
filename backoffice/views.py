@@ -2,7 +2,7 @@ from datetime import datetime, time, timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -11,11 +11,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from activities.models import Activity
+from activities.models import Activity, ActivityParticipation, ActivityPublishOrder
 from config.api import paginated_response
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
-from providers.models import ProviderProfile
+from providers.models import ProviderProfile, ProviderService, ServiceCategory
 from providers.presence import online_provider_query
 
 from .access import client_ip, resolve_admin_access
@@ -27,9 +27,14 @@ from .models import (
     ProviderOrderSupportNote,
 )
 from .serializers import (
+    AdminActivityQuerySerializer,
+    AdminActivityReviewSerializer,
+    AdminActivitySerializer,
     AdminMeSerializer,
     AdminOverviewQuerySerializer,
     AdminOrganizationSerializer,
+    AdminServiceCategoryQuerySerializer,
+    AdminServiceCategorySerializer,
     AdminUserAccountActionSerializer,
     AdminUserListSerializer,
     AdminUserQuerySerializer,
@@ -60,6 +65,7 @@ from .services import (
     create_provider_order_after_sales_case,
     review_provider_order_after_sales_case,
     review_provider_application,
+    review_activity,
 )
 
 
@@ -114,6 +120,62 @@ def provider_admin_queryset(access):
 
 def can_access(access, permission):
     return "*" in access.permissions or permission in access.permissions
+
+
+def service_category_admin_queryset():
+    return ServiceCategory.objects.annotate(
+        service_count=Count("provider_services", distinct=True),
+        active_service_count=Count(
+            "provider_services",
+            filter=Q(provider_services__is_active=True, is_active=True),
+            distinct=True,
+        ),
+        provider_count=Count("provider_services__provider", distinct=True),
+    )
+
+
+def service_category_audit_snapshot(category):
+    return {
+        "name": category.name,
+        "slug": category.slug,
+        "icon_object_key": category.icon_object_key,
+        "city_codes": category.city_codes,
+        "sort_order": category.sort_order,
+        "is_active": category.is_active,
+    }
+
+
+def scoped_activities(access):
+    queryset = Activity.objects.all()
+    if not access.all_data:
+        queryset = queryset.filter(city_code__in=access.city_codes)
+    return queryset
+
+
+def activity_admin_queryset(access):
+    return (
+        scoped_activities(access)
+        .select_related("category", "organizer", "cover", "reviewed_by")
+        .prefetch_related(
+            Prefetch(
+                "publish_orders",
+                queryset=ActivityPublishOrder.objects.order_by("-created_at"),
+            ),
+            Prefetch(
+                "participations",
+                queryset=ActivityParticipation.objects.select_related("user").order_by(
+                    "-joined_at"
+                ),
+            ),
+        )
+        .annotate(
+            participant_count=Count(
+                "participations",
+                filter=Q(participations__status=ActivityParticipation.Status.ACTIVE),
+                distinct=True,
+            )
+        )
+    )
 
 
 def scoped_provider_orders(access):
@@ -265,7 +327,7 @@ class AdminOverviewView(APIView):
         activities = Activity.objects.all()
         if not access.all_data:
             orders = orders.filter(provider__service_city_code__in=access.city_codes)
-            activities = activities.filter(organizer__provider_profile__service_city_code__in=access.city_codes)
+            activities = activities.filter(city_code__in=access.city_codes)
         trend = build_order_trend(orders, days=days)
         week_transaction_amount = sum(
             point["transaction_amount"] for point in trend["points"][-7:]
@@ -305,6 +367,218 @@ class AdminOverviewView(APIView):
                     ],
                 }
             }
+        )
+
+
+class AdminServiceCategoryListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("service_category.view")
+        query = AdminServiceCategoryQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+        queryset = service_category_admin_queryset()
+        if keyword := params.get("search", "").strip():
+            queryset = queryset.filter(
+                Q(name__icontains=keyword) | Q(slug__icontains=keyword)
+            )
+        summary_queryset = queryset
+        summary = {
+            "total": summary_queryset.count(),
+            "active": summary_queryset.filter(is_active=True).count(),
+            "inactive": summary_queryset.filter(is_active=False).count(),
+            "active_services": ProviderService.objects.filter(
+                category__in=summary_queryset,
+                category__is_active=True,
+                is_active=True,
+            ).count(),
+        }
+        if params["status"] == "active":
+            queryset = queryset.filter(is_active=True)
+        elif params["status"] == "inactive":
+            queryset = queryset.filter(is_active=False)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset.order_by("sort_order", "id")[
+            (page - 1) * page_size : page * page_size
+        ]
+        return Response(
+            {
+                "data": {
+                    "items": AdminServiceCategorySerializer(items, many=True).data,
+                    "pagination": {"page": page, "page_size": page_size, "total": total},
+                    "summary": summary,
+                }
+            }
+        )
+
+    def post(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("service_category.manage")
+        serializer = AdminServiceCategorySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            category = serializer.save()
+            AdminAuditLog.objects.create(
+                actor=request.user,
+                organization=access.member.organization if access.member else None,
+                action="service_category.create",
+                target_type="service_category",
+                target_id=str(category.id),
+                before={},
+                after=service_category_audit_snapshot(category),
+                request_id=request.headers.get("X-Request-ID", ""),
+                ip_address=client_ip(request),
+            )
+        category = service_category_admin_queryset().get(pk=category.pk)
+        return Response(
+            {"data": AdminServiceCategorySerializer(category).data},
+            status=201,
+        )
+
+
+class AdminServiceCategoryDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, category_id):
+        access = resolve_admin_access(request.user)
+        access.require("service_category.manage")
+        with transaction.atomic():
+            category = get_object_or_404(
+                ServiceCategory.objects.select_for_update(),
+                pk=category_id,
+            )
+            before = service_category_audit_snapshot(category)
+            serializer = AdminServiceCategorySerializer(
+                category,
+                data=request.data,
+                partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            category = serializer.save()
+            action = "service_category.update"
+            if before["is_active"] != category.is_active:
+                action = (
+                    "service_category.enable"
+                    if category.is_active
+                    else "service_category.disable"
+                )
+            AdminAuditLog.objects.create(
+                actor=request.user,
+                organization=access.member.organization if access.member else None,
+                action=action,
+                target_type="service_category",
+                target_id=str(category.id),
+                before=before,
+                after=service_category_audit_snapshot(category),
+                request_id=request.headers.get("X-Request-ID", ""),
+                ip_address=client_ip(request),
+            )
+        category = service_category_admin_queryset().get(pk=category.pk)
+        return Response({"data": AdminServiceCategorySerializer(category).data})
+
+
+class AdminActivityListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("activity.view")
+        query = AdminActivityQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+        queryset = activity_admin_queryset(access)
+        if keyword := params.get("search", "").strip():
+            queryset = queryset.filter(
+                Q(title__icontains=keyword)
+                | Q(organizer__nickname__icontains=keyword)
+                | Q(organizer__phone__icontains=keyword)
+                | Q(meeting_place_name__icontains=keyword)
+            )
+        if city_code := params.get("city_code", "").strip():
+            queryset = queryset.filter(city_code=city_code)
+        if category := params.get("category", "").strip():
+            queryset = queryset.filter(category__slug=category)
+
+        summary_queryset = queryset
+        summary = {
+            "total": summary_queryset.count(),
+            "pending_review": summary_queryset.filter(
+                status=Activity.Status.PENDING_REVIEW
+            ).count(),
+            "active": summary_queryset.filter(
+                status__in=(
+                    Activity.Status.RECRUITING,
+                    Activity.Status.FORMED,
+                    Activity.Status.IN_PROGRESS,
+                )
+            ).count(),
+            "ended": summary_queryset.filter(
+                status__in=(
+                    Activity.Status.REJECTED,
+                    Activity.Status.COMPLETED,
+                    Activity.Status.CANCELLED,
+                    Activity.Status.FAILED_TO_FORM,
+                )
+            ).count(),
+        }
+        if status_value := params.get("status", ""):
+            queryset = queryset.filter(status=status_value)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset.order_by("-created_at", "-id")[
+            (page - 1) * page_size : page * page_size
+        ]
+        return Response(
+            {
+                "data": {
+                    "items": AdminActivitySerializer(items, many=True).data,
+                    "pagination": {"page": page, "page_size": page_size, "total": total},
+                    "summary": summary,
+                }
+            }
+        )
+
+
+class AdminActivityDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, activity_id):
+        access = resolve_admin_access(request.user)
+        access.require("activity.view")
+        activity = get_object_or_404(activity_admin_queryset(access), id=activity_id)
+        return Response(
+            {"data": AdminActivitySerializer(
+                activity, context={"include_detail": True}
+            ).data}
+        )
+
+
+class AdminActivityReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, activity_id):
+        access = resolve_admin_access(request.user)
+        access.require("activity.review")
+        serializer = AdminActivityReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        activity = review_activity(
+            activity_id=activity_id,
+            decision=serializer.validated_data["decision"],
+            reason=serializer.validated_data.get("reason", ""),
+            actor=request.user,
+            access=access,
+            request=request,
+        )
+        activity = get_object_or_404(activity_admin_queryset(access), id=activity.id)
+        return Response(
+            {"data": AdminActivitySerializer(
+                activity, context={"include_detail": True}
+            ).data}
         )
 
 

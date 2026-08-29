@@ -45,6 +45,8 @@ class ActivityCreateSerializer(serializers.Serializer):
     formation_deadline = serializers.DateTimeField()
     meeting_place_name = serializers.CharField(max_length=100)
     meeting_address = serializers.CharField(max_length=255)
+    city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    city_name = serializers.CharField(required=False, allow_blank=True, max_length=50)
     longitude = serializers.DecimalField(max_digits=10, decimal_places=7)
     latitude = serializers.DecimalField(max_digits=10, decimal_places=7)
     capacity = serializers.IntegerField(min_value=2, max_value=100)
@@ -141,6 +143,8 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
             "starts_at",
             "ends_at",
             "meeting_place_name",
+            "city_code",
+            "city_name",
             "capacity",
             "min_participants",
             "aa_principal_amount",
@@ -185,6 +189,8 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
     payable_amount = serializers.SerializerMethodField()
     organizer_verified = serializers.SerializerMethodField()
     organizer_rating = serializers.SerializerMethodField()
+    reviewed_at = serializers.DateTimeField(allow_null=True)
+    rejection_reason = serializers.CharField()
 
     class Meta(ActivityListItemSerializer.Meta):
         fields = ActivityListItemSerializer.Meta.fields + (
@@ -201,6 +207,8 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
             "payable_amount",
             "organizer_verified",
             "organizer_rating",
+            "reviewed_at",
+            "rejection_reason",
         )
 
     def get_platform_service_fee_amount(self, obj) -> int:

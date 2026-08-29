@@ -142,9 +142,14 @@ class ProviderServiceManageSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         billing_type = attrs.get("billing_type", getattr(self.instance, "billing_type", None))
+        category = attrs.get("category", getattr(self.instance, "category", None))
         duration = attrs.get(
             "estimated_duration_minutes", getattr(self.instance, "estimated_duration_minutes", None)
         )
+        if attrs.get("is_active") is True and category and not category.is_active:
+            raise serializers.ValidationError(
+                {"is_active": "该服务分类已停用，暂时不能上架服务。"}
+            )
         if billing_type == ProviderService.BillingType.PER_SESSION and not duration:
             raise serializers.ValidationError(
                 {"estimated_duration_minutes": "按次服务必须填写预计服务时长。"}
