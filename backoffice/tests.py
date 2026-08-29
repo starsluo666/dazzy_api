@@ -12,9 +12,14 @@ from rest_framework.test import APITestCase
 from accounts.models import User
 from activities.models import (
     Activity,
+    ActivityAfterSalesCase,
     ActivityCategory,
     ActivityParticipation,
+    ActivityParticipationPaymentOrder,
+    ActivityParticipationRefundOrder,
     ActivityPublishOrder,
+    ActivityRefundRecord,
+    ActivityReport,
 )
 from locations.models import UserAddress
 from mediafiles.models import MediaAsset
@@ -1060,7 +1065,12 @@ class BackofficeActivityManagementTests(APITestCase):
             organization=cls.organization,
             name="活动审核角色",
             code="activity-reviewer",
-            permissions=["activity.view", "activity.review"],
+            permissions=[
+                "activity.view", "activity.review", "activity.manage",
+                "activity_category.view", "activity_category.manage",
+                "activity_report.view", "activity_report.manage",
+                "activity_finance.view", "activity_after_sales.manage",
+            ],
             data_scope=AdminRole.DataScope.CITY,
         )
         OrganizationMember.objects.create(
@@ -1082,6 +1092,13 @@ class BackofficeActivityManagementTests(APITestCase):
             phone="18890004444", password="test-password", nickname="报名用户"
         )
         cls.category = ActivityCategory.objects.create(name="桌球", slug="admin-billiards")
+        cls.activity_cover = MediaAsset.objects.create(
+            owner=cls.organizer,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.ACTIVITY_COVER,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="public/activity-covers/admin/activity.webp",
+        )
         cls.handan_activity = cls.create_activity(
             organizer=cls.organizer,
             title="邯郸周末桌球局",
@@ -1094,9 +1111,29 @@ class BackofficeActivityManagementTests(APITestCase):
             city_code="110100",
             city_name="北京市",
         )
-        ActivityParticipation.objects.create(
+        participation = ActivityParticipation.objects.create(
             activity=cls.handan_activity,
             user=cls.participant,
+            status=ActivityParticipation.Status.ACTIVE,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            refund_rule_snapshot={"version": "standard-v1"},
+            rule_confirmed_at=timezone.now(),
+            joined_at=timezone.now(),
+        )
+        ActivityParticipationPaymentOrder.objects.create(
+            participation=participation,
+            payer=cls.participant,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            channel=ActivityParticipationPaymentOrder.Channel.MOCK_WECHAT,
+            status=ActivityParticipationPaymentOrder.Status.PAID,
+            expires_at=timezone.now() + timedelta(minutes=30),
+            paid_at=timezone.now(),
         )
 
     @classmethod
@@ -1105,6 +1142,7 @@ class BackofficeActivityManagementTests(APITestCase):
         activity = Activity.objects.create(
             organizer=organizer,
             category=cls.category,
+            cover=cls.activity_cover,
             title=title,
             starts_at=starts_at,
             ends_at=starts_at + timedelta(hours=3),
@@ -1126,7 +1164,7 @@ class BackofficeActivityManagementTests(APITestCase):
             status=Activity.Status.PENDING_REVIEW,
         )
         ActivityPublishOrder.objects.create(
-            order_no=f"ADMIN-ACTIVITY-{city_code}",
+            order_no=f"ADMIN-ACTIVITY-{activity.id}",
             activity=activity,
             payer=organizer,
             aa_principal_amount=4800,
@@ -1191,6 +1229,9 @@ class BackofficeActivityManagementTests(APITestCase):
         self.assertEqual(self.handan_activity.status, Activity.Status.REJECTED)
         self.assertEqual(order.status, ActivityPublishOrder.Status.REFUNDED)
         self.assertEqual(response.data["data"]["rejection_reason"], "活动信息不完整")
+        refund = ActivityRefundRecord.objects.get(publish_order=order)
+        self.assertEqual(refund.refund_amount, 5280)
+        self.assertEqual(refund.refund_type, ActivityRefundRecord.RefundType.REVIEW_REJECTION)
 
     def test_activity_review_permission_and_city_scope_are_required(self):
         self.role.permissions = ["activity.view"]
@@ -1207,3 +1248,205 @@ class BackofficeActivityManagementTests(APITestCase):
 
         self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(outside_scope.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_activity_category_management_configures_publish_boundaries(self):
+        create_response = self.client.post(
+            reverse("backoffice-activity-categories"),
+            {
+                "name": "密室",
+                "slug": "escape-room-admin",
+                "city_codes": ["130400", "130400"],
+                "min_capacity": 4,
+                "max_capacity": 12,
+                "min_aa_principal_amount": 3000,
+                "max_aa_principal_amount": 20000,
+                "content_guidance": "须注明密室主题及安全提醒。",
+                "sort_order": 20,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        data = create_response.data["data"]
+        self.assertEqual(data["city_codes"], ["130400"])
+        self.assertEqual(data["min_capacity"], 4)
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action="activity_category.create", target_id=str(data["id"])
+        ).exists())
+
+        invalid = self.client.patch(
+            reverse("backoffice-activity-category-detail", args=(data["id"],)),
+            {"min_capacity": 20, "max_capacity": 10},
+            format="json",
+        )
+        self.assertEqual(invalid.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_cancel_without_participants_creates_refund_and_audit(self):
+        activity = self.create_activity(
+            organizer=self.organizer,
+            title="可由后台取消的活动",
+            city_code="130400",
+            city_name="邯郸市",
+        )
+        activity.status = Activity.Status.RECRUITING
+        activity.save(update_fields=("status", "updated_at"))
+
+        response = self.client.post(
+            reverse("backoffice-activity-action", args=(activity.id,)),
+            {"action": "cancel", "reason": "集合场地临时关闭"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        activity.refresh_from_db()
+        self.assertEqual(activity.status, Activity.Status.CANCELLED)
+        self.assertEqual(activity.cancelled_by, self.admin_user)
+        refund = activity.refund_records.get()
+        self.assertEqual(refund.refund_type, ActivityRefundRecord.RefundType.ADMIN_CANCELLATION)
+        self.assertEqual(response.data["data"]["refund_records"][0]["refund_amount"], 5280)
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action="activity.management.cancel", target_id=str(activity.id)
+        ).exists())
+
+    def test_admin_cancel_refunds_active_participants_atomically(self):
+        self.handan_activity.status = Activity.Status.RECRUITING
+        self.handan_activity.save(update_fields=("status", "updated_at"))
+
+        response = self.client.post(
+            reverse("backoffice-activity-action", args=(self.handan_activity.id,)),
+            {"action": "cancel", "reason": "运营处置测试"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.handan_activity.refresh_from_db()
+        self.assertEqual(self.handan_activity.status, Activity.Status.CANCELLED)
+        participant_refund = ActivityParticipationRefundOrder.objects.get(
+            activity=self.handan_activity
+        )
+        self.assertEqual(participant_refund.refund_amount, 5280)
+        self.assertEqual(
+            participant_refund.refund_type,
+            ActivityParticipationRefundOrder.RefundType.ADMIN_CANCELLATION,
+        )
+
+    def test_admin_cancel_is_blocked_when_participant_payment_is_missing(self):
+        activity = self.create_activity(
+            organizer=self.organizer,
+            title="报名支付记录异常活动",
+            city_code="130400",
+            city_name="邯郸市",
+        )
+        activity.status = Activity.Status.RECRUITING
+        activity.save(update_fields=("status", "updated_at"))
+        ActivityParticipation.objects.create(
+            activity=activity,
+            user=self.participant,
+            status=ActivityParticipation.Status.ACTIVE,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            joined_at=timezone.now(),
+        )
+
+        response = self.client.post(
+            reverse("backoffice-activity-action", args=(activity.id,)),
+            {"action": "cancel", "reason": "异常支付测试"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        activity.refresh_from_db()
+        self.assertEqual(activity.status, Activity.Status.RECRUITING)
+        self.assertFalse(activity.refund_records.exists())
+
+    def test_user_report_can_be_processed_in_admin_with_city_scope(self):
+        self.handan_activity.status = Activity.Status.RECRUITING
+        self.handan_activity.save(update_fields=("status", "updated_at"))
+        public_client = self.client_class()
+        public_client.force_authenticate(self.participant)
+        create_response = public_client.post(
+            reverse("activity-report-create", args=(self.handan_activity.id,)),
+            {"reason": "safety_risk", "description": "集合地点存在安全隐患"},
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        case_no = create_response.data["data"]["case_no"]
+
+        list_response = self.client.get(reverse("backoffice-activity-reports"))
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["data"]["summary"]["pending"], 1)
+        self.assertEqual(list_response.data["data"]["items"][0]["case_no"], case_no)
+
+        action_response = self.client.post(
+            reverse("backoffice-activity-report-action", args=(case_no,)),
+            {"action": "resolve", "result_note": "已核实并要求发起人整改"},
+            format="json",
+        )
+        self.assertEqual(action_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(action_response.data["data"]["status"], ActivityReport.Status.RESOLVED)
+
+    def test_rejected_organizer_can_fetch_copy_source(self):
+        self.handan_activity.status = Activity.Status.REJECTED
+        self.handan_activity.rejection_reason = "请补充参与规则"
+        self.handan_activity.save(
+            update_fields=("status", "rejection_reason", "updated_at")
+        )
+        public_client = self.client_class()
+        public_client.force_authenticate(self.organizer)
+
+        response = public_client.get(
+            reverse("activity-copy-source", args=(self.handan_activity.id,))
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"]["title"], self.handan_activity.title)
+        self.assertEqual(response.data["data"]["rejection_reason"], "请补充参与规则")
+
+    def test_activity_finance_and_after_sales_review_create_traceable_refund(self):
+        public_client = self.client_class()
+        public_client.force_authenticate(self.participant)
+        create_response = public_client.post(
+            reverse("activity-after-sales", args=(self.handan_activity.id,)),
+            {
+                "reason": "illness_or_accident",
+                "description": "突发身体不适，申请客服审核退款。",
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        case_no = create_response.data["data"]["case_no"]
+
+        payment_list = self.client.get(
+            reverse("backoffice-activity-finance"), {"record_type": "payment"}
+        )
+        case_list = self.client.get(
+            reverse("backoffice-activity-finance"), {"record_type": "after_sales"}
+        )
+        self.assertEqual(payment_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(payment_list.data["data"]["summary"]["paid_count"], 1)
+        self.assertEqual(case_list.data["data"]["items"][0]["case_no"], case_no)
+
+        approved = self.client.post(
+            reverse("backoffice-activity-after-sales-action", args=(case_no,)),
+            {
+                "action": "approve",
+                "approved_principal_amount": 4800,
+                "approved_service_fee_amount": 480,
+                "result_note": "材料已核验，同意全额退款。",
+            },
+            format="json",
+        )
+
+        self.assertEqual(approved.status_code, status.HTTP_200_OK)
+        case = ActivityAfterSalesCase.objects.get(case_no=case_no)
+        self.assertEqual(case.status, ActivityAfterSalesCase.Status.APPROVED)
+        self.assertEqual(case.refund_order.refund_amount, 5280)
+        self.assertEqual(
+            case.refund_order.status,
+            ActivityParticipationRefundOrder.Status.SUCCEEDED,
+        )
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action="activity.after_sales.approve", target_id=case_no
+        ).exists())

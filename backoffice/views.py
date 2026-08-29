@@ -11,7 +11,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from activities.models import Activity, ActivityParticipation, ActivityPublishOrder
+from activities.models import (
+    Activity,
+    ActivityAfterSalesCase,
+    ActivityCategory,
+    ActivityParticipation,
+    ActivityParticipationPaymentOrder,
+    ActivityParticipationRefundOrder,
+    ActivityPublishOrder,
+    ActivityRefundRecord,
+    ActivityReport,
+)
 from config.api import paginated_response
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
@@ -28,6 +38,17 @@ from .models import (
 )
 from .serializers import (
     AdminActivityQuerySerializer,
+    AdminActivityActionSerializer,
+    AdminActivityCategoryQuerySerializer,
+    AdminActivityCategorySerializer,
+    AdminActivityAfterSalesActionSerializer,
+    AdminActivityAfterSalesSerializer,
+    AdminActivityFinanceQuerySerializer,
+    AdminActivityParticipationPaymentSerializer,
+    AdminActivityParticipationRefundSerializer,
+    AdminActivityReportActionSerializer,
+    AdminActivityReportQuerySerializer,
+    AdminActivityReportSerializer,
     AdminActivityReviewSerializer,
     AdminActivitySerializer,
     AdminMeSerializer,
@@ -66,6 +87,9 @@ from .services import (
     review_provider_order_after_sales_case,
     review_provider_application,
     review_activity,
+    review_activity_after_sales_case,
+    cancel_activity_by_admin,
+    review_activity_report,
 )
 
 
@@ -163,9 +187,32 @@ def activity_admin_queryset(access):
             ),
             Prefetch(
                 "participations",
-                queryset=ActivityParticipation.objects.select_related("user").order_by(
-                    "-joined_at"
-                ),
+                queryset=ActivityParticipation.objects.select_related("user")
+                .prefetch_related(
+                    Prefetch(
+                        "payment_orders",
+                        queryset=ActivityParticipationPaymentOrder.objects.order_by(
+                            "-created_at"
+                        ),
+                    ),
+                    Prefetch(
+                        "refund_orders",
+                        queryset=ActivityParticipationRefundOrder.objects.order_by(
+                            "-created_at"
+                        ),
+                    ),
+                    Prefetch(
+                        "after_sales_cases",
+                        queryset=ActivityAfterSalesCase.objects.order_by("-created_at"),
+                    ),
+                )
+                .order_by("-joined_at"),
+            ),
+            Prefetch(
+                "refund_records",
+                queryset=ActivityRefundRecord.objects.select_related(
+                    "beneficiary", "operator", "publish_order"
+                ).order_by("-created_at"),
             ),
         )
         .annotate(
@@ -173,9 +220,53 @@ def activity_admin_queryset(access):
                 "participations",
                 filter=Q(participations__status=ActivityParticipation.Status.ACTIVE),
                 distinct=True,
-            )
+            ),
+            report_count=Count("reports", distinct=True),
         )
     )
+
+
+def activity_category_admin_queryset():
+    return ActivityCategory.objects.annotate(
+        activity_count=Count("activities", distinct=True),
+        active_activity_count=Count(
+            "activities",
+            filter=Q(
+                activities__status__in=(
+                    Activity.Status.PENDING_REVIEW,
+                    Activity.Status.RECRUITING,
+                    Activity.Status.FORMED,
+                    Activity.Status.IN_PROGRESS,
+                )
+            ),
+            distinct=True,
+        ),
+    )
+
+
+def activity_category_audit_snapshot(category):
+    return {
+        "name": category.name,
+        "slug": category.slug,
+        "icon_object_key": category.icon_object_key,
+        "city_codes": category.city_codes,
+        "min_capacity": category.min_capacity,
+        "max_capacity": category.max_capacity,
+        "min_aa_principal_amount": category.min_aa_principal_amount,
+        "max_aa_principal_amount": category.max_aa_principal_amount,
+        "content_guidance": category.content_guidance,
+        "sort_order": category.sort_order,
+        "is_active": category.is_active,
+    }
+
+
+def activity_report_admin_queryset(access):
+    queryset = ActivityReport.objects.select_related(
+        "activity__organizer", "reporter", "reviewed_by"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(activity__city_code__in=access.city_codes)
+    return queryset
 
 
 def scoped_provider_orders(access):
@@ -580,6 +671,319 @@ class AdminActivityReviewView(APIView):
                 activity, context={"include_detail": True}
             ).data}
         )
+
+
+class AdminActivityActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, activity_id):
+        access = resolve_admin_access(request.user)
+        access.require("activity.manage")
+        serializer = AdminActivityActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        activity = cancel_activity_by_admin(
+            activity_id=activity_id,
+            reason=serializer.validated_data["reason"],
+            actor=request.user,
+            access=access,
+            request=request,
+        )
+        activity = get_object_or_404(activity_admin_queryset(access), id=activity.id)
+        return Response(
+            {"data": AdminActivitySerializer(
+                activity, context={"include_detail": True}
+            ).data}
+        )
+
+
+class AdminActivityCategoryListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("activity_category.view")
+        query = AdminActivityCategoryQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+        queryset = activity_category_admin_queryset()
+        if keyword := params.get("search", "").strip():
+            queryset = queryset.filter(
+                Q(name__icontains=keyword) | Q(slug__icontains=keyword)
+            )
+        summary_queryset = queryset
+        summary = {
+            "total": summary_queryset.count(),
+            "active": summary_queryset.filter(is_active=True).count(),
+            "inactive": summary_queryset.filter(is_active=False).count(),
+            "active_activities": Activity.objects.filter(
+                category__in=summary_queryset,
+                status__in=(
+                    Activity.Status.PENDING_REVIEW,
+                    Activity.Status.RECRUITING,
+                    Activity.Status.FORMED,
+                    Activity.Status.IN_PROGRESS,
+                ),
+            ).count(),
+        }
+        if params["status"] == "active":
+            queryset = queryset.filter(is_active=True)
+        elif params["status"] == "inactive":
+            queryset = queryset.filter(is_active=False)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset.order_by("sort_order", "id")[
+            (page - 1) * page_size : page * page_size
+        ]
+        return Response({"data": {
+            "items": AdminActivityCategorySerializer(items, many=True).data,
+            "pagination": {"page": page, "page_size": page_size, "total": total},
+            "summary": summary,
+        }})
+
+    def post(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("activity_category.manage")
+        serializer = AdminActivityCategorySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            category = serializer.save()
+            AdminAuditLog.objects.create(
+                actor=request.user,
+                organization=access.member.organization if access.member else None,
+                action="activity_category.create",
+                target_type="activity_category",
+                target_id=str(category.id),
+                before={},
+                after=activity_category_audit_snapshot(category),
+                request_id=request.headers.get("X-Request-ID", ""),
+                ip_address=client_ip(request),
+            )
+        category = activity_category_admin_queryset().get(pk=category.pk)
+        return Response(
+            {"data": AdminActivityCategorySerializer(category).data}, status=201
+        )
+
+
+class AdminActivityCategoryDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, category_id):
+        access = resolve_admin_access(request.user)
+        access.require("activity_category.manage")
+        with transaction.atomic():
+            category = get_object_or_404(
+                ActivityCategory.objects.select_for_update(), pk=category_id
+            )
+            before = activity_category_audit_snapshot(category)
+            serializer = AdminActivityCategorySerializer(
+                category, data=request.data, partial=True
+            )
+            serializer.is_valid(raise_exception=True)
+            category = serializer.save()
+            action = "activity_category.update"
+            if before["is_active"] != category.is_active:
+                action = (
+                    "activity_category.enable"
+                    if category.is_active else "activity_category.disable"
+                )
+            AdminAuditLog.objects.create(
+                actor=request.user,
+                organization=access.member.organization if access.member else None,
+                action=action,
+                target_type="activity_category",
+                target_id=str(category.id),
+                before=before,
+                after=activity_category_audit_snapshot(category),
+                request_id=request.headers.get("X-Request-ID", ""),
+                ip_address=client_ip(request),
+            )
+        category = activity_category_admin_queryset().get(pk=category.pk)
+        return Response({"data": AdminActivityCategorySerializer(category).data})
+
+
+class AdminActivityReportListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("activity_report.view")
+        query = AdminActivityReportQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+        queryset = activity_report_admin_queryset(access)
+        if keyword := params.get("search", "").strip():
+            queryset = queryset.filter(
+                Q(case_no__icontains=keyword)
+                | Q(activity__title__icontains=keyword)
+                | Q(reporter__nickname__icontains=keyword)
+            )
+        if city_code := params.get("city_code", "").strip():
+            queryset = queryset.filter(activity__city_code=city_code)
+        summary_queryset = queryset
+        summary = {
+            "total": summary_queryset.count(),
+            "pending": summary_queryset.filter(status=ActivityReport.Status.PENDING).count(),
+            "processing": summary_queryset.filter(status=ActivityReport.Status.PROCESSING).count(),
+            "resolved": summary_queryset.filter(status=ActivityReport.Status.RESOLVED).count(),
+        }
+        if status_value := params.get("status", ""):
+            queryset = queryset.filter(status=status_value)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset.order_by("-created_at", "-id")[
+            (page - 1) * page_size : page * page_size
+        ]
+        return Response({"data": {
+            "items": AdminActivityReportSerializer(items, many=True).data,
+            "pagination": {"page": page, "page_size": page_size, "total": total},
+            "summary": summary,
+        }})
+
+
+class AdminActivityReportActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, case_no):
+        access = resolve_admin_access(request.user)
+        access.require("activity_report.manage")
+        serializer = AdminActivityReportActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        report = review_activity_report(
+            case_no=case_no,
+            action=serializer.validated_data["action"],
+            result_note=serializer.validated_data.get("result_note", ""),
+            actor=request.user,
+            access=access,
+            request=request,
+        )
+        return Response({"data": AdminActivityReportSerializer(report).data})
+
+
+class AdminActivityFinanceListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("activity_finance.view")
+        query = AdminActivityFinanceQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+
+        payments = ActivityParticipationPaymentOrder.objects.select_related(
+            "participation__activity", "payer"
+        )
+        refunds = ActivityParticipationRefundOrder.objects.select_related(
+            "activity", "beneficiary", "payment_order", "operator"
+        )
+        after_sales = ActivityAfterSalesCase.objects.select_related(
+            "participation__activity", "applicant", "reviewed_by", "refund_order"
+        )
+        if not access.all_data:
+            payments = payments.filter(
+                participation__activity__city_code__in=access.city_codes
+            )
+            refunds = refunds.filter(activity__city_code__in=access.city_codes)
+            after_sales = after_sales.filter(
+                participation__activity__city_code__in=access.city_codes
+            )
+        if city_code := params.get("city_code", "").strip():
+            payments = payments.filter(participation__activity__city_code=city_code)
+            refunds = refunds.filter(activity__city_code=city_code)
+            after_sales = after_sales.filter(
+                participation__activity__city_code=city_code
+            )
+        summary = {
+            "paid_count": payments.filter(
+                status__in=(
+                    ActivityParticipationPaymentOrder.Status.PAID,
+                    ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED,
+                    ActivityParticipationPaymentOrder.Status.REFUNDED,
+                )
+            ).count(),
+            "pending_payment_count": payments.filter(
+                status=ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT
+            ).count(),
+            "refund_count": refunds.count(),
+            "refunded_amount": refunds.filter(
+                status=ActivityParticipationRefundOrder.Status.SUCCEEDED
+            ).aggregate(total=Sum("refund_amount"))["total"] or 0,
+            "open_after_sales_count": after_sales.filter(
+                status__in=(
+                    ActivityAfterSalesCase.Status.PENDING,
+                    ActivityAfterSalesCase.Status.PROCESSING,
+                )
+            ).count(),
+        }
+        keyword = params.get("search", "").strip()
+        record_type = params["record_type"]
+        if record_type == "payment":
+            queryset = payments
+            if keyword:
+                queryset = queryset.filter(
+                    Q(order_no__icontains=keyword)
+                    | Q(participation__activity__title__icontains=keyword)
+                    | Q(payer__nickname__icontains=keyword)
+                )
+            serializer_class = AdminActivityParticipationPaymentSerializer
+        elif record_type == "refund":
+            queryset = refunds
+            if keyword:
+                queryset = queryset.filter(
+                    Q(refund_no__icontains=keyword)
+                    | Q(payment_order__order_no__icontains=keyword)
+                    | Q(activity__title__icontains=keyword)
+                    | Q(beneficiary__nickname__icontains=keyword)
+                )
+            serializer_class = AdminActivityParticipationRefundSerializer
+        else:
+            queryset = after_sales
+            if keyword:
+                queryset = queryset.filter(
+                    Q(case_no__icontains=keyword)
+                    | Q(participation__activity__title__icontains=keyword)
+                    | Q(applicant__nickname__icontains=keyword)
+                )
+            serializer_class = AdminActivityAfterSalesSerializer
+        if status_value := params.get("status", "").strip():
+            queryset = queryset.filter(status=status_value)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset.order_by("-created_at", "-id")[
+            (page - 1) * page_size : page * page_size
+        ]
+        return Response({"data": {
+            "items": serializer_class(items, many=True).data,
+            "pagination": {"page": page, "page_size": page_size, "total": total},
+            "summary": summary,
+        }})
+
+
+class AdminActivityAfterSalesActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, case_no):
+        access = resolve_admin_access(request.user)
+        access.require("activity_after_sales.manage")
+        serializer = AdminActivityAfterSalesActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        case = review_activity_after_sales_case(
+            case_no=case_no,
+            action=serializer.validated_data["action"],
+            result_note=serializer.validated_data.get("result_note", ""),
+            approved_principal_amount=serializer.validated_data.get(
+                "approved_principal_amount"
+            ),
+            approved_service_fee_amount=serializer.validated_data.get(
+                "approved_service_fee_amount"
+            ),
+            actor=request.user,
+            access=access,
+            request=request,
+        )
+        return Response({"data": AdminActivityAfterSalesSerializer(case).data})
 
 
 class ProviderApplicationListView(APIView):

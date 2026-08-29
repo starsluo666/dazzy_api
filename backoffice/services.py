@@ -5,7 +5,22 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from accounts.models import User
-from activities.models import Activity, ActivityPublishOrder
+from activities.models import (
+    Activity,
+    ActivityAfterSalesCase,
+    ActivityParticipation,
+    ActivityParticipationPaymentOrder,
+    ActivityParticipationRefundOrder,
+    ActivityPublishOrder,
+    ActivityRefundRecord,
+    ActivityReport,
+)
+from activities.services import (
+    create_and_process_participation_refund,
+    refund_all_activity_participations,
+    refund_publish_order,
+    sync_activity_formation_status,
+)
 from orders.models import ProviderOrder
 from providers.models import ProviderLiveLocation, ProviderProfile
 
@@ -84,9 +99,13 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
         )
     )
     if decision == "reject":
-        # 当前支付链路为模拟支付；真实支付接入后在此替换为退款单和异步回调。
-        publish_order.status = ActivityPublishOrder.Status.REFUNDED
-        publish_order.save(update_fields=("status", "updated_at"))
+        refund_publish_order(
+            activity=activity,
+            publish_order=publish_order,
+            refund_type=ActivityRefundRecord.RefundType.REVIEW_REJECTION,
+            reason=activity.rejection_reason,
+            operator=actor,
+        )
 
     AdminAuditLog.objects.create(
         actor=actor,
@@ -104,6 +123,229 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
         ip_address=client_ip(request),
     )
     return activity
+
+
+@transaction.atomic
+def cancel_activity_by_admin(*, activity_id, reason, actor, access, request):
+    queryset = Activity.objects.select_for_update().select_related("organizer")
+    if not access.all_data:
+        queryset = queryset.filter(city_code__in=access.city_codes)
+    activity = get_object_or_404(queryset, id=activity_id)
+    if activity.status not in (Activity.Status.RECRUITING, Activity.Status.FORMED):
+        raise ValidationError("仅报名中或已成局活动可以由后台取消。")
+    publish_order = (
+        ActivityPublishOrder.objects.select_for_update()
+        .filter(activity=activity)
+        .order_by("-created_at")
+        .first()
+    )
+    if not publish_order or publish_order.status != ActivityPublishOrder.Status.PAID:
+        raise ValidationError("活动发布支付单不在可退款状态。")
+
+    before = {"status": activity.status, "cancellation_reason": activity.cancellation_reason}
+    now = timezone.now()
+    activity.status = Activity.Status.CANCELLED
+    activity.cancellation_reason = reason
+    activity.cancelled_by = actor
+    activity.cancelled_at = now
+    activity.save(
+        update_fields=(
+            "status", "cancellation_reason", "cancelled_by", "cancelled_at", "updated_at",
+        )
+    )
+    participation_refunds = refund_all_activity_participations(
+        activity=activity,
+        refund_type=ActivityParticipationRefundOrder.RefundType.ADMIN_CANCELLATION,
+        reason=reason,
+        cancelled_by_role=ActivityParticipation.CancelledByRole.PLATFORM,
+        operator=actor,
+    )
+    refund = refund_publish_order(
+        activity=activity,
+        publish_order=publish_order,
+        refund_type=ActivityRefundRecord.RefundType.ADMIN_CANCELLATION,
+        reason=reason,
+        operator=actor,
+    )
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action="activity.management.cancel",
+        target_type="activity",
+        target_id=str(activity.id),
+        before=before,
+        after={
+            "status": activity.status,
+            "cancellation_reason": activity.cancellation_reason,
+            "refund_no": refund.refund_no,
+            "refund_amount": refund.refund_amount,
+            "participation_refund_nos": [item.refund_no for item in participation_refunds],
+        },
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return activity
+
+
+@transaction.atomic
+def review_activity_after_sales_case(
+    *,
+    case_no,
+    action,
+    result_note,
+    approved_principal_amount,
+    approved_service_fee_amount,
+    actor,
+    access,
+    request,
+):
+    queryset = ActivityAfterSalesCase.objects.select_for_update().select_related(
+        "participation__activity", "participation__user"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(
+            participation__activity__city_code__in=access.city_codes
+        )
+    case = get_object_or_404(queryset, case_no=case_no)
+    transitions = {
+        "start_review": (
+            (ActivityAfterSalesCase.Status.PENDING,),
+            ActivityAfterSalesCase.Status.PROCESSING,
+        ),
+        "approve": (
+            (
+                ActivityAfterSalesCase.Status.PENDING,
+                ActivityAfterSalesCase.Status.PROCESSING,
+            ),
+            ActivityAfterSalesCase.Status.APPROVED,
+        ),
+        "reject": (
+            (
+                ActivityAfterSalesCase.Status.PENDING,
+                ActivityAfterSalesCase.Status.PROCESSING,
+            ),
+            ActivityAfterSalesCase.Status.REJECTED,
+        ),
+    }
+    allowed, target = transitions[action]
+    if case.status not in allowed:
+        raise ValidationError("当前售后状态不能执行该操作。")
+    before = {"status": case.status, "result_note": case.result_note}
+    refund = None
+    if action == "approve":
+        principal_amount = (
+            case.requested_principal_amount
+            if approved_principal_amount is None
+            else approved_principal_amount
+        )
+        service_fee_amount = (
+            case.requested_service_fee_amount
+            if approved_service_fee_amount is None
+            else approved_service_fee_amount
+        )
+        if principal_amount > case.requested_principal_amount:
+            raise ValidationError("核准AA本金退款不能超过申请金额。")
+        if service_fee_amount > case.requested_service_fee_amount:
+            raise ValidationError("核准平台服务费退款不能超过申请金额。")
+        payment_order = case.participation.payment_orders.select_for_update().filter(
+            status__in=(
+                ActivityParticipationPaymentOrder.Status.PAID,
+                ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED,
+            )
+        ).first()
+        if not payment_order:
+            raise ValidationError("售后单缺少可退款支付单。")
+        refund, _ = create_and_process_participation_refund(
+            participation=case.participation,
+            payment_order=payment_order,
+            refund_type=ActivityParticipationRefundOrder.RefundType.AFTER_SALES,
+            idempotency_key=f"after-sales:{case.case_no}",
+            principal_refund_amount=principal_amount,
+            service_fee_refund_amount=service_fee_amount,
+            reason=result_note,
+            operator=actor,
+        )
+        case.approved_principal_amount = principal_amount
+        case.approved_service_fee_amount = service_fee_amount
+        case.approved_amount = principal_amount + service_fee_amount
+        case.refund_order = refund
+        participation = case.participation
+        if participation.status == ActivityParticipation.Status.ACTIVE:
+            participation.status = ActivityParticipation.Status.CANCELLED
+            participation.cancelled_at = timezone.now()
+            participation.cancellation_reason = result_note
+            participation.cancelled_by_role = ActivityParticipation.CancelledByRole.PLATFORM
+            participation.save(update_fields=(
+                "status", "cancelled_at", "cancellation_reason",
+                "cancelled_by_role", "updated_at",
+            ))
+            participant_count = ActivityParticipation.objects.filter(
+                activity=participation.activity,
+                status=ActivityParticipation.Status.ACTIVE,
+            ).count()
+            sync_activity_formation_status(participation.activity, participant_count)
+    case.status = target
+    case.result_note = result_note.strip() if action != "start_review" else ""
+    case.reviewed_by = actor
+    case.reviewed_at = timezone.now()
+    case.save(update_fields=(
+        "status", "result_note", "reviewed_by", "reviewed_at",
+        "approved_principal_amount", "approved_service_fee_amount", "approved_amount",
+        "refund_order", "updated_at",
+    ))
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"activity.after_sales.{action}",
+        target_type="activity_after_sales_case",
+        target_id=case.case_no,
+        before=before,
+        after={
+            "status": case.status,
+            "approved_amount": case.approved_amount,
+            "refund_no": refund.refund_no if refund else None,
+            "result_note": case.result_note,
+        },
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return case
+
+
+@transaction.atomic
+def review_activity_report(*, case_no, action, result_note, actor, access, request):
+    queryset = ActivityReport.objects.select_for_update().select_related("activity")
+    if not access.all_data:
+        queryset = queryset.filter(activity__city_code__in=access.city_codes)
+    report = get_object_or_404(queryset, case_no=case_no)
+    transitions = {
+        "start_review": ((ActivityReport.Status.PENDING,), ActivityReport.Status.PROCESSING),
+        "resolve": ((ActivityReport.Status.PENDING, ActivityReport.Status.PROCESSING), ActivityReport.Status.RESOLVED),
+        "reject": ((ActivityReport.Status.PENDING, ActivityReport.Status.PROCESSING), ActivityReport.Status.REJECTED),
+    }
+    allowed, target = transitions[action]
+    if report.status not in allowed:
+        raise ValidationError("当前举报状态不能执行该操作。")
+    before = {"status": report.status, "result_note": report.result_note}
+    report.status = target
+    report.reviewed_by = actor
+    report.reviewed_at = timezone.now()
+    report.result_note = result_note.strip() if action != "start_review" else ""
+    report.save(
+        update_fields=("status", "reviewed_by", "reviewed_at", "result_note", "updated_at")
+    )
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"activity.report.{action}",
+        target_type="activity_report",
+        target_id=report.case_no,
+        before=before,
+        after={"status": report.status, "result_note": report.result_note},
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return report
 
 
 @transaction.atomic

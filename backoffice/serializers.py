@@ -6,7 +6,17 @@ from rest_framework import serializers
 
 from accounts.models import User
 from accounts.serializers import UserSerializer
-from activities.models import Activity, ActivityParticipation
+from activities.models import (
+    Activity,
+    ActivityAfterSalesCase,
+    ActivityCategory,
+    ActivityParticipation,
+    ActivityParticipationPaymentOrder,
+    ActivityParticipationRefundOrder,
+    ActivityRefundRecord,
+    ActivityReport,
+)
+from activities.serializers import ActivityParticipationRefundOrderSerializer
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
 from providers.models import ProviderProfile, ServiceCategory
@@ -124,6 +134,262 @@ class AdminActivityReviewSerializer(serializers.Serializer):
         return attrs
 
 
+class AdminActivityActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=("cancel",))
+    reason = serializers.CharField(max_length=500)
+
+    def validate_reason(self, value):
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError("请填写明确的取消原因。")
+        return value.strip()
+
+
+class AdminActivityCategoryQuerySerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        required=False, default="all", choices=("all", "active", "inactive")
+    )
+    search = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
+class AdminActivityCategorySerializer(serializers.ModelSerializer):
+    icon_url = serializers.SerializerMethodField()
+    activity_count = serializers.IntegerField(read_only=True, default=0)
+    active_activity_count = serializers.IntegerField(read_only=True, default=0)
+    city_codes = serializers.ListField(
+        child=serializers.CharField(max_length=20, trim_whitespace=True),
+        required=False,
+        allow_empty=True,
+    )
+
+    class Meta:
+        model = ActivityCategory
+        fields = (
+            "id", "name", "slug", "icon_object_key", "icon_url", "city_codes",
+            "min_capacity", "max_capacity", "min_aa_principal_amount",
+            "max_aa_principal_amount", "content_guidance", "sort_order", "is_active",
+            "activity_count", "active_activity_count", "created_at", "updated_at",
+        )
+        read_only_fields = ("id", "icon_url", "created_at", "updated_at")
+
+    def get_icon_url(self, obj):
+        return build_media_url(obj.icon_object_key) if obj.icon_object_key else None
+
+    def validate_city_codes(self, value):
+        normalized = []
+        for code in value:
+            code = code.strip()
+            if code and code not in normalized:
+                normalized.append(code)
+        return normalized
+
+    def validate_slug(self, value):
+        normalized = value.strip().lower()
+        queryset = ActivityCategory.objects.filter(slug__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("该活动分类标识已存在。")
+        return normalized
+
+    def validate(self, attrs):
+        min_capacity = attrs.get("min_capacity", getattr(self.instance, "min_capacity", 2))
+        max_capacity = attrs.get("max_capacity", getattr(self.instance, "max_capacity", 100))
+        min_amount = attrs.get(
+            "min_aa_principal_amount",
+            getattr(self.instance, "min_aa_principal_amount", 1),
+        )
+        max_amount = attrs.get(
+            "max_aa_principal_amount",
+            getattr(self.instance, "max_aa_principal_amount", 10_000_000),
+        )
+        errors = {}
+        if min_capacity < 2 or max_capacity > 100 or min_capacity > max_capacity:
+            errors["max_capacity"] = "人数范围须在2—100人内，且上限不得小于下限。"
+        if min_amount < 1 or max_amount > 10_000_000 or min_amount > max_amount:
+            errors["max_aa_principal_amount"] = "AA本金范围无效。"
+        if (
+            self.instance
+            and attrs.get("slug")
+            and attrs["slug"] != self.instance.slug
+            and self.instance.activities.exists()
+        ):
+            errors["slug"] = "该分类已有活动关联，标识不可修改。"
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+
+class AdminActivityReportQuerySerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        required=False, allow_blank=True, choices=ActivityReport.Status.choices
+    )
+    city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    search = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
+class AdminActivityReportActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=("start_review", "resolve", "reject"))
+    result_note = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+    def validate(self, attrs):
+        if attrs["action"] in ("resolve", "reject") and len(
+            attrs.get("result_note", "").strip()
+        ) < 2:
+            raise serializers.ValidationError({"result_note": "请填写明确的处理结论。"})
+        return attrs
+
+
+class AdminActivityReportSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    reason_label = serializers.CharField(source="get_reason_display")
+    activity_title = serializers.CharField(source="activity.title")
+    activity_status = serializers.CharField(source="activity.status")
+    city_code = serializers.CharField(source="activity.city_code")
+    city_name = serializers.CharField(source="activity.city_name")
+    organizer_name = serializers.CharField(source="activity.organizer.nickname")
+    reporter_name = serializers.CharField(source="reporter.nickname")
+    reporter_phone_masked = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.CharField(source="reviewed_by.nickname", allow_null=True)
+
+    class Meta:
+        model = ActivityReport
+        fields = (
+            "case_no", "activity_id", "activity_title", "activity_status", "city_code",
+            "city_name", "organizer_name", "reporter_name", "reporter_phone_masked",
+            "reason", "reason_label", "description", "status", "status_label",
+            "result_note", "reviewed_by_name", "reviewed_at", "created_at", "updated_at",
+        )
+
+    def get_reporter_phone_masked(self, obj):
+        return mask_phone(obj.reporter.phone)
+
+
+class AdminActivityFinanceQuerySerializer(serializers.Serializer):
+    record_type = serializers.ChoiceField(
+        required=False,
+        default="payment",
+        choices=("payment", "refund", "after_sales"),
+    )
+    status = serializers.CharField(required=False, allow_blank=True, max_length=24)
+    city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    search = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
+class AdminActivityParticipationPaymentSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    channel_label = serializers.CharField(source="get_channel_display")
+    activity_id = serializers.IntegerField(source="participation.activity_id")
+    activity_title = serializers.CharField(source="participation.activity.title")
+    city_code = serializers.CharField(source="participation.activity.city_code")
+    city_name = serializers.CharField(source="participation.activity.city_name")
+    payer_name = serializers.CharField(source="payer.nickname")
+    payer_phone_masked = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ActivityParticipationPaymentOrder
+        fields = (
+            "order_no", "activity_id", "activity_title", "city_code", "city_name",
+            "payer_name", "payer_phone_masked", "aa_principal_amount",
+            "platform_service_fee_amount", "payable_amount", "channel", "channel_label",
+            "status", "status_label", "gateway_trade_no", "expires_at", "paid_at",
+            "closed_at", "created_at", "updated_at",
+        )
+
+    def get_payer_phone_masked(self, obj):
+        return mask_phone(obj.payer.phone)
+
+
+class AdminActivityParticipationRefundSerializer(serializers.ModelSerializer):
+    refund_type_label = serializers.CharField(source="get_refund_type_display")
+    status_label = serializers.CharField(source="get_status_display")
+    activity_title = serializers.CharField(source="activity.title")
+    city_code = serializers.CharField(source="activity.city_code")
+    city_name = serializers.CharField(source="activity.city_name")
+    beneficiary_name = serializers.CharField(source="beneficiary.nickname")
+    beneficiary_phone_masked = serializers.SerializerMethodField()
+    payment_order_no = serializers.CharField(source="payment_order.order_no")
+    operator_name = serializers.CharField(source="operator.nickname", allow_null=True)
+
+    class Meta:
+        model = ActivityParticipationRefundOrder
+        fields = (
+            "refund_no", "payment_order_no", "activity_id", "activity_title",
+            "city_code", "city_name", "beneficiary_name", "beneficiary_phone_masked",
+            "refund_type", "refund_type_label", "status", "status_label",
+            "principal_refund_amount", "service_fee_refund_amount", "refund_amount",
+            "retained_principal_amount", "retained_service_fee_amount",
+            "retained_principal_destination", "reason", "operator_name",
+            "requested_at", "refunded_at", "created_at", "updated_at",
+        )
+
+    def get_beneficiary_phone_masked(self, obj):
+        return mask_phone(obj.beneficiary.phone)
+
+
+class AdminActivityAfterSalesSerializer(serializers.ModelSerializer):
+    reason_label = serializers.CharField(source="get_reason_display")
+    status_label = serializers.CharField(source="get_status_display")
+    activity_id = serializers.IntegerField(source="participation.activity_id")
+    activity_title = serializers.CharField(source="participation.activity.title")
+    city_code = serializers.CharField(source="participation.activity.city_code")
+    city_name = serializers.CharField(source="participation.activity.city_name")
+    applicant_name = serializers.CharField(source="applicant.nickname")
+    applicant_phone_masked = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.CharField(source="reviewed_by.nickname", allow_null=True)
+    refund_order = ActivityParticipationRefundOrderSerializer(read_only=True)
+    evidence_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ActivityAfterSalesCase
+        fields = (
+            "case_no", "activity_id", "activity_title", "city_code", "city_name",
+            "applicant_name", "applicant_phone_masked", "reason", "reason_label",
+            "description", "evidence_count", "status", "status_label",
+            "requested_principal_amount", "requested_service_fee_amount",
+            "requested_amount", "approved_principal_amount",
+            "approved_service_fee_amount", "approved_amount", "result_note",
+            "reviewed_by_name", "reviewed_at", "refund_order", "created_at", "updated_at",
+        )
+
+    def get_applicant_phone_masked(self, obj):
+        return mask_phone(obj.applicant.phone)
+
+    def get_evidence_count(self, obj):
+        return len(obj.evidence_object_keys)
+
+
+class AdminActivityAfterSalesActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=("start_review", "approve", "reject"))
+    approved_principal_amount = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0
+    )
+    approved_service_fee_amount = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0
+    )
+    result_note = serializers.CharField(
+        required=False, allow_blank=True, max_length=1000, trim_whitespace=True
+    )
+
+    def validate(self, attrs):
+        if attrs["action"] in ("approve", "reject") and len(
+            attrs.get("result_note", "")
+        ) < 5:
+            raise serializers.ValidationError({"result_note": "处理结论至少填写5个字。"})
+        if (
+            attrs["action"] == "approve"
+            and attrs.get("approved_principal_amount") == 0
+            and attrs.get("approved_service_fee_amount") == 0
+        ):
+            raise serializers.ValidationError("批准退款金额不能为0。")
+        return attrs
+
+
 class AdminActivitySerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     category_name = serializers.CharField(source="category.name")
@@ -147,6 +413,9 @@ class AdminActivitySerializer(serializers.ModelSerializer):
     )
     publish_order = serializers.SerializerMethodField()
     participants = serializers.SerializerMethodField()
+    refund_records = serializers.SerializerMethodField()
+    report_count = serializers.IntegerField(read_only=True, default=0)
+    cancelled_by_name = serializers.CharField(source="cancelled_by.nickname", allow_null=True)
 
     class Meta:
         model = Activity
@@ -161,6 +430,8 @@ class AdminActivitySerializer(serializers.ModelSerializer):
             "participation_rules", "aa_principal_amount", "refund_template_version",
             "refund_rule_snapshot", "publish_order", "published_at", "reviewed_by_name",
             "reviewed_at", "rejection_reason", "participants", "created_at", "updated_at",
+            "cancellation_reason", "cancelled_by_name", "cancelled_at", "refund_records",
+            "report_count",
         )
 
     def get_organizer_phone_masked(self, obj):
@@ -196,8 +467,59 @@ class AdminActivitySerializer(serializers.ModelSerializer):
                 "status_label": participation.get_status_display(),
                 "joined_at": participation.joined_at,
                 "cancelled_at": participation.cancelled_at,
+                "payment_expires_at": participation.payment_expires_at,
+                "payable_amount": participation.payable_amount,
+                "payment_orders": [
+                    {
+                        "order_no": order.order_no,
+                        "status": order.status,
+                        "status_label": order.get_status_display(),
+                        "channel": order.channel,
+                        "channel_label": order.get_channel_display(),
+                        "payable_amount": order.payable_amount,
+                        "expires_at": order.expires_at,
+                        "paid_at": order.paid_at,
+                    }
+                    for order in participation.payment_orders.all()
+                ],
+                "refund_orders": ActivityParticipationRefundOrderSerializer(
+                    participation.refund_orders.all(), many=True
+                ).data,
+                "after_sales_cases": [
+                    {
+                        "case_no": case.case_no,
+                        "status": case.status,
+                        "status_label": case.get_status_display(),
+                        "reason_label": case.get_reason_display(),
+                    }
+                    for case in participation.after_sales_cases.all()
+                ],
             }
             for participation in obj.participations.all()
+        ]
+
+    def get_refund_records(self, obj):
+        if not self.context.get("include_detail"):
+            return []
+        return [
+            {
+                "refund_no": refund.refund_no,
+                "refund_type": refund.refund_type,
+                "refund_type_label": refund.get_refund_type_display(),
+                "status": refund.status,
+                "status_label": refund.get_status_display(),
+                "principal_amount": refund.principal_amount,
+                "service_fee_amount": refund.service_fee_amount,
+                "refund_amount": refund.refund_amount,
+                "retained_principal_amount": refund.retained_principal_amount,
+                "retained_service_fee_amount": refund.retained_service_fee_amount,
+                "retained_principal_destination": refund.retained_principal_destination,
+                "beneficiary_name": refund.beneficiary.nickname,
+                "reason": refund.reason,
+                "operator_name": refund.operator.nickname if refund.operator else None,
+                "refunded_at": refund.refunded_at,
+            }
+            for refund in obj.refund_records.all()
         ]
 
 

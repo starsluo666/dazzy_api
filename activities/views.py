@@ -12,18 +12,43 @@ from rest_framework.views import APIView
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
-from .models import Activity, ActivityCategory, ActivityParticipation
+from .models import (
+    Activity,
+    ActivityAfterSalesCase,
+    ActivityCategory,
+    ActivityParticipation,
+    ActivityParticipationRefundOrder,
+    ActivityReport,
+)
 from .selectors import upcoming_public_activities, with_participant_count
-from .services import cancel_activity_participation, join_activity
+from .services import (
+    cancel_activity_by_organizer,
+    cancel_activity_participation,
+    create_activity_after_sales_case,
+    create_activity_report,
+    get_or_create_participation_order,
+    simulate_participation_payment,
+)
 from .services import create_activity_draft, get_or_create_publish_order, simulate_publish_payment
 from .serializers import (
     ActivityDetailSerializer,
+    ActivityAfterSalesCaseSerializer,
+    ActivityAfterSalesCreateSerializer,
     ActivityListItemSerializer,
     ActivityListQuerySerializer,
     ActivityParticipationSerializer,
+    ActivityParticipationCancellationSerializer,
+    ActivityOrganizerCancellationSerializer,
+    ActivityParticipationCheckoutSerializer,
+    ActivityParticipationOrderCreateSerializer,
+    ActivityParticipationPaymentOrderSerializer,
+    ActivityParticipationRefundOrderSerializer,
     ActivityCategorySerializer,
+    ActivityCopySourceSerializer,
     ActivityCreateSerializer,
     ActivityPublishOrderSerializer,
+    ActivityReportCreateSerializer,
+    ActivityReportReceiptSerializer,
     MyActivityListItemSerializer,
     MyActivityListQuerySerializer,
 )
@@ -94,6 +119,8 @@ class ActivityCategoryListView(APIView):
 
     def get(self, request):
         categories = ActivityCategory.objects.filter(is_active=True).order_by("sort_order", "id")
+        if city_code := request.query_params.get("city_code", "").strip():
+            categories = categories.filter(Q(city_codes=[]) | Q(city_codes__contains=[city_code]))
         return Response({"data": {"items": ActivityCategorySerializer(categories, many=True).data}})
 
 
@@ -144,6 +171,12 @@ class MyActivityListView(APIView):
             user_participations = ActivityParticipation.objects.filter(
                 activity_id=OuterRef("pk"), user=request.user
             )
+            user_refunds = ActivityParticipationRefundOrder.objects.filter(
+                activity_id=OuterRef("pk"), beneficiary=request.user
+            ).order_by("-created_at")
+            user_after_sales = ActivityAfterSalesCase.objects.filter(
+                participation__activity_id=OuterRef("pk"), applicant=request.user
+            ).order_by("-created_at")
             queryset = queryset.filter(
                 pk__in=ActivityParticipation.objects.filter(user=request.user).values(
                     "activity_id"
@@ -151,11 +184,25 @@ class MyActivityListView(APIView):
             ).annotate(
                 participation_status=Subquery(user_participations.values("status")[:1]),
                 joined_at=Subquery(user_participations.values("joined_at")[:1]),
+                participation_payment_expires_at=Subquery(
+                    user_participations.values("payment_expires_at")[:1]
+                ),
+                participation_refund_status=Subquery(user_refunds.values("status")[:1]),
+                participation_after_sales_status=Subquery(
+                    user_after_sales.values("status")[:1]
+                ),
             )
         else:
             queryset = queryset.filter(organizer=request.user).annotate(
                 participation_status=Value(None, output_field=CharField()),
                 joined_at=Value(None, output_field=DateTimeField()),
+                participation_payment_expires_at=Value(
+                    None, output_field=DateTimeField()
+                ),
+                participation_refund_status=Value(None, output_field=CharField()),
+                participation_after_sales_status=Value(
+                    None, output_field=CharField()
+                ),
             )
 
         now = timezone.now()
@@ -169,13 +216,19 @@ class MyActivityListView(APIView):
             queryset = queryset.filter(ends_at__gte=now).exclude(status__in=terminal_statuses)
             if params["role"] == "joined":
                 queryset = queryset.filter(
-                    participation_status=ActivityParticipation.Status.ACTIVE
+                    participation_status__in=(
+                        ActivityParticipation.Status.PENDING_PAYMENT,
+                        ActivityParticipation.Status.ACTIVE,
+                    )
                 )
         elif params["state"] == "history":
             history_filter = Q(ends_at__lt=now) | Q(status__in=terminal_statuses)
             if params["role"] == "joined":
                 history_filter |= Q(
-                    participation_status=ActivityParticipation.Status.CANCELLED
+                    participation_status__in=(
+                        ActivityParticipation.Status.CANCELLED,
+                        ActivityParticipation.Status.EXPIRED,
+                    )
                 )
                 queryset = queryset.filter(history_filter)
             else:
@@ -195,21 +248,117 @@ class ActivityParticipationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        participation, participant_count, created = join_activity(pk, request.user)
+        serializer = ActivityParticipationOrderCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        participation, order, created = get_or_create_participation_order(
+            activity_id=pk,
+            user=request.user,
+            channel=serializer.validated_data["channel"],
+        )
+        participant_count = ActivityParticipation.objects.filter(
+            activity_id=pk, status=ActivityParticipation.Status.ACTIVE
+        ).count()
+        occupied_count = ActivityParticipation.objects.filter(activity_id=pk).filter(
+            Q(status=ActivityParticipation.Status.ACTIVE)
+            | Q(
+                status=ActivityParticipation.Status.PENDING_PAYMENT,
+                payment_expires_at__gt=timezone.now(),
+            )
+        ).count()
+        capacity = Activity.objects.only("capacity").get(pk=pk).capacity
         return Response(
             {
-                "data": {
-                    **ActivityParticipationSerializer(participation).data,
+                "data": ActivityParticipationCheckoutSerializer({
+                    "participation": participation,
+                    "order": order,
                     "participant_count": participant_count,
-                    "activity_status": participation.activity.status,
-                }
+                    "remaining_capacity": max(0, capacity - occupied_count),
+                }).data
             },
             status=201 if created else 200,
         )
 
     def delete(self, request, pk):
-        cancel_activity_participation(pk, request.user)
-        return Response(status=204)
+        serializer = ActivityParticipationCancellationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        participation, refund, changed = cancel_activity_participation(
+            pk, request.user, serializer.validated_data["reason"]
+        )
+        return Response({"data": {
+            "participation": ActivityParticipationSerializer(participation).data,
+            "refund": (
+                ActivityParticipationRefundOrderSerializer(refund).data if refund else None
+            ),
+            "changed": changed,
+        }})
+
+
+class ActivityParticipationPaymentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not settings.DEBUG:
+            raise ValidationError("模拟支付仅在本地环境开放。")
+        participation, order, changed = simulate_participation_payment(
+            activity_id=pk, user=request.user
+        )
+        participant_count = ActivityParticipation.objects.filter(
+            activity_id=pk, status=ActivityParticipation.Status.ACTIVE
+        ).count()
+        return Response({"data": {
+            "participation": ActivityParticipationSerializer(participation).data,
+            "payment_order": ActivityParticipationPaymentOrderSerializer(order).data,
+            "participant_count": participant_count,
+            "activity_status": participation.activity.status,
+            "changed": changed,
+        }})
+
+
+class ActivityAfterSalesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        cases = ActivityAfterSalesCase.objects.filter(
+            participation__activity_id=pk, applicant=request.user
+        ).select_related("refund_order").order_by("-created_at")
+        return Response({"data": {"items": ActivityAfterSalesCaseSerializer(cases, many=True).data}})
+
+    def post(self, request, pk):
+        serializer = ActivityAfterSalesCreateSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        evidence_assets = serializer.validated_data.get("evidence_asset_ids", [])
+        case, created = create_activity_after_sales_case(
+            activity_id=pk,
+            applicant=request.user,
+            reason=serializer.validated_data["reason"],
+            description=serializer.validated_data["description"],
+            evidence_object_keys=[asset.object_key for asset in evidence_assets],
+        )
+        return Response(
+            {"data": ActivityAfterSalesCaseSerializer(case).data},
+            status=201 if created else 200,
+        )
+
+
+class ActivityOrganizerCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        serializer = ActivityOrganizerCancellationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        activity, refund = cancel_activity_by_organizer(
+            activity_id=pk,
+            organizer=request.user,
+            reason=serializer.validated_data["reason"],
+        )
+        return Response({"data": {
+            "activity_id": activity.pk,
+            "status": activity.status,
+            "refund_no": refund.refund_no,
+            "refund_amount": refund.refund_amount,
+        }})
 
 
 class ActivityPublishOrderView(APIView):
@@ -228,3 +377,34 @@ class ActivityPublishPaymentView(APIView):
             raise ValidationError("模拟支付仅在本地环境开放。")
         order = simulate_publish_payment(activity_id=pk, user=request.user)
         return Response({"data": ActivityPublishOrderSerializer(order).data})
+
+
+class ActivityCopySourceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        activity = get_object_or_404(
+            Activity.objects.select_related("category", "cover"),
+            pk=pk,
+            organizer=request.user,
+            status=Activity.Status.REJECTED,
+        )
+        return Response({"data": ActivityCopySourceSerializer(activity).data})
+
+
+class ActivityReportCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        serializer = ActivityReportCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        report, created = create_activity_report(
+            activity_id=pk,
+            reporter=request.user,
+            reason=serializer.validated_data["reason"],
+            description=serializer.validated_data.get("description", ""),
+        )
+        return Response(
+            {"data": ActivityReportReceiptSerializer(report).data},
+            status=201 if created else 200,
+        )

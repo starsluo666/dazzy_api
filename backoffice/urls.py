@@ -2,7 +2,14 @@ from django.urls import path
 
 from .views import (
     AdminActivityDetailView,
+    AdminActivityActionView,
+    AdminActivityCategoryDetailView,
+    AdminActivityCategoryListView,
+    AdminActivityAfterSalesActionView,
+    AdminActivityFinanceListView,
     AdminActivityListView,
+    AdminActivityReportActionView,
+    AdminActivityReportListView,
     AdminActivityReviewView,
     AdminMeView,
     AdminOverviewView,
@@ -44,6 +51,41 @@ urlpatterns = [
         "activities/<int:activity_id>/review/",
         AdminActivityReviewView.as_view(),
         name="backoffice-activity-review",
+    ),
+    path(
+        "activities/<int:activity_id>/action/",
+        AdminActivityActionView.as_view(),
+        name="backoffice-activity-action",
+    ),
+    path(
+        "activity-categories/",
+        AdminActivityCategoryListView.as_view(),
+        name="backoffice-activity-categories",
+    ),
+    path(
+        "activity-categories/<int:category_id>/",
+        AdminActivityCategoryDetailView.as_view(),
+        name="backoffice-activity-category-detail",
+    ),
+    path(
+        "activity-reports/",
+        AdminActivityReportListView.as_view(),
+        name="backoffice-activity-reports",
+    ),
+    path(
+        "activity-reports/<str:case_no>/action/",
+        AdminActivityReportActionView.as_view(),
+        name="backoffice-activity-report-action",
+    ),
+    path(
+        "activity-finance/",
+        AdminActivityFinanceListView.as_view(),
+        name="backoffice-activity-finance",
+    ),
+    path(
+        "activity-after-sales/<str:case_no>/action/",
+        AdminActivityAfterSalesActionView.as_view(),
+        name="backoffice-activity-after-sales-action",
     ),
     path(
         "service-categories/",
