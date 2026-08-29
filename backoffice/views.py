@@ -21,6 +21,7 @@ from activities.models import (
     ActivityPublishOrder,
     ActivityRefundRecord,
     ActivityReport,
+    ActivitySettlement,
 )
 from config.api import paginated_response
 from mediafiles.services import build_media_url
@@ -46,6 +47,8 @@ from .serializers import (
     AdminActivityFinanceQuerySerializer,
     AdminActivityParticipationPaymentSerializer,
     AdminActivityParticipationRefundSerializer,
+    AdminActivitySettlementActionSerializer,
+    AdminActivitySettlementSerializer,
     AdminActivityReportActionSerializer,
     AdminActivityReportQuerySerializer,
     AdminActivityReportSerializer,
@@ -88,6 +91,7 @@ from .services import (
     review_provider_application,
     review_activity,
     review_activity_after_sales_case,
+    review_activity_settlement,
     cancel_activity_by_admin,
     review_activity_report,
 )
@@ -179,7 +183,7 @@ def scoped_activities(access):
 def activity_admin_queryset(access):
     return (
         scoped_activities(access)
-        .select_related("category", "organizer", "cover", "reviewed_by")
+        .select_related("category", "organizer", "cover", "reviewed_by", "settlement")
         .prefetch_related(
             Prefetch(
                 "publish_orders",
@@ -880,6 +884,9 @@ class AdminActivityFinanceListView(APIView):
         after_sales = ActivityAfterSalesCase.objects.select_related(
             "participation__activity", "applicant", "reviewed_by", "refund_order"
         )
+        settlements = ActivitySettlement.objects.select_related(
+            "activity", "beneficiary"
+        )
         if not access.all_data:
             payments = payments.filter(
                 participation__activity__city_code__in=access.city_codes
@@ -888,12 +895,16 @@ class AdminActivityFinanceListView(APIView):
             after_sales = after_sales.filter(
                 participation__activity__city_code__in=access.city_codes
             )
+            settlements = settlements.filter(
+                activity__city_code__in=access.city_codes
+            )
         if city_code := params.get("city_code", "").strip():
             payments = payments.filter(participation__activity__city_code=city_code)
             refunds = refunds.filter(activity__city_code=city_code)
             after_sales = after_sales.filter(
                 participation__activity__city_code=city_code
             )
+            settlements = settlements.filter(activity__city_code=city_code)
         summary = {
             "paid_count": payments.filter(
                 status__in=(
@@ -915,6 +926,21 @@ class AdminActivityFinanceListView(APIView):
                     ActivityAfterSalesCase.Status.PROCESSING,
                 )
             ).count(),
+            "confirming_settlement_count": settlements.filter(
+                status=ActivitySettlement.Status.CONFIRMING
+            ).count(),
+            "frozen_settlement_count": settlements.filter(
+                status=ActivitySettlement.Status.RISK_FROZEN
+            ).count(),
+            "disputed_settlement_count": settlements.filter(
+                status=ActivitySettlement.Status.DISPUTE_FROZEN
+            ).count(),
+            "settled_count": settlements.filter(
+                status=ActivitySettlement.Status.SETTLED
+            ).count(),
+            "settled_amount": settlements.filter(
+                status=ActivitySettlement.Status.SETTLED
+            ).aggregate(total=Sum("settlement_amount"))["total"] or 0,
         }
         keyword = params.get("search", "").strip()
         record_type = params["record_type"]
@@ -937,7 +963,7 @@ class AdminActivityFinanceListView(APIView):
                     | Q(beneficiary__nickname__icontains=keyword)
                 )
             serializer_class = AdminActivityParticipationRefundSerializer
-        else:
+        elif record_type == "after_sales":
             queryset = after_sales
             if keyword:
                 queryset = queryset.filter(
@@ -946,6 +972,15 @@ class AdminActivityFinanceListView(APIView):
                     | Q(applicant__nickname__icontains=keyword)
                 )
             serializer_class = AdminActivityAfterSalesSerializer
+        else:
+            queryset = settlements
+            if keyword:
+                queryset = queryset.filter(
+                    Q(settlement_no__icontains=keyword)
+                    | Q(activity__title__icontains=keyword)
+                    | Q(beneficiary__nickname__icontains=keyword)
+                )
+            serializer_class = AdminActivitySettlementSerializer
         if status_value := params.get("status", "").strip():
             queryset = queryset.filter(status=status_value)
         page = params["page"]
@@ -984,6 +1019,25 @@ class AdminActivityAfterSalesActionView(APIView):
             request=request,
         )
         return Response({"data": AdminActivityAfterSalesSerializer(case).data})
+
+
+class AdminActivitySettlementActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, settlement_no):
+        access = resolve_admin_access(request.user)
+        access.require("activity_settlement.manage")
+        serializer = AdminActivitySettlementActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        settlement = review_activity_settlement(
+            settlement_no=settlement_no,
+            action=serializer.validated_data["action"],
+            reason=serializer.validated_data.get("reason", ""),
+            actor=request.user,
+            access=access,
+            request=request,
+        )
+        return Response({"data": AdminActivitySettlementSerializer(settlement).data})
 
 
 class ProviderApplicationListView(APIView):

@@ -18,7 +18,6 @@ from .models import (
     ActivityCategory,
     ActivityParticipation,
     ActivityParticipationRefundOrder,
-    ActivityReport,
 )
 from .selectors import upcoming_public_activities, with_participant_count
 from .services import (
@@ -142,7 +141,8 @@ class ActivityDetailView(APIView):
         activity = get_object_or_404(
             with_participant_count(
                 Activity.objects.select_related(
-                    "category", "organizer", "organizer__provider_profile", "cover"
+                    "category", "organizer", "organizer__provider_profile", "cover",
+                    "settlement",
                 )
             ).filter(visibility),
             pk=pk,
@@ -164,7 +164,7 @@ class MyActivityListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = with_participant_count(
-            Activity.objects.select_related("category", "organizer", "cover")
+            Activity.objects.select_related("category", "organizer", "cover", "settlement")
         )
 
         if params["role"] == "joined":

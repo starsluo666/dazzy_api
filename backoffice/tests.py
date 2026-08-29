@@ -20,7 +20,9 @@ from activities.models import (
     ActivityPublishOrder,
     ActivityRefundRecord,
     ActivityReport,
+    ActivitySettlement,
 )
+from activities.services import process_activity_timeouts
 from locations.models import UserAddress
 from mediafiles.models import MediaAsset
 from orders.models import ProviderOrder
@@ -1070,6 +1072,7 @@ class BackofficeActivityManagementTests(APITestCase):
                 "activity_category.view", "activity_category.manage",
                 "activity_report.view", "activity_report.manage",
                 "activity_finance.view", "activity_after_sales.manage",
+                "activity_settlement.manage",
             ],
             data_scope=AdminRole.DataScope.CITY,
         )
@@ -1449,4 +1452,79 @@ class BackofficeActivityManagementTests(APITestCase):
         )
         self.assertTrue(AdminAuditLog.objects.filter(
             action="activity.after_sales.approve", target_id=case_no
+        ).exists())
+
+    def test_after_sales_freezes_settlement_and_admin_can_release_risk_freeze(self):
+        now = timezone.now()
+        self.handan_activity.status = Activity.Status.COMPLETED
+        self.handan_activity.starts_at = now - timedelta(days=2, hours=3)
+        self.handan_activity.ends_at = now - timedelta(days=2)
+        self.handan_activity.formation_deadline = now - timedelta(days=3)
+        self.handan_activity.save(update_fields=(
+            "status", "starts_at", "ends_at", "formation_deadline", "updated_at",
+        ))
+        process_activity_timeouts(now=now)
+        settlement = ActivitySettlement.objects.get(activity=self.handan_activity)
+        self.assertEqual(settlement.status, ActivitySettlement.Status.RISK_FROZEN)
+
+        public_client = self.client_class()
+        public_client.force_authenticate(self.participant)
+        created = public_client.post(
+            reverse("activity-after-sales", args=(self.handan_activity.id,)),
+            {
+                "reason": "not_fulfilled",
+                "description": "活动未按约定履行，申请平台核实处理。",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        settlement.refresh_from_db()
+        self.assertEqual(settlement.status, ActivitySettlement.Status.DISPUTE_FROZEN)
+        self.assertEqual(
+            settlement.dispute_source, ActivitySettlement.DisputeSource.AFTER_SALES
+        )
+
+        settlement_list = self.client.get(
+            reverse("backoffice-activity-finance"), {"record_type": "settlement"}
+        )
+        self.assertEqual(settlement_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            settlement_list.data["data"]["items"][0]["settlement_no"],
+            settlement.settlement_no,
+        )
+
+        rejected = self.client.post(
+            reverse(
+                "backoffice-activity-after-sales-action",
+                args=(created.data["data"]["case_no"],),
+            ),
+            {"action": "reject", "result_note": "材料不足，暂不支持本次退款申请。"},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, status.HTTP_200_OK)
+        settlement.refresh_from_db()
+        self.assertEqual(settlement.status, ActivitySettlement.Status.RISK_FROZEN)
+
+        frozen = self.client.post(
+            reverse(
+                "backoffice-activity-settlement-action",
+                args=(settlement.settlement_no,),
+            ),
+            {"action": "freeze_dispute", "reason": "风控复核发现线下争议信息"},
+            format="json",
+        )
+        self.assertEqual(frozen.status_code, status.HTTP_200_OK)
+        released = self.client.post(
+            reverse(
+                "backoffice-activity-settlement-action",
+                args=(settlement.settlement_no,),
+            ),
+            {"action": "release_dispute"},
+            format="json",
+        )
+        self.assertEqual(released.status_code, status.HTTP_200_OK)
+        self.assertEqual(released.data["data"]["status"], "risk_frozen")
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action="activity.settlement.release_dispute",
+            target_id=settlement.settlement_no,
         ).exists())

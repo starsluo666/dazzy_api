@@ -15,6 +15,7 @@ from .models import (
     ActivityParticipationRefundOrder,
     ActivityPublishOrder,
     ActivityReport,
+    ActivitySettlement,
 )
 
 
@@ -83,6 +84,41 @@ class ActivityParticipationRefundOrderSerializer(serializers.ModelSerializer):
             "retained_principal_destination", "retained_principal_destination_label",
             "reason", "requested_at", "refunded_at",
         )
+
+
+class ActivitySettlementSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    settlement_amount = serializers.SerializerMethodField()
+    organizer_principal_amount = serializers.SerializerMethodField()
+    participant_principal_amount = serializers.SerializerMethodField()
+    retained_participant_principal_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ActivitySettlement
+        fields = (
+            "settlement_no", "status", "status_label", "confirmation_started_at",
+            "confirmation_deadline", "risk_frozen_at", "freeze_until", "settled_at",
+            "dispute_reason", "settlement_amount", "organizer_principal_amount",
+            "participant_principal_amount", "retained_participant_principal_amount",
+        )
+
+    def _organizer_amount(self, obj, field):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        return getattr(obj, field) if request.user.pk == obj.beneficiary_id else None
+
+    def get_settlement_amount(self, obj):
+        return self._organizer_amount(obj, "settlement_amount")
+
+    def get_organizer_principal_amount(self, obj):
+        return self._organizer_amount(obj, "organizer_principal_amount")
+
+    def get_participant_principal_amount(self, obj):
+        return self._organizer_amount(obj, "participant_principal_amount")
+
+    def get_retained_participant_principal_amount(self, obj):
+        return self._organizer_amount(obj, "retained_participant_principal_amount")
 
 
 class ActivityAfterSalesCaseSerializer(serializers.ModelSerializer):
@@ -306,6 +342,7 @@ class MyActivityListItemSerializer(ActivityListItemSerializer):
     participation_after_sales_status = serializers.CharField(
         read_only=True, allow_null=True
     )
+    settlement = serializers.SerializerMethodField()
 
     class Meta(ActivityListItemSerializer.Meta):
         fields = ActivityListItemSerializer.Meta.fields + (
@@ -314,11 +351,20 @@ class MyActivityListItemSerializer(ActivityListItemSerializer):
             "participation_payment_expires_at",
             "participation_refund_status",
             "participation_after_sales_status",
+            "settlement",
             "reviewed_at",
             "rejection_reason",
             "cancelled_at",
             "cancellation_reason",
         )
+
+    def get_settlement(self, obj):
+        settlement = getattr(obj, "settlement", None)
+        if not settlement:
+            return None
+        return ActivitySettlementSerializer(
+            settlement, context=self.context
+        ).data
 
 
 class ActivityDetailSerializer(ActivityListItemSerializer):
@@ -334,6 +380,7 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
     participation_payment_expires_at = serializers.SerializerMethodField()
     participation_refund = serializers.SerializerMethodField()
     participation_after_sales = serializers.SerializerMethodField()
+    settlement = serializers.SerializerMethodField()
     locked_seat_count = serializers.SerializerMethodField()
     remaining_capacity = serializers.SerializerMethodField()
     platform_service_fee_amount = serializers.SerializerMethodField()
@@ -357,6 +404,7 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
             "participation_payment_expires_at",
             "participation_refund",
             "participation_after_sales",
+            "settlement",
             "locked_seat_count",
             "remaining_capacity",
             "platform_service_fee_amount",
@@ -421,6 +469,14 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
             return None
         case = participation.after_sales_cases.order_by("-created_at").first()
         return ActivityAfterSalesCaseSerializer(case).data if case else None
+
+    def get_settlement(self, obj):
+        settlement = getattr(obj, "settlement", None)
+        if not settlement:
+            return None
+        return ActivitySettlementSerializer(
+            settlement, context=self.context
+        ).data
 
     def get_locked_seat_count(self, obj) -> int:
         return ActivityParticipation.objects.filter(

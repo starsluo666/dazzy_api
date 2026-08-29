@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.conf import settings
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -10,11 +11,10 @@ from activities.models import (
     Activity,
     ActivityAfterSalesCase,
     ActivityCategory,
-    ActivityParticipation,
     ActivityParticipationPaymentOrder,
     ActivityParticipationRefundOrder,
-    ActivityRefundRecord,
     ActivityReport,
+    ActivitySettlement,
 )
 from activities.serializers import ActivityParticipationRefundOrderSerializer
 from mediafiles.services import build_media_url
@@ -272,7 +272,7 @@ class AdminActivityFinanceQuerySerializer(serializers.Serializer):
     record_type = serializers.ChoiceField(
         required=False,
         default="payment",
-        choices=("payment", "refund", "after_sales"),
+        choices=("payment", "refund", "after_sales", "settlement"),
     )
     status = serializers.CharField(required=False, allow_blank=True, max_length=24)
     city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
@@ -390,6 +390,54 @@ class AdminActivityAfterSalesActionSerializer(serializers.Serializer):
         return attrs
 
 
+class AdminActivitySettlementSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    dispute_source_label = serializers.CharField(source="get_dispute_source_display")
+    activity_id = serializers.IntegerField(source="activity.id")
+    activity_title = serializers.CharField(source="activity.title")
+    city_code = serializers.CharField(source="activity.city_code")
+    city_name = serializers.CharField(source="activity.city_name")
+    beneficiary_name = serializers.CharField(source="beneficiary.nickname")
+    beneficiary_phone_masked = serializers.SerializerMethodField()
+    available_balance_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ActivitySettlement
+        fields = (
+            "settlement_no", "activity_id", "activity_title", "city_code", "city_name",
+            "beneficiary_name", "beneficiary_phone_masked", "status", "status_label",
+            "organizer_principal_amount", "participant_principal_amount",
+            "retained_participant_principal_amount", "settlement_amount",
+            "platform_service_fee_amount", "available_balance_amount",
+            "confirmation_started_at", "confirmation_deadline", "risk_frozen_at",
+            "freeze_until", "dispute_source", "dispute_source_label", "dispute_reason",
+            "calculation_snapshot", "settled_at", "created_at", "updated_at",
+        )
+
+    def get_beneficiary_phone_masked(self, obj):
+        return mask_phone(obj.beneficiary.phone)
+
+    def get_available_balance_amount(self, obj):
+        return ActivitySettlement.objects.filter(
+            beneficiary=obj.beneficiary,
+            status=ActivitySettlement.Status.SETTLED,
+        ).aggregate(total=Sum("settlement_amount"))["total"] or 0
+
+
+class AdminActivitySettlementActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(
+        choices=("freeze_dispute", "release_dispute", "retry_settlement")
+    )
+    reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=1000, trim_whitespace=True
+    )
+
+    def validate(self, attrs):
+        if attrs["action"] == "freeze_dispute" and len(attrs.get("reason", "")) < 5:
+            raise serializers.ValidationError({"reason": "冻结原因至少填写5个字。"})
+        return attrs
+
+
 class AdminActivitySerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     category_name = serializers.CharField(source="category.name")
@@ -414,6 +462,7 @@ class AdminActivitySerializer(serializers.ModelSerializer):
     publish_order = serializers.SerializerMethodField()
     participants = serializers.SerializerMethodField()
     refund_records = serializers.SerializerMethodField()
+    settlement = serializers.SerializerMethodField()
     report_count = serializers.IntegerField(read_only=True, default=0)
     cancelled_by_name = serializers.CharField(source="cancelled_by.nickname", allow_null=True)
 
@@ -431,7 +480,7 @@ class AdminActivitySerializer(serializers.ModelSerializer):
             "refund_rule_snapshot", "publish_order", "published_at", "reviewed_by_name",
             "reviewed_at", "rejection_reason", "participants", "created_at", "updated_at",
             "cancellation_reason", "cancelled_by_name", "cancelled_at", "refund_records",
-            "report_count",
+            "report_count", "settlement",
         )
 
     def get_organizer_phone_masked(self, obj):
@@ -521,6 +570,10 @@ class AdminActivitySerializer(serializers.ModelSerializer):
             }
             for refund in obj.refund_records.all()
         ]
+
+    def get_settlement(self, obj):
+        settlement = getattr(obj, "settlement", None)
+        return AdminActivitySettlementSerializer(settlement).data if settlement else None
 
 
 class AdminOrganizationSerializer(serializers.ModelSerializer):

@@ -634,6 +634,93 @@ class ActivityRefundRecord(models.Model):
         verbose_name_plural = verbose_name
 
 
+def generate_activity_settlement_no():
+    return f"AST{uuid.uuid4().hex[:20].upper()}"
+
+
+class ActivitySettlement(models.Model):
+    class Status(models.TextChoices):
+        CONFIRMING = "confirming", "履约确认中"
+        RISK_FROZEN = "risk_frozen", "风险冻结中"
+        DISPUTE_FROZEN = "dispute_frozen", "争议冻结中"
+        SETTLED = "settled", "已结算入账"
+
+    class DisputeSource(models.TextChoices):
+        NONE = "", "无"
+        AFTER_SALES = "after_sales", "退款售后"
+        ADMIN = "admin", "后台风控"
+
+    settlement_no = models.CharField(
+        "结算单号", max_length=24, unique=True,
+        default=generate_activity_settlement_no, editable=False,
+    )
+    activity = models.OneToOneField(
+        Activity, on_delete=models.PROTECT, related_name="settlement", verbose_name="活动"
+    )
+    beneficiary = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="activity_settlements",
+        verbose_name="结算受益人",
+    )
+    organizer_principal_amount = models.PositiveBigIntegerField("发起人AA本金（分）")
+    participant_principal_amount = models.PositiveBigIntegerField(
+        "有效参与者AA本金（分）"
+    )
+    retained_participant_principal_amount = models.PositiveBigIntegerField(
+        "取消参与者归发起人本金（分）"
+    )
+    settlement_amount = models.PositiveBigIntegerField("发起人结算金额（分）")
+    platform_service_fee_amount = models.PositiveBigIntegerField(
+        "平台组局服务费净额（分）"
+    )
+    status = models.CharField(
+        "结算状态", max_length=24, choices=Status, default=Status.CONFIRMING
+    )
+    confirmation_started_at = models.DateTimeField("履约确认开始时间")
+    confirmation_deadline = models.DateTimeField("履约确认截止时间")
+    risk_frozen_at = models.DateTimeField("风险冻结开始时间", null=True, blank=True)
+    freeze_until = models.DateTimeField("风险冻结截止时间")
+    dispute_reason = models.CharField("争议冻结原因", max_length=1000, blank=True)
+    dispute_source = models.CharField(
+        "争议来源", max_length=20, choices=DisputeSource, blank=True
+    )
+    calculation_snapshot = models.JSONField("结算计算快照", default=dict)
+    settled_at = models.DateTimeField("结算入账时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "activity_settlement"
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("status", "freeze_until"),
+                name="activity_se_status_6466a2_idx",
+            ),
+            models.Index(
+                fields=("beneficiary", "status", "-created_at"),
+                name="activity_se_benefic_6c3f1a_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(
+                    settlement_amount=F("organizer_principal_amount")
+                    + F("participant_principal_amount")
+                    + F("retained_participant_principal_amount")
+                ),
+                name="activity_settlement_amount_matches_components",
+            ),
+            models.CheckConstraint(
+                condition=Q(freeze_until__gte=F("confirmation_deadline")),
+                name="activity_settlement_freeze_after_confirmation",
+            ),
+        ]
+        verbose_name = "活动结算单"
+        verbose_name_plural = verbose_name
+
+
 def generate_activity_report_no():
     return f"ARP{uuid.uuid4().hex[:20].upper()}"
 

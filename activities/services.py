@@ -16,12 +16,15 @@ from .models import (
     ActivityPublishOrder,
     ActivityRefundRecord,
     ActivityReport,
+    ActivitySettlement,
 )
 from .payment_gateway import get_activity_payment_gateway
 from .serializers import STANDARD_REFUND_SNAPSHOT
 
 
 PARTICIPATION_PAYMENT_TTL = timedelta(minutes=30)
+ACTIVITY_CONFIRMATION_PERIOD = timedelta(hours=24)
+ACTIVITY_RISK_FREEZE_PERIOD = timedelta(days=7)
 
 
 def create_activity_draft(*, organizer, validated_data) -> Activity:
@@ -214,6 +217,8 @@ def _occupied_count(activity: Activity, *, now=None) -> int:
 
 
 def sync_activity_formation_status(activity: Activity, participant_count: int) -> None:
+    if activity.status not in (Activity.Status.RECRUITING, Activity.Status.FORMED):
+        return
     target = activity.status
     if participant_count >= activity.min_participants:
         target = Activity.Status.FORMED
@@ -616,6 +621,11 @@ def create_activity_after_sales_case(
     ).first()
     if existing:
         return existing, False
+    settlement = ActivitySettlement.objects.select_for_update().filter(
+        activity=participation.activity
+    ).first()
+    if settlement and settlement.status == ActivitySettlement.Status.SETTLED:
+        raise ValidationError("活动资金已经结算，当前不能再发起退款售后。")
     payment_order = _latest_refundable_payment_order(participation)
     if not payment_order:
         raise ValidationError("当前报名没有可申请退款的支付金额。")
@@ -626,7 +636,7 @@ def create_activity_after_sales_case(
     )
     if requested_principal + requested_service_fee <= 0:
         raise ValidationError("该报名已无可退金额。")
-    return ActivityAfterSalesCase.objects.create(
+    case = ActivityAfterSalesCase.objects.create(
         participation=participation,
         applicant=applicant,
         reason=reason,
@@ -635,7 +645,12 @@ def create_activity_after_sales_case(
         requested_principal_amount=requested_principal,
         requested_service_fee_amount=requested_service_fee,
         requested_amount=requested_principal + requested_service_fee,
-    ), True
+    )
+    freeze_activity_settlement_for_after_sales(
+        activity=participation.activity,
+        reason=f"售后单 {case.case_no} 待处理",
+    )
+    return case, True
 
 
 def refund_all_activity_participations(
@@ -763,6 +778,280 @@ def cancel_activity_by_organizer(*, activity_id: int, organizer, reason: str):
     return activity, publish_refund
 
 
+def calculate_activity_settlement_amounts(activity: Activity) -> dict:
+    publish_order = activity.publish_orders.filter(
+        status__in=(
+            ActivityPublishOrder.Status.PAID,
+            ActivityPublishOrder.Status.PARTIALLY_REFUNDED,
+            ActivityPublishOrder.Status.REFUNDED,
+        )
+    ).order_by("-created_at", "-id").first()
+    if not publish_order:
+        raise ValidationError("已完成活动缺少有效发布支付单，无法生成结算。")
+    publish_refund = ActivityRefundRecord.objects.filter(
+        publish_order=publish_order
+    ).first()
+    organizer_principal = max(
+        0,
+        publish_order.aa_principal_amount
+        - (publish_refund.principal_amount if publish_refund else 0),
+    )
+    platform_service_fee = max(
+        0,
+        publish_order.platform_service_fee_amount
+        - (publish_refund.service_fee_amount if publish_refund else 0),
+    )
+    participant_principal = 0
+    retained_participant_principal = 0
+    unallocated_principal = 0
+    payment_snapshots = []
+    participations = ActivityParticipation.objects.filter(
+        activity=activity
+    ).prefetch_related("payment_orders__refund_orders")
+    paid_statuses = (
+        ActivityParticipationPaymentOrder.Status.PAID,
+        ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED,
+        ActivityParticipationPaymentOrder.Status.REFUNDED,
+    )
+    for participation in participations:
+        paid_orders = [
+            order
+            for order in participation.payment_orders.all()
+            if order.status in paid_statuses and order.paid_at is not None
+        ]
+        current_order_id = paid_orders[0].pk if participation.status == ActivityParticipation.Status.ACTIVE and paid_orders else None
+        for order in paid_orders:
+            succeeded_refunds = [
+                refund for refund in order.refund_orders.all()
+                if refund.status == ActivityParticipationRefundOrder.Status.SUCCEEDED
+            ]
+            refunded_principal = sum(
+                refund.principal_refund_amount for refund in succeeded_refunds
+            )
+            refunded_service_fee = sum(
+                refund.service_fee_refund_amount for refund in succeeded_refunds
+            )
+            net_principal = max(0, order.aa_principal_amount - refunded_principal)
+            net_service_fee = max(
+                0, order.platform_service_fee_amount - refunded_service_fee
+            )
+            platform_service_fee += net_service_fee
+            organizer_retained_declared = sum(
+                refund.retained_principal_amount
+                for refund in succeeded_refunds
+                if refund.retained_principal_destination
+                == ActivityParticipationRefundOrder.PrincipalDestination.ORGANIZER
+            )
+            if order.pk == current_order_id:
+                participant_principal += net_principal
+                allocation = "active_participant"
+            else:
+                retained = min(net_principal, organizer_retained_declared)
+                retained_participant_principal += retained
+                unallocated_principal += max(0, net_principal - retained)
+                allocation = "organizer_retained" if retained else "unallocated"
+            payment_snapshots.append({
+                "order_no": order.order_no,
+                "participation_id": participation.pk,
+                "participation_status": participation.status,
+                "net_principal_amount": net_principal,
+                "net_service_fee_amount": net_service_fee,
+                "allocation": allocation,
+                "refund_nos": [refund.refund_no for refund in succeeded_refunds],
+            })
+    settlement_amount = (
+        organizer_principal
+        + participant_principal
+        + retained_participant_principal
+    )
+    return {
+        "organizer_principal_amount": organizer_principal,
+        "participant_principal_amount": participant_principal,
+        "retained_participant_principal_amount": retained_participant_principal,
+        "settlement_amount": settlement_amount,
+        "platform_service_fee_amount": platform_service_fee,
+        "calculation_snapshot": {
+            "version": "activity-settlement-v1",
+            "publish_order_no": publish_order.order_no,
+            "publish_refund_no": publish_refund.refund_no if publish_refund else None,
+            "payment_orders": payment_snapshots,
+            "unallocated_principal_amount": unallocated_principal,
+        },
+    }
+
+
+def _apply_settlement_calculation(settlement, amounts):
+    for field in (
+        "organizer_principal_amount",
+        "participant_principal_amount",
+        "retained_participant_principal_amount",
+        "settlement_amount",
+        "platform_service_fee_amount",
+        "calculation_snapshot",
+    ):
+        setattr(settlement, field, amounts[field])
+
+
+def _has_open_activity_after_sales(activity) -> bool:
+    return ActivityAfterSalesCase.objects.filter(
+        participation__activity=activity,
+        status__in=(
+            ActivityAfterSalesCase.Status.PENDING,
+            ActivityAfterSalesCase.Status.PROCESSING,
+        ),
+    ).exists()
+
+
+@transaction.atomic
+def ensure_activity_settlement(*, activity_id: int, now=None):
+    now = now or timezone.now()
+    activity = Activity.objects.select_for_update().select_related("organizer").filter(
+        pk=activity_id
+    ).first()
+    if not activity:
+        raise NotFound("活动不存在。")
+    if activity.status != Activity.Status.COMPLETED:
+        raise ValidationError("仅已完成活动可以生成结算单。")
+    amounts = calculate_activity_settlement_amounts(activity)
+    settlement = ActivitySettlement.objects.select_for_update().filter(
+        activity=activity
+    ).first()
+    if settlement:
+        if settlement.status != ActivitySettlement.Status.SETTLED:
+            _apply_settlement_calculation(settlement, amounts)
+            settlement.save(update_fields=(
+                "organizer_principal_amount", "participant_principal_amount",
+                "retained_participant_principal_amount", "settlement_amount",
+                "platform_service_fee_amount", "calculation_snapshot", "updated_at",
+            ))
+        return settlement, False
+    confirmation_started_at = activity.ends_at
+    confirmation_deadline = confirmation_started_at + ACTIVITY_CONFIRMATION_PERIOD
+    freeze_until = confirmation_deadline + ACTIVITY_RISK_FREEZE_PERIOD
+    open_after_sales = _has_open_activity_after_sales(activity)
+    settlement = ActivitySettlement.objects.create(
+        activity=activity,
+        beneficiary=activity.organizer,
+        confirmation_started_at=confirmation_started_at,
+        confirmation_deadline=confirmation_deadline,
+        freeze_until=freeze_until,
+        status=(
+            ActivitySettlement.Status.DISPUTE_FROZEN
+            if open_after_sales else ActivitySettlement.Status.CONFIRMING
+        ),
+        dispute_source=(
+            ActivitySettlement.DisputeSource.AFTER_SALES if open_after_sales else ""
+        ),
+        dispute_reason=("存在待处理活动退款/售后" if open_after_sales else ""),
+        **amounts,
+    )
+    return settlement, True
+
+
+@transaction.atomic
+def freeze_activity_settlement_for_after_sales(*, activity, reason: str):
+    settlement = ActivitySettlement.objects.select_for_update().filter(
+        activity=activity
+    ).first()
+    if not settlement and activity.status == Activity.Status.COMPLETED:
+        settlement, _ = ensure_activity_settlement(activity_id=activity.pk)
+    if not settlement:
+        return None, False
+    if settlement.status == ActivitySettlement.Status.SETTLED:
+        raise ValidationError("活动资金已经结算，当前不能再发起退款售后。")
+    if settlement.dispute_source == ActivitySettlement.DisputeSource.ADMIN:
+        return settlement, False
+    changed = settlement.status != ActivitySettlement.Status.DISPUTE_FROZEN
+    settlement.status = ActivitySettlement.Status.DISPUTE_FROZEN
+    settlement.dispute_source = ActivitySettlement.DisputeSource.AFTER_SALES
+    settlement.dispute_reason = reason.strip()
+    settlement.save(update_fields=(
+        "status", "dispute_source", "dispute_reason", "updated_at",
+    ))
+    return settlement, changed
+
+
+@transaction.atomic
+def release_activity_settlement_after_sales(*, activity, now=None):
+    now = now or timezone.now()
+    settlement = ActivitySettlement.objects.select_for_update().filter(
+        activity=activity
+    ).first()
+    if (
+        not settlement
+        or settlement.status == ActivitySettlement.Status.SETTLED
+        or settlement.dispute_source != ActivitySettlement.DisputeSource.AFTER_SALES
+        or _has_open_activity_after_sales(activity)
+    ):
+        return settlement, False
+    amounts = calculate_activity_settlement_amounts(activity)
+    _apply_settlement_calculation(settlement, amounts)
+    if now < settlement.confirmation_deadline:
+        settlement.status = ActivitySettlement.Status.CONFIRMING
+        settlement.risk_frozen_at = None
+    else:
+        settlement.status = ActivitySettlement.Status.RISK_FROZEN
+        settlement.risk_frozen_at = settlement.confirmation_deadline
+    settlement.dispute_source = ""
+    settlement.dispute_reason = ""
+    settlement.save(update_fields=(
+        "status", "risk_frozen_at", "dispute_source", "dispute_reason",
+        "organizer_principal_amount", "participant_principal_amount",
+        "retained_participant_principal_amount", "settlement_amount",
+        "platform_service_fee_amount", "calculation_snapshot", "updated_at",
+    ))
+    return settlement, True
+
+
+@transaction.atomic
+def advance_activity_settlement(*, settlement_id: int, now=None):
+    now = now or timezone.now()
+    settlement = ActivitySettlement.objects.select_for_update().select_related(
+        "activity"
+    ).get(pk=settlement_id)
+    if settlement.status == ActivitySettlement.Status.SETTLED:
+        return settlement, False
+    activity = settlement.activity
+    if _has_open_activity_after_sales(activity):
+        if settlement.dispute_source != ActivitySettlement.DisputeSource.ADMIN:
+            settlement.status = ActivitySettlement.Status.DISPUTE_FROZEN
+            settlement.dispute_source = ActivitySettlement.DisputeSource.AFTER_SALES
+            settlement.dispute_reason = "存在待处理活动退款/售后"
+            settlement.save(update_fields=(
+                "status", "dispute_source", "dispute_reason", "updated_at",
+            ))
+        return settlement, False
+    if settlement.dispute_source == ActivitySettlement.DisputeSource.ADMIN:
+        return settlement, False
+    if settlement.dispute_source == ActivitySettlement.DisputeSource.AFTER_SALES:
+        release_activity_settlement_after_sales(activity=activity, now=now)
+        settlement.refresh_from_db()
+    amounts = calculate_activity_settlement_amounts(activity)
+    _apply_settlement_calculation(settlement, amounts)
+    changed = False
+    if (
+        settlement.status == ActivitySettlement.Status.CONFIRMING
+        and now >= settlement.confirmation_deadline
+    ):
+        settlement.status = ActivitySettlement.Status.RISK_FROZEN
+        settlement.risk_frozen_at = settlement.confirmation_deadline
+        changed = True
+    if (
+        settlement.status == ActivitySettlement.Status.RISK_FROZEN
+        and now >= settlement.freeze_until
+    ):
+        settlement.status = ActivitySettlement.Status.SETTLED
+        settlement.settled_at = now
+        changed = True
+    settlement.save(update_fields=(
+        "status", "risk_frozen_at", "settled_at",
+        "organizer_principal_amount", "participant_principal_amount",
+        "retained_participant_principal_amount", "settlement_amount",
+        "platform_service_fee_amount", "calculation_snapshot", "updated_at",
+    ))
+    return settlement, changed
+
+
 @transaction.atomic
 def fail_unformed_activity(*, activity_id: int, now=None):
     now = now or timezone.now()
@@ -809,6 +1098,32 @@ def fail_unformed_activity(*, activity_id: int, now=None):
     return activity, True
 
 
+@transaction.atomic
+def start_formed_activity(*, activity_id: int, now=None):
+    now = now or timezone.now()
+    activity = Activity.objects.select_for_update().filter(pk=activity_id).first()
+    if not activity:
+        raise NotFound("活动不存在。")
+    if activity.status != Activity.Status.FORMED or activity.starts_at > now:
+        return activity, False
+    activity.status = Activity.Status.IN_PROGRESS
+    activity.save(update_fields=("status", "updated_at"))
+    return activity, True
+
+
+@transaction.atomic
+def complete_started_activity(*, activity_id: int, now=None):
+    now = now or timezone.now()
+    activity = Activity.objects.select_for_update().filter(pk=activity_id).first()
+    if not activity:
+        raise NotFound("活动不存在。")
+    if activity.status != Activity.Status.IN_PROGRESS or activity.ends_at > now:
+        return activity, False
+    activity.status = Activity.Status.COMPLETED
+    activity.save(update_fields=("status", "updated_at"))
+    return activity, True
+
+
 def process_activity_timeouts(*, now=None):
     now = now or timezone.now()
     with transaction.atomic():
@@ -823,7 +1138,64 @@ def process_activity_timeouts(*, now=None):
     for activity_id in activity_ids:
         _, changed = fail_unformed_activity(activity_id=activity_id, now=now)
         processed_activity_count += int(changed)
+    started_activity_count = 0
+    formed_ids = list(
+        Activity.objects.filter(
+            status=Activity.Status.FORMED,
+            starts_at__lte=now,
+        ).values_list("id", flat=True)
+    )
+    for activity_id in formed_ids:
+        _, changed = start_formed_activity(activity_id=activity_id, now=now)
+        started_activity_count += int(changed)
+
+    completed_activity_count = 0
+    in_progress_ids = list(
+        Activity.objects.filter(
+            status=Activity.Status.IN_PROGRESS,
+            ends_at__lte=now,
+        ).values_list("id", flat=True)
+    )
+    for activity_id in in_progress_ids:
+        _, changed = complete_started_activity(activity_id=activity_id, now=now)
+        completed_activity_count += int(changed)
+
+    settlement_created_count = 0
+    settlement_error_count = 0
+    completed_without_settlement_ids = list(
+        Activity.objects.filter(
+            status=Activity.Status.COMPLETED,
+            settlement__isnull=True,
+        ).values_list("id", flat=True)
+    )
+    for activity_id in completed_without_settlement_ids:
+        try:
+            _, created = ensure_activity_settlement(activity_id=activity_id, now=now)
+            settlement_created_count += int(created)
+        except ValidationError:
+            settlement_error_count += 1
+
+    settlement_advanced_count = 0
+    settlement_ids = list(
+        ActivitySettlement.objects.exclude(
+            status=ActivitySettlement.Status.SETTLED
+        ).values_list("id", flat=True)
+    )
+    for settlement_id in settlement_ids:
+        try:
+            _, changed = advance_activity_settlement(
+                settlement_id=settlement_id, now=now
+            )
+            settlement_advanced_count += int(changed)
+        except ValidationError:
+            settlement_error_count += 1
+
     return {
         "expired_payment_count": expired_payment_count,
         "processed_activity_count": processed_activity_count,
+        "started_activity_count": started_activity_count,
+        "completed_activity_count": completed_activity_count,
+        "settlement_created_count": settlement_created_count,
+        "settlement_advanced_count": settlement_advanced_count,
+        "settlement_error_count": settlement_error_count,
     }

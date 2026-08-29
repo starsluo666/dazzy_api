@@ -14,9 +14,12 @@ from activities.models import (
     ActivityPublishOrder,
     ActivityRefundRecord,
     ActivityReport,
+    ActivitySettlement,
 )
 from activities.services import (
+    advance_activity_settlement,
     create_and_process_participation_refund,
+    release_activity_settlement_after_sales,
     refund_all_activity_participations,
     refund_publish_order,
     sync_activity_formation_status,
@@ -233,6 +236,11 @@ def review_activity_after_sales_case(
     before = {"status": case.status, "result_note": case.result_note}
     refund = None
     if action == "approve":
+        settlement = ActivitySettlement.objects.select_for_update().filter(
+            activity=case.participation.activity
+        ).first()
+        if settlement and settlement.status == ActivitySettlement.Status.SETTLED:
+            raise ValidationError("活动资金已经结算，不能再批准退款。")
         principal_amount = (
             case.requested_principal_amount
             if approved_principal_amount is None
@@ -293,6 +301,11 @@ def review_activity_after_sales_case(
         "approved_principal_amount", "approved_service_fee_amount", "approved_amount",
         "refund_order", "updated_at",
     ))
+    if action in ("approve", "reject"):
+        release_activity_settlement_after_sales(
+            activity=case.participation.activity,
+            now=case.reviewed_at,
+        )
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),
@@ -310,6 +323,81 @@ def review_activity_after_sales_case(
         ip_address=client_ip(request),
     )
     return case
+
+
+@transaction.atomic
+def review_activity_settlement(
+    *, settlement_no, action, reason, actor, access, request
+):
+    queryset = ActivitySettlement.objects.select_for_update().select_related(
+        "activity", "beneficiary"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(activity__city_code__in=access.city_codes)
+    settlement = get_object_or_404(queryset, settlement_no=settlement_no)
+    before = {
+        "status": settlement.status,
+        "dispute_source": settlement.dispute_source,
+        "dispute_reason": settlement.dispute_reason,
+    }
+    now = timezone.now()
+    if action == "freeze_dispute":
+        if settlement.status == ActivitySettlement.Status.SETTLED:
+            raise ValidationError("已结算资金不能再冻结。")
+        settlement.status = ActivitySettlement.Status.DISPUTE_FROZEN
+        settlement.dispute_source = ActivitySettlement.DisputeSource.ADMIN
+        settlement.dispute_reason = reason.strip()
+        settlement.save(update_fields=(
+            "status", "dispute_source", "dispute_reason", "updated_at",
+        ))
+    elif action == "release_dispute":
+        if settlement.dispute_source != ActivitySettlement.DisputeSource.ADMIN:
+            raise ValidationError("当前结算单不是后台风控冻结状态。")
+        if ActivityAfterSalesCase.objects.filter(
+            participation__activity=settlement.activity,
+            status__in=(
+                ActivityAfterSalesCase.Status.PENDING,
+                ActivityAfterSalesCase.Status.PROCESSING,
+            ),
+        ).exists():
+            raise ValidationError("仍有未处理售后，暂不能解除冻结。")
+        settlement.dispute_source = ""
+        settlement.dispute_reason = ""
+        if now < settlement.confirmation_deadline:
+            settlement.status = ActivitySettlement.Status.CONFIRMING
+            settlement.risk_frozen_at = None
+        else:
+            settlement.status = ActivitySettlement.Status.RISK_FROZEN
+            settlement.risk_frozen_at = settlement.confirmation_deadline
+        settlement.save(update_fields=(
+            "status", "risk_frozen_at", "dispute_source", "dispute_reason",
+            "updated_at",
+        ))
+        settlement, _ = advance_activity_settlement(
+            settlement_id=settlement.pk, now=now
+        )
+    else:
+        if settlement.dispute_source == ActivitySettlement.DisputeSource.ADMIN:
+            raise ValidationError("请先解除后台风控冻结。")
+        settlement, _ = advance_activity_settlement(
+            settlement_id=settlement.pk, now=now
+        )
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"activity.settlement.{action}",
+        target_type="activity_settlement",
+        target_id=settlement.settlement_no,
+        before=before,
+        after={
+            "status": settlement.status,
+            "dispute_source": settlement.dispute_source,
+            "dispute_reason": settlement.dispute_reason,
+        },
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return settlement
 
 
 @transaction.atomic

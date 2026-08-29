@@ -7,6 +7,7 @@ from .views import (
     AdminActivityCategoryListView,
     AdminActivityAfterSalesActionView,
     AdminActivityFinanceListView,
+    AdminActivitySettlementActionView,
     AdminActivityListView,
     AdminActivityReportActionView,
     AdminActivityReportListView,
@@ -86,6 +87,11 @@ urlpatterns = [
         "activity-after-sales/<str:case_no>/action/",
         AdminActivityAfterSalesActionView.as_view(),
         name="backoffice-activity-after-sales-action",
+    ),
+    path(
+        "activity-settlements/<str:settlement_no>/action/",
+        AdminActivitySettlementActionView.as_view(),
+        name="backoffice-activity-settlement-action",
     ),
     path(
         "service-categories/",

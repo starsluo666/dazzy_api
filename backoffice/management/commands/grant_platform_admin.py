@@ -49,6 +49,7 @@ class Command(BaseCommand):
                     "activity_report.manage",
                     "activity_finance.view",
                     "activity_after_sales.manage",
+                    "activity_settlement.manage",
                     "order.fulfillment.view",
                     "order.support_note.add",
                     "order.after_sales.view",

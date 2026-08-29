@@ -17,6 +17,7 @@ from .models import (
     ActivityParticipationPaymentOrder,
     ActivityParticipationRefundOrder,
     ActivityPublishOrder,
+    ActivitySettlement,
 )
 from .services import calculate_publish_service_fee, process_activity_timeouts
 
@@ -443,6 +444,81 @@ class ActivityModelTests(TestCase):
         self.assertEqual(
             activity.refund_records.get().refund_type,
             "failed_to_form",
+        )
+
+    def test_activity_lifecycle_creates_and_advances_settlement_idempotently(self):
+        now = timezone.now()
+        activity = self.build_activity(
+            status=Activity.Status.FORMED,
+            starts_at=now - timedelta(hours=3),
+            ends_at=now - timedelta(hours=1),
+            formation_deadline=now - timedelta(hours=4),
+            min_participants=2,
+        )
+        activity.save()
+        ActivityPublishOrder.objects.create(
+            order_no="SETTLEMENT-PUBLISH",
+            activity=activity,
+            payer=self.organizer,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            status=ActivityPublishOrder.Status.PAID,
+            paid_at=now - timedelta(days=1),
+        )
+        participant = User.objects.create_user(phone="13800000038", password="test")
+        participation = ActivityParticipation.objects.create(
+            activity=activity,
+            user=participant,
+            status=ActivityParticipation.Status.ACTIVE,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            joined_at=now - timedelta(days=1),
+        )
+        ActivityParticipationPaymentOrder.objects.create(
+            participation=participation,
+            payer=participant,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            status=ActivityParticipationPaymentOrder.Status.PAID,
+            expires_at=now - timedelta(hours=20),
+            paid_at=now - timedelta(hours=21),
+        )
+
+        first = process_activity_timeouts(now=now)
+        activity.refresh_from_db()
+        settlement = activity.settlement
+
+        self.assertEqual(first["started_activity_count"], 1)
+        self.assertEqual(first["completed_activity_count"], 1)
+        self.assertEqual(first["settlement_created_count"], 1)
+        self.assertEqual(activity.status, Activity.Status.COMPLETED)
+        self.assertEqual(settlement.status, ActivitySettlement.Status.CONFIRMING)
+        self.assertEqual(settlement.settlement_amount, 9600)
+        self.assertEqual(settlement.platform_service_fee_amount, 960)
+
+        process_activity_timeouts(now=settlement.confirmation_deadline)
+        settlement.refresh_from_db()
+        self.assertEqual(settlement.status, ActivitySettlement.Status.RISK_FROZEN)
+
+        process_activity_timeouts(now=settlement.freeze_until)
+        settlement.refresh_from_db()
+        self.assertEqual(settlement.status, ActivitySettlement.Status.SETTLED)
+        self.assertEqual(ActivitySettlement.objects.filter(activity=activity).count(), 1)
+
+        self.client.force_login(self.organizer)
+        organizer_detail = self.client.get(f"/api/v1/activities/{activity.pk}/")
+        self.client.force_login(participant)
+        participant_detail = self.client.get(f"/api/v1/activities/{activity.pk}/")
+        self.assertEqual(
+            organizer_detail.json()["data"]["settlement"]["settlement_amount"], 9600
+        )
+        self.assertIsNone(
+            participant_detail.json()["data"]["settlement"]["settlement_amount"]
         )
 
     @override_settings(DEBUG=True)
