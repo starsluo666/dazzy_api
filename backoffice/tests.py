@@ -77,6 +77,7 @@ class BackofficeProviderReviewTests(APITestCase):
                 "order.support_note.add",
                 "order.after_sales.view",
                 "order.after_sales.review",
+                "audit.view",
             ],
             data_scope=AdminRole.DataScope.CITY,
         )
@@ -668,6 +669,25 @@ class BackofficeProviderReviewTests(APITestCase):
             action="order.fulfillment.evidence.view", target_id=order.order_no
         )
         self.assertEqual(audit.organization, self.organization)
+
+    def test_audit_logs_support_search_filters_and_pagination(self):
+        AdminAuditLog.objects.create(
+            actor=self.admin_user, organization=self.organization,
+            action="order.support_note.add", target_type="order", target_id="AUDIT-ORDER-1",
+            before={}, after={"content": "已联系"},
+        )
+        AdminAuditLog.objects.create(
+            actor=self.admin_user, organization=self.organization,
+            action="provider.application.approve", target_type="provider", target_id="AUDIT-PROVIDER-1",
+            before={"status": "pending"}, after={"status": "approved"},
+        )
+        response = self.client.get(reverse("backoffice-audit-logs"), {
+            "search": "AUDIT-ORDER", "target_type": "order", "page": 1, "page_size": 1,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data["data"]
+        self.assertEqual(data["pagination"], {"page": 1, "page_size": 1, "total": 1})
+        self.assertEqual(data["items"][0]["target_id"], "AUDIT-ORDER-1")
 
     def test_support_note_is_append_only_and_audited(self):
         order = self.create_fulfillment_order(

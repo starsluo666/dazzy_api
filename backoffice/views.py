@@ -1651,7 +1651,25 @@ class AuditLogListView(APIView):
     def get(self, request):
         access = resolve_admin_access(request.user)
         access.require("audit.view")
-        queryset = AdminAuditLog.objects.select_related("actor")
+        queryset = AdminAuditLog.objects.select_related("actor", "organization")
         if not access.all_data:
             queryset = queryset.filter(organization=access.member.organization)
-        return Response({"data": {"items": AuditLogSerializer(queryset[:100], many=True).data}})
+        keyword = request.query_params.get("search", "").strip()
+        action = request.query_params.get("action", "").strip()
+        target_type = request.query_params.get("target_type", "").strip()
+        if keyword:
+            queryset = queryset.filter(
+                Q(action__icontains=keyword)
+                | Q(target_id__icontains=keyword)
+                | Q(actor__nickname__icontains=keyword)
+            )
+        if action:
+            queryset = queryset.filter(action__startswith=action)
+        if target_type:
+            queryset = queryset.filter(target_type=target_type)
+        total = queryset.count()
+        page = max(int(request.query_params.get("page", 1) or 1), 1)
+        page_size = min(max(int(request.query_params.get("page_size", 20) or 20), 1), 100)
+        start = (page - 1) * page_size
+        items = queryset[start : start + page_size]
+        return Response({"data": {"items": AuditLogSerializer(items, many=True).data, "pagination": {"page": page, "page_size": page_size, "total": total}}})

@@ -1162,10 +1162,11 @@ class OrganizationMemberSerializer(serializers.ModelSerializer):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     actor_name = serializers.CharField(source="actor.nickname", read_only=True)
+    organization_name = serializers.CharField(source="organization.name", read_only=True, allow_null=True)
 
     class Meta:
         model = AdminAuditLog
         fields = (
-            "id", "actor_name", "action", "target_type", "target_id", "before", "after",
+            "id", "actor_name", "organization_name", "action", "target_type", "target_id", "before", "after",
             "ip_address", "created_at",
         )
