@@ -36,6 +36,7 @@ from .models import (
     OrganizationMember,
     ProviderOrderAfterSalesCase,
     ProviderOrderSupportNote,
+    ProviderOrderingSetting,
 )
 from .serializers import (
     AdminActivityQuerySerializer,
@@ -77,6 +78,7 @@ from .serializers import (
     ProviderOrderAdminSerializer,
     ProviderOrderSupportNoteInputSerializer,
     ProviderOrderSupportNoteSerializer,
+    ProviderOrderingSettingSerializer,
     ProviderApplicationQuerySerializer,
     ProviderReviewDecisionSerializer,
     ProviderReviewListSerializer,
@@ -1631,6 +1633,32 @@ class OrganizationListView(APIView):
             id=access.member.organization_id
         )
         return Response({"data": {"items": AdminOrganizationSerializer(queryset, many=True).data}})
+
+
+class ProviderOrderingSettingView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("operations.manage")
+        return Response({"data": ProviderOrderingSettingSerializer(ProviderOrderingSetting.current()).data})
+
+    @transaction.atomic
+    def patch(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("operations.manage")
+        setting = ProviderOrderingSetting.current()
+        before = ProviderOrderingSettingSerializer(setting).data
+        serializer = ProviderOrderingSettingSerializer(setting, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AdminAuditLog.objects.create(
+            actor=request.user, organization=access.member.organization,
+            action="operations.provider_ordering.update", target_type="operation_setting",
+            target_id="provider-ordering", before=before, after=serializer.data,
+            ip_address=client_ip(request),
+        )
+        return Response({"data": serializer.data})
 
 
 class OrganizationMemberListView(APIView):

@@ -33,6 +33,7 @@ from .models import (
     ProviderCreditAdjustment,
     ProviderOrderAfterSalesCase,
     ProviderOrderSupportNote,
+    ProviderOrderingSetting,
     UserRiskFlag,
 )
 
@@ -1170,3 +1171,33 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "id", "actor_name", "organization_name", "action", "target_type", "target_id", "before", "after",
             "ip_address", "created_at",
         )
+
+
+class ProviderOrderingSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProviderOrderingSetting
+        fields = (
+            "location_report_interval_seconds", "location_timeout_minutes",
+            "max_location_accuracy_m", "acceptance_timeout_minutes", "updated_at",
+        )
+        read_only_fields = ("updated_at",)
+
+    def validate_location_report_interval_seconds(self, value):
+        if not 60 <= value <= 900:
+            raise serializers.ValidationError("定位上报间隔必须在 60–900 秒之间。")
+        return value
+
+    def validate_location_timeout_minutes(self, value):
+        if not 10 <= value <= 120:
+            raise serializers.ValidationError("定位失效时间必须在 10–120 分钟之间。")
+        return value
+
+    def validate_max_location_accuracy_m(self, value):
+        if not 50 <= value <= 200:
+            raise serializers.ValidationError("最大定位误差必须在 50–200 米之间。")
+        return value
+
+    def validate_acceptance_timeout_minutes(self, value):
+        if not 5 <= value <= 120:
+            raise serializers.ValidationError("接单超时时间必须在 5–120 分钟之间。")
+        return value

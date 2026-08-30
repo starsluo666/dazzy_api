@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 
 from mediafiles.models import MediaAsset
 from providers.models import ProviderProfile
+from providers.presence import operation_rules
 
 from .models import ProviderOrder
 from .serializers import (
@@ -188,8 +189,9 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_ACCEPTANCE:
             raise ValidationError({"status": "订单不在待接单状态。"})
-        if not order.paid_at or order.paid_at + timedelta(minutes=30) <= timezone.now():
-            raise ValidationError({"status": "订单已超过30分钟接单时限，请联系客服。"})
+        timeout = operation_rules()["acceptance_timeout_minutes"]
+        if not order.paid_at or order.paid_at + timedelta(minutes=timeout) <= timezone.now():
+            raise ValidationError({"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"})
         order.status = ProviderOrder.Status.PENDING_SERVICE
         order.accepted_at = timezone.now()
         order.save(update_fields=("status", "accepted_at", "updated_at"))

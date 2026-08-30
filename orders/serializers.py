@@ -7,7 +7,7 @@ from locations.tencent import tencent_map
 from locations.models import UserAddress
 from providers.models import ProviderProfile, ProviderService
 from providers.availability import ensure_booking_within_schedule
-from providers.presence import get_provider_live_location, provider_is_online
+from providers.presence import get_provider_live_location, operation_rules, provider_is_online
 
 from .models import ProviderOrder
 from .services import build_quote, validate_booking
@@ -152,7 +152,8 @@ class ProviderOrderManageSerializer(ProviderOrderSerializer):
     def get_acceptance_expires_at(self, obj):
         if not obj.paid_at:
             return None
-        return obj.paid_at + timedelta(minutes=30)
+        timeout = operation_rules().get("acceptance_timeout_minutes", 30)
+        return obj.paid_at + timedelta(minutes=timeout)
 
 
 def quote_payload(validated_data):

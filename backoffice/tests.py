@@ -42,6 +42,7 @@ from .models import (
     ProviderCreditAdjustment,
     ProviderOrderAfterSalesCase,
     ProviderOrderSupportNote,
+    ProviderOrderingSetting,
     UserRiskFlag,
 )
 
@@ -73,6 +74,7 @@ class BackofficeProviderReviewTests(APITestCase):
                 "provider.credit.adjust",
                 "service_category.view",
                 "service_category.manage",
+                "operations.manage",
                 "order.fulfillment.view",
                 "order.support_note.add",
                 "order.after_sales.view",
@@ -502,6 +504,10 @@ class BackofficeProviderReviewTests(APITestCase):
             self.client.get(reverse("backoffice-service-categories")).status_code,
             status.HTTP_403_FORBIDDEN,
         )
+        self.assertEqual(
+            self.client.get(reverse("backoffice-provider-ordering-setting")).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
 
     def test_service_category_list_has_summary_and_relationship_counts(self):
         ProviderService.objects.create(
@@ -570,6 +576,45 @@ class BackofficeProviderReviewTests(APITestCase):
                 target_id=str(category_id),
             ).exists()
         )
+
+    def test_provider_ordering_setting_can_be_updated_and_is_audited(self):
+        detail_url = reverse("backoffice-provider-ordering-setting")
+
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"]["location_report_interval_seconds"], 300)
+
+        response = self.client.patch(
+            detail_url,
+            {
+                "location_report_interval_seconds": 180,
+                "location_timeout_minutes": 45,
+                "max_location_accuracy_m": 150,
+                "acceptance_timeout_minutes": 20,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setting = ProviderOrderingSetting.current()
+        self.assertEqual(setting.location_report_interval_seconds, 180)
+        self.assertEqual(setting.location_timeout_minutes, 45)
+        self.assertEqual(setting.max_location_accuracy_m, 150)
+        self.assertEqual(setting.acceptance_timeout_minutes, 20)
+        audit = AdminAuditLog.objects.get(
+            action="operations.provider_ordering.update",
+            target_id="provider-ordering",
+        )
+        self.assertEqual(audit.before["location_timeout_minutes"], 30)
+        self.assertEqual(audit.after["location_timeout_minutes"], 45)
+
+        invalid_response = self.client.patch(
+            detail_url,
+            {"max_location_accuracy_m": 201},
+            format="json",
+        )
+        self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(ProviderOrderingSetting.current().max_location_accuracy_m, 150)
 
     def test_linked_service_category_slug_cannot_change(self):
         ProviderService.objects.create(

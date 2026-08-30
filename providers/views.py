@@ -43,8 +43,7 @@ from .serializers import (
     ProviderScheduleQuerySerializer,
 )
 from .presence import (
-    ONLINE_TIMEOUT_MINUTES,
-    RECOMMENDED_REPORT_INTERVAL_SECONDS,
+    operation_rules,
     get_provider_live_location,
     location_expires_at,
     online_provider_query,
@@ -365,8 +364,8 @@ class CurrentProviderWorkbenchView(APIView):
                     "location_updated_at": location.received_at if location else None,
                     "location_accuracy_m": location.accuracy_m if location else None,
                     "location_expires_at": location_expires_at(location),
-                    "online_timeout_minutes": ONLINE_TIMEOUT_MINUTES,
-                    "recommended_report_interval_seconds": RECOMMENDED_REPORT_INTERVAL_SECONDS,
+                    "online_timeout_minutes": operation_rules()["timeout_minutes"],
+                    "recommended_report_interval_seconds": operation_rules()["report_interval_seconds"],
                     "today_order_count": today_count,
                     "pending_acceptance_order_count": pending_acceptance_count,
                     "month_income_amount": income,
@@ -390,8 +389,8 @@ def _online_payload(provider, location=None):
         "location_updated_at": location.received_at if location else None,
         "location_accuracy_m": location.accuracy_m if location else None,
         "location_expires_at": location_expires_at(location),
-        "online_timeout_minutes": ONLINE_TIMEOUT_MINUTES,
-        "recommended_report_interval_seconds": RECOMMENDED_REPORT_INTERVAL_SECONDS,
+        "online_timeout_minutes": operation_rules()["timeout_minutes"],
+        "recommended_report_interval_seconds": operation_rules()["report_interval_seconds"],
     }
 
 

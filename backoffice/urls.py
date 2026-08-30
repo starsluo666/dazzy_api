@@ -34,12 +34,14 @@ from .views import (
     ProviderOrderAdminListView,
     ProviderOrderEvidenceView,
     ProviderOrderSupportNoteView,
+    ProviderOrderingSettingView,
     ProviderApplicationDetailView,
     ProviderApplicationListView,
     ProviderApplicationReviewView,
 )
 
 urlpatterns = [
+    path("operation-settings/provider-ordering/", ProviderOrderingSettingView.as_view(), name="backoffice-provider-ordering-setting"),
     path("me/", AdminMeView.as_view(), name="backoffice-me"),
     path("overview/", AdminOverviewView.as_view(), name="backoffice-overview"),
     path("activities/", AdminActivityListView.as_view(), name="backoffice-activities"),

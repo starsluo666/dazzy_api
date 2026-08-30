@@ -56,6 +56,7 @@ class Command(BaseCommand):
                     "order.after_sales.review",
                     "organization.manage",
                     "audit.view",
+                    "operations.manage",
                 ],
                 "data_scope": AdminRole.DataScope.ALL,
                 "is_system": True,

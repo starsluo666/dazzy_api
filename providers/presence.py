@@ -13,8 +13,23 @@ RECOMMENDED_REPORT_INTERVAL_SECONDS = 300
 MAX_LOCATION_ACCURACY_M = Decimal("200")
 
 
+def operation_rules():
+    from backoffice.models import ProviderOrderingSetting
+    try:
+        setting = ProviderOrderingSetting.current()
+        return {
+            "timeout": timedelta(minutes=setting.location_timeout_minutes),
+            "timeout_minutes": setting.location_timeout_minutes,
+            "report_interval_seconds": setting.location_report_interval_seconds,
+            "max_accuracy_m": Decimal(setting.max_location_accuracy_m),
+            "acceptance_timeout_minutes": setting.acceptance_timeout_minutes,
+        }
+    except Exception:
+        return {"timeout": ONLINE_TIMEOUT, "timeout_minutes": ONLINE_TIMEOUT_MINUTES, "report_interval_seconds": RECOMMENDED_REPORT_INTERVAL_SECONDS, "max_accuracy_m": MAX_LOCATION_ACCURACY_M, "acceptance_timeout_minutes": 30}
+
+
 def online_cutoff(now=None):
-    return (now or timezone.now()) - ONLINE_TIMEOUT
+    return (now or timezone.now()) - operation_rules()["timeout"]
 
 
 def online_provider_query(now=None) -> Q:
@@ -26,7 +41,7 @@ def online_provider_query(now=None) -> Q:
         user__account_status="active",
         live_location__session_id__isnull=False,
         live_location__received_at__gte=online_cutoff(now),
-        live_location__accuracy_m__lte=MAX_LOCATION_ACCURACY_M,
+        live_location__accuracy_m__lte=operation_rules()["max_accuracy_m"],
     )
 
 
@@ -50,10 +65,10 @@ def provider_is_online(provider: ProviderProfile, now=None) -> bool:
     return bool(
         location
         and location.session_id
-        and location.accuracy_m <= MAX_LOCATION_ACCURACY_M
+        and location.accuracy_m <= operation_rules()["max_accuracy_m"]
         and location.received_at >= online_cutoff(now)
     )
 
 
 def location_expires_at(location: ProviderLiveLocation | None):
-    return location.received_at + ONLINE_TIMEOUT if location and location.session_id else None
+    return location.received_at + operation_rules()["timeout"] if location and location.session_id else None

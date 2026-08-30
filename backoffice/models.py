@@ -136,6 +136,25 @@ class AdminAuditLog(models.Model):
         return f"{self.actor} {self.action} {self.target_type}:{self.target_id}"
 
 
+class ProviderOrderingSetting(models.Model):
+    singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
+    location_report_interval_seconds = models.PositiveSmallIntegerField(default=300)
+    location_timeout_minutes = models.PositiveSmallIntegerField(default=30)
+    max_location_accuracy_m = models.PositiveSmallIntegerField(default=200)
+    acceptance_timeout_minutes = models.PositiveSmallIntegerField(default=30)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "backoffice_provider_ordering_setting"
+        verbose_name = "达人接单规则"
+        verbose_name_plural = verbose_name
+
+    @classmethod
+    def current(cls):
+        setting, _ = cls.objects.get_or_create(singleton_key="default")
+        return setting
+
+
 class ProviderOrderSupportNote(models.Model):
     order = models.ForeignKey(
         "orders.ProviderOrder", on_delete=models.PROTECT, related_name="support_notes"
