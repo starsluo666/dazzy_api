@@ -5,6 +5,7 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
+from backoffice.operation_settings import platform_operation_rules
 from config.geospatial import gcj02_to_wgs84
 
 from .models import (
@@ -20,11 +21,6 @@ from .models import (
 )
 from .payment_gateway import get_activity_payment_gateway
 from .serializers import STANDARD_REFUND_SNAPSHOT
-
-
-PARTICIPATION_PAYMENT_TTL = timedelta(minutes=30)
-ACTIVITY_CONFIRMATION_PERIOD = timedelta(hours=24)
-ACTIVITY_RISK_FREEZE_PERIOD = timedelta(days=7)
 
 
 def create_activity_draft(*, organizer, validated_data) -> Activity:
@@ -311,7 +307,9 @@ def get_or_create_participation_order(*, activity_id: int, user, channel: str):
         raise ValidationError("活动名额已满。")
 
     service_fee = calculate_publish_service_fee(activity.aa_principal_amount)
-    expires_at = now + PARTICIPATION_PAYMENT_TTL
+    expires_at = now + timedelta(
+        minutes=platform_operation_rules()["activity_payment_timeout_minutes"]
+    )
     snapshot = {
         "platform_service_fee_rate": "0.10",
         "rounding": "half_up",
@@ -926,8 +924,13 @@ def ensure_activity_settlement(*, activity_id: int, now=None):
             ))
         return settlement, False
     confirmation_started_at = activity.ends_at
-    confirmation_deadline = confirmation_started_at + ACTIVITY_CONFIRMATION_PERIOD
-    freeze_until = confirmation_deadline + ACTIVITY_RISK_FREEZE_PERIOD
+    rules = platform_operation_rules()
+    confirmation_deadline = confirmation_started_at + timedelta(
+        hours=rules["activity_settlement_confirmation_hours"]
+    )
+    freeze_until = confirmation_deadline + timedelta(
+        days=rules["activity_settlement_risk_freeze_days"]
+    )
     open_after_sales = _has_open_activity_after_sales(activity)
     settlement = ActivitySettlement.objects.create(
         activity=activity,

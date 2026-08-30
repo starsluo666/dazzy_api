@@ -7,6 +7,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
+from backoffice.models import PlatformOperationSetting
 from mediafiles.models import MediaAsset
 
 from .models import (
@@ -338,6 +339,35 @@ class ActivityModelTests(TestCase):
         )
 
     @override_settings(DEBUG=True)
+    def test_participation_uses_configured_payment_timeout(self):
+        PlatformOperationSetting.objects.create(activity_payment_timeout_minutes=10)
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800000039",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.client.force_login(participant)
+        created_after = timezone.now()
+
+        response = self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+
+        self.assertEqual(response.status_code, 201)
+        payment = ActivityParticipationPaymentOrder.objects.get(
+            participation__activity=activity,
+            payer=participant,
+        )
+        self.assertGreaterEqual(
+            payment.expires_at,
+            created_after + timedelta(minutes=10),
+        )
+        self.assertLess(
+            payment.expires_at,
+            created_after + timedelta(minutes=10, seconds=2),
+        )
+
+    @override_settings(DEBUG=True)
     def test_participant_cancellation_creates_rule_based_refund_idempotently(self):
         starts_at = timezone.now() + timedelta(hours=4)
         activity = self.build_activity(
@@ -447,6 +477,10 @@ class ActivityModelTests(TestCase):
         )
 
     def test_activity_lifecycle_creates_and_advances_settlement_idempotently(self):
+        PlatformOperationSetting.objects.create(
+            activity_settlement_confirmation_hours=48,
+            activity_settlement_risk_freeze_days=3,
+        )
         now = timezone.now()
         activity = self.build_activity(
             status=Activity.Status.FORMED,
@@ -492,6 +526,14 @@ class ActivityModelTests(TestCase):
         first = process_activity_timeouts(now=now)
         activity.refresh_from_db()
         settlement = activity.settlement
+        self.assertEqual(
+            settlement.confirmation_deadline,
+            activity.ends_at + timedelta(hours=48),
+        )
+        self.assertEqual(
+            settlement.freeze_until,
+            settlement.confirmation_deadline + timedelta(days=3),
+        )
 
         self.assertEqual(first["started_activity_count"], 1)
         self.assertEqual(first["completed_activity_count"], 1)

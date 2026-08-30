@@ -1,6 +1,5 @@
 from datetime import timedelta
 
-from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
@@ -34,8 +33,10 @@ from .models import (
     ProviderOrderAfterSalesCase,
     ProviderOrderSupportNote,
     ProviderOrderingSetting,
+    PlatformOperationSetting,
     UserRiskFlag,
 )
+from .operation_settings import DEFAULT_PLATFORM_OPERATION_RULES, platform_operation_rules
 
 
 def mask_phone(phone):
@@ -966,7 +967,7 @@ def provider_order_anomalies(order):
     if timeline_gap:
         anomalies.append({"code": "timeline_gap", "label": "履约时间线缺失"})
     overdue_before = timezone.now() - timedelta(
-        days=settings.PROVIDER_ORDER_AUTO_CONFIRM_DAYS
+        days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
     )
     if (
         order.status == ProviderOrder.Status.PENDING_CONFIRMATION
@@ -1201,3 +1202,60 @@ class ProviderOrderingSettingSerializer(serializers.ModelSerializer):
         if not 5 <= value <= 120:
             raise serializers.ValidationError("接单超时时间必须在 5–120 分钟之间。")
         return value
+
+
+class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlatformOperationSetting
+        fields = (*DEFAULT_PLATFORM_OPERATION_RULES.keys(), "updated_at")
+        read_only_fields = ("updated_at",)
+
+    def validate_provider_order_payment_timeout_minutes(self, value):
+        if not 5 <= value <= 60:
+            raise serializers.ValidationError("达人订单支付时限必须在 5–60 分钟之间。")
+        return value
+
+    def validate_provider_order_confirmation_timeout_days(self, value):
+        if not 1 <= value <= 15:
+            raise serializers.ValidationError("用户确认时限必须在 1–15 天之间。")
+        return value
+
+    def validate_activity_payment_timeout_minutes(self, value):
+        if not 5 <= value <= 60:
+            raise serializers.ValidationError("活动报名支付时限必须在 5–60 分钟之间。")
+        return value
+
+    def validate_activity_minimum_advance_hours(self, value):
+        if not 2 <= value <= 168:
+            raise serializers.ValidationError("活动最少提前时间必须在 2–168 小时之间。")
+        return value
+
+    def validate_activity_maximum_advance_days(self, value):
+        if not 2 <= value <= 90:
+            raise serializers.ValidationError("活动最远可发布时间必须在 2–90 天之间。")
+        return value
+
+    def validate_activity_settlement_confirmation_hours(self, value):
+        if not 1 <= value <= 168:
+            raise serializers.ValidationError("活动履约确认期必须在 1–168 小时之间。")
+        return value
+
+    def validate_activity_settlement_risk_freeze_days(self, value):
+        if not 1 <= value <= 30:
+            raise serializers.ValidationError("活动结算风险冻结期必须在 1–30 天之间。")
+        return value
+
+    def validate(self, attrs):
+        minimum_hours = attrs.get(
+            "activity_minimum_advance_hours",
+            getattr(self.instance, "activity_minimum_advance_hours", 48),
+        )
+        maximum_days = attrs.get(
+            "activity_maximum_advance_days",
+            getattr(self.instance, "activity_maximum_advance_days", 30),
+        )
+        if minimum_hours >= maximum_days * 24:
+            raise serializers.ValidationError(
+                {"activity_maximum_advance_days": "最远可发布时间必须大于最少提前时间。"}
+            )
+        return attrs

@@ -37,7 +37,9 @@ from .models import (
     ProviderOrderAfterSalesCase,
     ProviderOrderSupportNote,
     ProviderOrderingSetting,
+    PlatformOperationSetting,
 )
+from .operation_settings import platform_operation_rules
 from .serializers import (
     AdminActivityQuerySerializer,
     AdminActivityActionSerializer,
@@ -79,6 +81,7 @@ from .serializers import (
     ProviderOrderSupportNoteInputSerializer,
     ProviderOrderSupportNoteSerializer,
     ProviderOrderingSettingSerializer,
+    PlatformOperationSettingSerializer,
     ProviderApplicationQuerySerializer,
     ProviderReviewDecisionSerializer,
     ProviderReviewListSerializer,
@@ -312,7 +315,9 @@ def order_anomaly_query(code):
     confirmation_overdue = Q(
         status=ProviderOrder.Status.PENDING_CONFIRMATION,
         completion_submitted_at__lte=timezone.now()
-        - timedelta(days=settings.PROVIDER_ORDER_AUTO_CONFIRM_DAYS),
+        - timedelta(
+            days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
+        ),
     )
     mapping = {
         "missing_evidence": missing_evidence,
@@ -1656,6 +1661,39 @@ class ProviderOrderingSettingView(APIView):
             actor=request.user, organization=access.member.organization,
             action="operations.provider_ordering.update", target_type="operation_setting",
             target_id="provider-ordering", before=before, after=serializer.data,
+            ip_address=client_ip(request),
+        )
+        return Response({"data": serializer.data})
+
+
+class PlatformOperationSettingView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("operations.manage")
+        setting = PlatformOperationSetting.current()
+        return Response({"data": PlatformOperationSettingSerializer(setting).data})
+
+    @transaction.atomic
+    def patch(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("operations.manage")
+        setting = PlatformOperationSetting.current()
+        before = PlatformOperationSettingSerializer(setting).data
+        serializer = PlatformOperationSettingSerializer(
+            setting, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization,
+            action="operations.platform.update",
+            target_type="operation_setting",
+            target_id="platform",
+            before=before,
+            after=serializer.data,
             ip_address=client_ip(request),
         )
         return Response({"data": serializer.data})

@@ -155,6 +155,28 @@ class ProviderOrderingSetting(models.Model):
         return setting
 
 
+class PlatformOperationSetting(models.Model):
+    singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
+    provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
+    provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
+    activity_payment_timeout_minutes = models.PositiveSmallIntegerField(default=30)
+    activity_minimum_advance_hours = models.PositiveSmallIntegerField(default=48)
+    activity_maximum_advance_days = models.PositiveSmallIntegerField(default=30)
+    activity_settlement_confirmation_hours = models.PositiveSmallIntegerField(default=24)
+    activity_settlement_risk_freeze_days = models.PositiveSmallIntegerField(default=7)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "backoffice_platform_operation_setting"
+        verbose_name = "平台运营参数"
+        verbose_name_plural = verbose_name
+
+    @classmethod
+    def current(cls):
+        setting, _ = cls.objects.get_or_create(singleton_key="default")
+        return setting
+
+
 class ProviderOrderSupportNote(models.Model):
     order = models.ForeignKey(
         "orders.ProviderOrder", on_delete=models.PROTECT, related_name="support_notes"

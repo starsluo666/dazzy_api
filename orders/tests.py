@@ -9,6 +9,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
+from backoffice.models import PlatformOperationSetting
 from mediafiles.models import MediaAsset
 from providers.models import (
     ProviderLiveLocation,
@@ -148,6 +149,29 @@ class ProviderOrderApiTests(TestCase):
         paid = self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
         self.assertEqual(paid.status_code, 200)
         self.assertEqual(paid.json()["data"]["status"], ProviderOrder.Status.PENDING_ACCEPTANCE)
+
+    def test_create_uses_configured_payment_timeout(self):
+        PlatformOperationSetting.objects.create(
+            provider_order_payment_timeout_minutes=25
+        )
+        created_after = timezone.now()
+
+        response = self.client.post(
+            "/api/v1/provider-orders/",
+            self.payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        order = ProviderOrder.objects.get(order_no=response.json()["data"]["order_no"])
+        self.assertGreaterEqual(
+            order.payment_expires_at,
+            created_after + timedelta(minutes=25),
+        )
+        self.assertLess(
+            order.payment_expires_at,
+            created_after + timedelta(minutes=25, seconds=2),
+        )
 
     def test_order_uses_owned_address_and_keeps_snapshot(self):
         create = self.client.post(

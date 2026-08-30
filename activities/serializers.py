@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import serializers
 
+from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 
@@ -224,10 +225,17 @@ class ActivityCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         now = timezone.now()
         starts_at = attrs["starts_at"]
-        if starts_at < now + timedelta(hours=48):
-            raise serializers.ValidationError({"starts_at": "活动开始时间至少为发布后48小时。"})
-        if starts_at > now + timedelta(days=30):
-            raise serializers.ValidationError({"starts_at": "活动开始时间不得晚于发布后30天。"})
+        rules = platform_operation_rules()
+        minimum_hours = rules["activity_minimum_advance_hours"]
+        maximum_days = rules["activity_maximum_advance_days"]
+        if starts_at < now + timedelta(hours=minimum_hours):
+            raise serializers.ValidationError(
+                {"starts_at": f"活动开始时间至少为发布后{minimum_hours}小时。"}
+            )
+        if starts_at > now + timedelta(days=maximum_days):
+            raise serializers.ValidationError(
+                {"starts_at": f"活动开始时间不得晚于发布后{maximum_days}天。"}
+            )
         if attrs["ends_at"] <= starts_at:
             raise serializers.ValidationError({"ends_at": "结束时间必须晚于开始时间。"})
         if not now < attrs["formation_deadline"] < starts_at:

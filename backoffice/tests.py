@@ -43,6 +43,7 @@ from .models import (
     ProviderOrderAfterSalesCase,
     ProviderOrderSupportNote,
     ProviderOrderingSetting,
+    PlatformOperationSetting,
     UserRiskFlag,
 )
 
@@ -508,6 +509,10 @@ class BackofficeProviderReviewTests(APITestCase):
             self.client.get(reverse("backoffice-provider-ordering-setting")).status_code,
             status.HTTP_403_FORBIDDEN,
         )
+        self.assertEqual(
+            self.client.get(reverse("backoffice-platform-operation-setting")).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
 
     def test_service_category_list_has_summary_and_relationship_counts(self):
         ProviderService.objects.create(
@@ -615,6 +620,56 @@ class BackofficeProviderReviewTests(APITestCase):
         )
         self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(ProviderOrderingSetting.current().max_location_accuracy_m, 150)
+
+    def test_platform_operation_setting_can_be_updated_and_is_audited(self):
+        detail_url = reverse("backoffice-platform-operation-setting")
+
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"]["provider_order_payment_timeout_minutes"], 15
+        )
+
+        response = self.client.patch(
+            detail_url,
+            {
+                "provider_order_payment_timeout_minutes": 20,
+                "provider_order_confirmation_timeout_days": 5,
+                "activity_payment_timeout_minutes": 15,
+                "activity_minimum_advance_hours": 24,
+                "activity_maximum_advance_days": 45,
+                "activity_settlement_confirmation_hours": 36,
+                "activity_settlement_risk_freeze_days": 10,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setting = PlatformOperationSetting.current()
+        self.assertEqual(setting.provider_order_payment_timeout_minutes, 20)
+        self.assertEqual(setting.provider_order_confirmation_timeout_days, 5)
+        self.assertEqual(setting.activity_payment_timeout_minutes, 15)
+        self.assertEqual(setting.activity_minimum_advance_hours, 24)
+        self.assertEqual(setting.activity_maximum_advance_days, 45)
+        self.assertEqual(setting.activity_settlement_confirmation_hours, 36)
+        self.assertEqual(setting.activity_settlement_risk_freeze_days, 10)
+        audit = AdminAuditLog.objects.get(
+            action="operations.platform.update",
+            target_id="platform",
+        )
+        self.assertEqual(audit.before["activity_payment_timeout_minutes"], 30)
+        self.assertEqual(audit.after["activity_payment_timeout_minutes"], 15)
+
+        invalid_response = self.client.patch(
+            detail_url,
+            {"provider_order_payment_timeout_minutes": 61},
+            format="json",
+        )
+        self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            PlatformOperationSetting.current().provider_order_payment_timeout_minutes,
+            20,
+        )
 
     def test_linked_service_category_slug_cannot_change(self):
         ProviderService.objects.create(

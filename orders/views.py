@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
 from providers.models import ProviderProfile
 from providers.presence import operation_rules
@@ -23,7 +24,7 @@ from .serializers import (
     ProviderOrderSerializer,
     quote_payload,
 )
-from .services import PAYMENT_LOCK_MINUTES, ensure_slot_available, expire_pending_orders
+from .services import ensure_slot_available, expire_pending_orders
 
 
 def make_order_no():
@@ -85,7 +86,11 @@ class ProviderOrderListCreateView(APIView):
             transport_fee_amount=quote.transport_fee_amount,
             other_fee_amount=quote.other_fee_amount, discount_amount=quote.discount_amount,
             payable_amount=quote.payable_amount, pricing_snapshot=quote.snapshot,
-            payment_expires_at=timezone.now() + timedelta(minutes=PAYMENT_LOCK_MINUTES),
+            payment_expires_at=timezone.now() + timedelta(
+                minutes=platform_operation_rules()[
+                    "provider_order_payment_timeout_minutes"
+                ]
+            ),
         )
         return Response({"data": ProviderOrderSerializer(order).data}, status=201)
 
