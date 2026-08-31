@@ -1648,3 +1648,159 @@ class BackofficeActivityManagementTests(APITestCase):
             action="activity.settlement.release_dispute",
             target_id=settlement.settlement_no,
         ).exists())
+
+
+class BackofficeSystemManagementTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            phone="19900007771",
+            password="test-password",
+            nickname="系统管理员",
+        )
+        cls.organization = Organization.objects.create(
+            name="乐搭伴运营平台",
+            code="system-management-platform",
+            organization_type=Organization.Type.PLATFORM,
+            city_codes=["130400", "110100"],
+        )
+        cls.admin_role = AdminRole.objects.create(
+            organization=cls.organization,
+            name="平台管理员",
+            code="system-management-admin",
+            permissions=["organization.manage", "audit.view", "dashboard.view"],
+            data_scope=AdminRole.DataScope.ALL,
+            is_system=True,
+        )
+        cls.admin_member = OrganizationMember.objects.create(
+            user=cls.admin,
+            organization=cls.organization,
+            role=cls.admin_role,
+        )
+        cls.target_user = User.objects.create_user(
+            phone="18800007772",
+            password="test-password",
+            nickname="新客服",
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(self.admin)
+
+    def test_role_member_management_and_audit_flow(self):
+        catalog = self.client.get(reverse("backoffice-permissions"))
+        self.assertEqual(catalog.status_code, status.HTTP_200_OK)
+        permission_codes = {
+            permission["code"]
+            for group in catalog.data["data"]["groups"]
+            for permission in group["permissions"]
+        }
+        self.assertIn("organization.manage", permission_codes)
+        self.assertIn("order.after_sales.review", permission_codes)
+
+        role_response = self.client.post(
+            reverse("backoffice-roles"),
+            {
+                "organization": self.organization.id,
+                "name": "客服专员",
+                "code": "support-agent",
+                "permissions": ["user.view", "order.after_sales.view"],
+                "data_scope": AdminRole.DataScope.ORGANIZATION,
+            },
+            format="json",
+        )
+        self.assertEqual(role_response.status_code, status.HTTP_201_CREATED)
+        role_id = role_response.data["data"]["id"]
+
+        member_response = self.client.post(
+            reverse("backoffice-members"),
+            {
+                "phone": self.target_user.phone,
+                "organization": self.organization.id,
+                "role": role_id,
+                "city_codes": ["130400", "130400"],
+                "is_active": True,
+            },
+            format="json",
+        )
+        self.assertEqual(member_response.status_code, status.HTTP_201_CREATED)
+        member_id = member_response.data["data"]["id"]
+        self.assertEqual(member_response.data["data"]["city_codes"], ["130400"])
+
+        member_list = self.client.get(reverse("backoffice-members"))
+        self.assertEqual(member_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(member_list.data["data"]["summary"]["total"], 2)
+
+        updated = self.client.patch(
+            reverse("backoffice-member-detail", args=(member_id,)),
+            {"is_active": False, "city_codes": ["110100"]},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, status.HTTP_200_OK)
+        self.assertFalse(updated.data["data"]["is_active"])
+
+        blocked_delete = self.client.delete(
+            reverse("backoffice-role-detail", args=(role_id,))
+        )
+        self.assertEqual(blocked_delete.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action="system.role.create", target_id=str(role_id)
+        ).exists())
+        self.assertTrue(AdminAuditLog.objects.filter(
+            action="system.member.update", target_id=str(member_id)
+        ).exists())
+
+    def test_system_role_self_protection_and_permission_validation(self):
+        system_role_update = self.client.patch(
+            reverse("backoffice-role-detail", args=(self.admin_role.id,)),
+            {"name": "不可修改"},
+            format="json",
+        )
+        self.assertEqual(system_role_update.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self_update = self.client.patch(
+            reverse("backoffice-member-detail", args=(self.admin_member.id,)),
+            {"is_active": False},
+            format="json",
+        )
+        self.assertEqual(self_update.status_code, status.HTTP_400_BAD_REQUEST)
+
+        invalid_permission = self.client.post(
+            reverse("backoffice-roles"),
+            {
+                "organization": self.organization.id,
+                "name": "非法角色",
+                "code": "invalid-role",
+                "permissions": ["unknown.permission"],
+                "data_scope": AdminRole.DataScope.ORGANIZATION,
+            },
+            format="json",
+        )
+        self.assertEqual(invalid_permission.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_organization_manage_permission_is_required(self):
+        viewer = User.objects.create_user(
+            phone="19900007773",
+            password="test-password",
+            nickname="只读人员",
+        )
+        viewer_role = AdminRole.objects.create(
+            organization=self.organization,
+            name="看板人员",
+            code="dashboard-only-role",
+            permissions=["dashboard.view"],
+            data_scope=AdminRole.DataScope.ORGANIZATION,
+        )
+        OrganizationMember.objects.create(
+            user=viewer,
+            organization=self.organization,
+            role=viewer_role,
+        )
+        self.client.force_authenticate(viewer)
+        self.assertEqual(
+            self.client.get(reverse("backoffice-roles")).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.get(reverse("backoffice-members")).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )

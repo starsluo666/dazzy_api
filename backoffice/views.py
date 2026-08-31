@@ -6,6 +6,7 @@ from django.db.models import Count, Prefetch, Q, Sum
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -32,6 +33,7 @@ from providers.presence import online_provider_query
 from .access import client_ip, resolve_admin_access
 from .models import (
     AdminAuditLog,
+    AdminRole,
     Organization,
     OrganizationMember,
     ProviderOrderAfterSalesCase,
@@ -66,8 +68,12 @@ from .serializers import (
     AdminUserListSerializer,
     AdminUserQuerySerializer,
     AdminUserRiskActionSerializer,
+    AdminRoleMutationSerializer,
+    AdminRoleSerializer,
     AuditLogSerializer,
     OrganizationMemberSerializer,
+    OrganizationMemberCreateSerializer,
+    OrganizationMemberUpdateSerializer,
     ProviderAdminActionSerializer,
     ProviderAdminQuerySerializer,
     ProviderAdminSerializer,
@@ -86,6 +92,7 @@ from .serializers import (
     ProviderReviewDecisionSerializer,
     ProviderReviewListSerializer,
 )
+from .permission_catalog import permission_catalog_data
 from .services import (
     adjust_provider_credit,
     change_provider_operational_status,
@@ -153,6 +160,100 @@ def provider_admin_queryset(access):
 
 def can_access(access, permission):
     return "*" in access.permissions or permission in access.permissions
+
+
+def scoped_organizations(access):
+    queryset = Organization.objects.all()
+    if not access.all_data:
+        queryset = queryset.filter(pk=access.member.organization_id)
+    return queryset
+
+
+def scoped_admin_roles(access):
+    queryset = AdminRole.objects.select_related("organization")
+    if not access.all_data:
+        queryset = queryset.filter(
+            Q(organization=access.member.organization) | Q(organization__isnull=True)
+        )
+    return queryset
+
+
+def scoped_organization_members(access):
+    queryset = OrganizationMember.objects.select_related(
+        "user", "organization", "role"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(organization=access.member.organization)
+    return queryset
+
+
+def role_has_permission(role, permission):
+    return "*" in role.permissions or permission in role.permissions
+
+
+def ensure_organization_manager_remains(member, next_role=None, next_active=None):
+    next_role = next_role or member.role
+    next_active = member.is_active if next_active is None else next_active
+    currently_manages = member.is_active and role_has_permission(
+        member.role, "organization.manage"
+    )
+    will_manage = next_active and role_has_permission(next_role, "organization.manage")
+    if not currently_manages or will_manage:
+        return
+    other_managers = OrganizationMember.objects.filter(
+        organization=member.organization,
+        is_active=True,
+    ).exclude(pk=member.pk).select_related("role")
+    if not any(
+        role_has_permission(other.role, "organization.manage")
+        for other in other_managers
+    ):
+        raise ValidationError("当前成员是该组织最后一名账号管理员，不能移除其管理权限。")
+
+
+def ensure_role_manager_remains(role, next_permissions):
+    if not role_has_permission(role, "organization.manage"):
+        return
+    if "organization.manage" in next_permissions or "*" in next_permissions:
+        return
+    members_using_role = OrganizationMember.objects.filter(
+        role=role,
+        is_active=True,
+    )
+    if not members_using_role.exists():
+        return
+    other_managers = OrganizationMember.objects.filter(
+        organization=role.organization,
+        is_active=True,
+    ).exclude(role=role).select_related("role")
+    if not any(
+        role_has_permission(other.role, "organization.manage")
+        for other in other_managers
+    ):
+        raise ValidationError("该角色承载当前组织最后一组账号管理权限，不能移除。")
+
+
+def role_audit_snapshot(role):
+    return {
+        "organization": role.organization_id,
+        "name": role.name,
+        "code": role.code,
+        "permissions": role.permissions,
+        "data_scope": role.data_scope,
+        "is_system": role.is_system,
+    }
+
+
+def member_audit_snapshot(member):
+    return {
+        "user": member.user_id,
+        "phone": member.user.phone,
+        "organization": member.organization_id,
+        "role": member.role_id,
+        "role_name": member.role.name,
+        "city_codes": member.city_codes,
+        "is_active": member.is_active,
+    }
 
 
 def service_category_admin_queryset():
@@ -1634,10 +1735,158 @@ class OrganizationListView(APIView):
     def get(self, request):
         access = resolve_admin_access(request.user)
         access.require("organization.manage")
-        queryset = Organization.objects.all() if access.all_data else Organization.objects.filter(
-            id=access.member.organization_id
+        queryset = scoped_organizations(access).order_by("id")
+        return Response({
+            "data": {
+                "items": AdminOrganizationSerializer(queryset, many=True).data,
+            }
+        })
+
+
+class AdminPermissionCatalogView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        return Response({
+            "data": {
+                "groups": permission_catalog_data(),
+                "data_scopes": [
+                    {"value": value, "label": label}
+                    for value, label in AdminRole.DataScope.choices
+                ],
+            }
+        })
+
+
+class AdminRoleListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        queryset = scoped_admin_roles(access).annotate(
+            member_count=Count("members")
+        ).order_by("-is_system", "organization_id", "name")
+        organization_id = request.query_params.get("organization", "").strip()
+        if organization_id:
+            queryset = queryset.filter(organization_id=organization_id)
+        items = AdminRoleSerializer(queryset, many=True).data
+        return Response({
+            "data": {
+                "items": items,
+                "summary": {
+                    "total": len(items),
+                    "system": sum(1 for item in items if item["is_system"]),
+                    "custom": sum(1 for item in items if not item["is_system"]),
+                },
+            }
+        })
+
+    @transaction.atomic
+    def post(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        serializer = AdminRoleMutationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        organization = serializer.validated_data["organization"]
+        if not scoped_organizations(access).filter(pk=organization.pk).exists():
+            raise ValidationError("不能在当前数据范围外创建角色。")
+        if (
+            serializer.validated_data["data_scope"] == AdminRole.DataScope.ALL
+            and not access.all_data
+        ):
+            raise ValidationError("当前账号不能授予全部数据范围。")
+        role = serializer.save(is_system=False)
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=organization,
+            action="system.role.create",
+            target_type="admin_role",
+            target_id=str(role.id),
+            before={},
+            after=role_audit_snapshot(role),
+            ip_address=client_ip(request),
         )
-        return Response({"data": {"items": AdminOrganizationSerializer(queryset, many=True).data}})
+        role.member_count = 0
+        return Response(
+            {"data": AdminRoleSerializer(role).data},
+            status=201,
+        )
+
+
+class AdminRoleDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, access, role_id):
+        return get_object_or_404(scoped_admin_roles(access), pk=role_id)
+
+    @transaction.atomic
+    def patch(self, request, role_id):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        role = self.get_object(access, role_id)
+        if role.is_system:
+            raise ValidationError("系统内置角色不可修改，可复制后创建自定义角色。")
+        if access.member and access.member.role_id == role.id:
+            raise ValidationError("不能修改当前账号正在使用的角色。")
+        before = role_audit_snapshot(role)
+        serializer = AdminRoleMutationSerializer(
+            role,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        organization = serializer.validated_data.get("organization", role.organization)
+        if organization.id != role.organization_id:
+            raise ValidationError("角色创建后不能变更所属组织。")
+        if (
+            serializer.validated_data.get("data_scope", role.data_scope)
+            == AdminRole.DataScope.ALL
+            and not access.all_data
+        ):
+            raise ValidationError("当前账号不能授予全部数据范围。")
+        next_permissions = serializer.validated_data.get("permissions", role.permissions)
+        ensure_role_manager_remains(role, next_permissions)
+        role = serializer.save()
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=role.organization,
+            action="system.role.update",
+            target_type="admin_role",
+            target_id=str(role.id),
+            before=before,
+            after=role_audit_snapshot(role),
+            ip_address=client_ip(request),
+        )
+        role.member_count = role.members.count()
+        return Response({"data": AdminRoleSerializer(role).data})
+
+    @transaction.atomic
+    def delete(self, request, role_id):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        role = self.get_object(access, role_id)
+        if role.is_system:
+            raise ValidationError("系统内置角色不可删除。")
+        if role.members.exists():
+            raise ValidationError("该角色仍有后台账号使用，请先调整账号角色。")
+        before = role_audit_snapshot(role)
+        organization = role.organization
+        target_id = str(role.id)
+        role.delete()
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=organization,
+            action="system.role.delete",
+            target_type="admin_role",
+            target_id=target_id,
+            before=before,
+            after={},
+            ip_address=client_ip(request),
+        )
+        return Response(status=204)
 
 
 class ProviderOrderingSettingView(APIView):
@@ -1705,10 +1954,119 @@ class OrganizationMemberListView(APIView):
     def get(self, request):
         access = resolve_admin_access(request.user)
         access.require("organization.manage")
-        queryset = OrganizationMember.objects.select_related("user", "organization", "role")
-        if not access.all_data:
-            queryset = queryset.filter(organization=access.member.organization)
-        return Response({"data": {"items": OrganizationMemberSerializer(queryset, many=True).data}})
+        queryset = scoped_organization_members(access).order_by("-is_active", "id")
+        keyword = request.query_params.get("search", "").strip()
+        organization_id = request.query_params.get("organization", "").strip()
+        role_id = request.query_params.get("role", "").strip()
+        state = request.query_params.get("status", "").strip()
+        if keyword:
+            queryset = queryset.filter(
+                Q(user__phone__icontains=keyword)
+                | Q(user__nickname__icontains=keyword)
+                | Q(role__name__icontains=keyword)
+            )
+        if organization_id:
+            queryset = queryset.filter(organization_id=organization_id)
+        if role_id:
+            queryset = queryset.filter(role_id=role_id)
+        if state == "active":
+            queryset = queryset.filter(is_active=True)
+        elif state == "inactive":
+            queryset = queryset.filter(is_active=False)
+        items = OrganizationMemberSerializer(
+            queryset,
+            many=True,
+            context={"request": request},
+        ).data
+        return Response({
+            "data": {
+                "items": items,
+                "summary": {
+                    "total": len(items),
+                    "active": sum(1 for item in items if item["is_active"]),
+                    "inactive": sum(1 for item in items if not item["is_active"]),
+                    "organizations": len({item["organization"] for item in items}),
+                },
+            }
+        })
+
+    @transaction.atomic
+    def post(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        serializer = OrganizationMemberCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        organization = serializer.validated_data["organization"]
+        role = serializer.validated_data["role"]
+        if not scoped_organizations(access).filter(pk=organization.pk).exists():
+            raise ValidationError("不能在当前数据范围外添加后台账号。")
+        if not scoped_admin_roles(access).filter(pk=role.pk).exists():
+            raise ValidationError("不能使用当前数据范围外的角色。")
+        if role.data_scope == AdminRole.DataScope.ALL and not access.all_data:
+            raise ValidationError("当前账号不能授予全部数据范围。")
+        member = serializer.save()
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=member.organization,
+            action="system.member.create",
+            target_type="organization_member",
+            target_id=str(member.id),
+            before={},
+            after=member_audit_snapshot(member),
+            ip_address=client_ip(request),
+        )
+        return Response({
+            "data": OrganizationMemberSerializer(
+                member,
+                context={"request": request},
+            ).data,
+        }, status=201)
+
+
+class OrganizationMemberDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, access, member_id):
+        return get_object_or_404(scoped_organization_members(access), pk=member_id)
+
+    @transaction.atomic
+    def patch(self, request, member_id):
+        access = resolve_admin_access(request.user)
+        access.require("organization.manage")
+        member = self.get_object(access, member_id)
+        if member.user_id == request.user.id:
+            raise ValidationError("不能修改当前登录账号自身的角色、状态或数据范围。")
+        before = member_audit_snapshot(member)
+        serializer = OrganizationMemberUpdateSerializer(
+            member,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        next_role = serializer.validated_data.get("role", member.role)
+        next_active = serializer.validated_data.get("is_active", member.is_active)
+        if not scoped_admin_roles(access).filter(pk=next_role.pk).exists():
+            raise ValidationError("不能使用当前数据范围外的角色。")
+        if next_role.data_scope == AdminRole.DataScope.ALL and not access.all_data:
+            raise ValidationError("当前账号不能授予全部数据范围。")
+        ensure_organization_manager_remains(member, next_role, next_active)
+        member = serializer.save()
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=member.organization,
+            action="system.member.update",
+            target_type="organization_member",
+            target_id=str(member.id),
+            before=before,
+            after=member_audit_snapshot(member),
+            ip_address=client_ip(request),
+        )
+        return Response({
+            "data": OrganizationMemberSerializer(
+                member,
+                context={"request": request},
+            ).data,
+        })
 
 
 class AuditLogListView(APIView):

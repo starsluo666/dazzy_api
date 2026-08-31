@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import User
-from accounts.serializers import UserSerializer
+from accounts.serializers import UserSerializer, validate_phone
 from activities.models import (
     Activity,
     ActivityAfterSalesCase,
@@ -27,6 +27,7 @@ from providers.presence import (
 
 from .models import (
     AdminAuditLog,
+    AdminRole,
     Organization,
     OrganizationMember,
     ProviderCreditAdjustment,
@@ -37,6 +38,7 @@ from .models import (
     UserRiskFlag,
 )
 from .operation_settings import DEFAULT_PLATFORM_OPERATION_RULES, platform_operation_rules
+from .permission_catalog import PERMISSION_CODES
 
 
 def mask_phone(phone):
@@ -579,9 +581,17 @@ class AdminActivitySerializer(serializers.ModelSerializer):
 
 
 class AdminOrganizationSerializer(serializers.ModelSerializer):
+    organization_type_label = serializers.CharField(
+        source="get_organization_type_display", read_only=True
+    )
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+
     class Meta:
         model = Organization
-        fields = ("id", "name", "code", "organization_type", "city_codes")
+        fields = (
+            "id", "name", "code", "organization_type", "organization_type_label",
+            "city_codes", "status", "status_label",
+        )
 
 
 class AdminMeSerializer(serializers.Serializer):
@@ -1148,18 +1158,175 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
         return provider_order_anomalies(obj)
 
 
+def normalize_city_codes(values):
+    normalized = []
+    for value in values:
+        code = value.strip()
+        if code and code not in normalized:
+            normalized.append(code)
+    return normalized
+
+
+class AdminRoleSerializer(serializers.ModelSerializer):
+    organization_name = serializers.CharField(source="organization.name", read_only=True)
+    data_scope_label = serializers.CharField(source="get_data_scope_display", read_only=True)
+    member_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = AdminRole
+        fields = (
+            "id", "organization", "organization_name", "name", "code", "permissions",
+            "data_scope", "data_scope_label", "is_system", "member_count",
+            "created_at", "updated_at",
+        )
+
+
+class AdminRoleMutationSerializer(serializers.ModelSerializer):
+    organization = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.filter(status=Organization.Status.ACTIVE)
+    )
+    permissions = serializers.ListField(
+        child=serializers.CharField(max_length=80, trim_whitespace=True),
+        allow_empty=True,
+    )
+
+    class Meta:
+        model = AdminRole
+        fields = ("organization", "name", "code", "permissions", "data_scope")
+
+    def validate_name(self, value):
+        normalized = value.strip()
+        if not normalized:
+            raise serializers.ValidationError("角色名称不能为空。")
+        return normalized
+
+    def validate_code(self, value):
+        normalized = value.strip().lower()
+        queryset = AdminRole.objects.filter(code__iexact=normalized)
+        organization_id = self.initial_data.get("organization")
+        if organization_id:
+            queryset = queryset.filter(organization_id=organization_id)
+        elif self.instance:
+            queryset = queryset.filter(organization=self.instance.organization)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("当前组织下已存在该角色编码。")
+        return normalized
+
+    def validate_permissions(self, value):
+        normalized = []
+        for permission in value:
+            if permission not in PERMISSION_CODES:
+                raise serializers.ValidationError(f"未知权限编码：{permission}")
+            if permission not in normalized:
+                normalized.append(permission)
+        return normalized
+
+    def validate(self, attrs):
+        organization = attrs.get("organization") or getattr(self.instance, "organization", None)
+        data_scope = attrs.get("data_scope") or getattr(self.instance, "data_scope", None)
+        if (
+            data_scope == AdminRole.DataScope.ALL
+            and organization
+            and organization.organization_type != Organization.Type.PLATFORM
+        ):
+            raise serializers.ValidationError(
+                {"data_scope": "只有平台组织的角色可以使用全部数据范围。"}
+            )
+        return attrs
+
+
 class OrganizationMemberSerializer(serializers.ModelSerializer):
+    user_public_id = serializers.UUIDField(source="user.public_id", read_only=True)
     user_name = serializers.CharField(source="user.nickname", read_only=True)
     phone = serializers.CharField(source="user.phone", read_only=True)
+    account_status = serializers.CharField(source="user.account_status", read_only=True)
     organization_name = serializers.CharField(source="organization.name", read_only=True)
     role_name = serializers.CharField(source="role.name", read_only=True)
+    role_code = serializers.CharField(source="role.code", read_only=True)
+    data_scope = serializers.CharField(source="role.data_scope", read_only=True)
+    data_scope_label = serializers.CharField(
+        source="role.get_data_scope_display", read_only=True
+    )
+    is_system_role = serializers.BooleanField(source="role.is_system", read_only=True)
+    is_self = serializers.SerializerMethodField()
 
     class Meta:
         model = OrganizationMember
         fields = (
-            "id", "user", "user_name", "phone", "organization", "organization_name",
-            "role", "role_name", "city_codes", "is_active", "created_at",
+            "id", "user", "user_public_id", "user_name", "phone", "account_status",
+            "organization", "organization_name", "role", "role_name", "role_code",
+            "data_scope", "data_scope_label", "is_system_role", "city_codes",
+            "is_active", "is_self", "created_at", "updated_at",
         )
+
+    def get_is_self(self, obj):
+        request = self.context.get("request")
+        return bool(request and request.user.id == obj.user_id)
+
+
+class OrganizationMemberCreateSerializer(serializers.Serializer):
+    phone = serializers.CharField(validators=[validate_phone])
+    organization = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.filter(status=Organization.Status.ACTIVE)
+    )
+    role = serializers.PrimaryKeyRelatedField(queryset=AdminRole.objects.all())
+    city_codes = serializers.ListField(
+        child=serializers.CharField(max_length=20, trim_whitespace=True),
+        required=False,
+        default=list,
+    )
+    is_active = serializers.BooleanField(required=False, default=True)
+
+    def validate(self, attrs):
+        organization = attrs["organization"]
+        role = attrs["role"]
+        if role.organization_id not in (None, organization.id):
+            raise serializers.ValidationError({"role": "角色不属于所选组织。"})
+        try:
+            user = User.objects.get(phone=attrs["phone"])
+        except User.DoesNotExist as exc:
+            raise serializers.ValidationError(
+                {"phone": "该手机号尚未注册，请先在用户端创建账号。"}
+            ) from exc
+        if user.is_superuser:
+            raise serializers.ValidationError({"phone": "超级管理员无需重复开通后台成员。"})
+        if OrganizationMember.objects.filter(user=user, organization=organization).exists():
+            raise serializers.ValidationError({"phone": "该用户已是当前组织的后台成员。"})
+        attrs["user"] = user
+        attrs["city_codes"] = normalize_city_codes(attrs.get("city_codes", []))
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop("phone")
+        return OrganizationMember.objects.create(**validated_data)
+
+
+class OrganizationMemberUpdateSerializer(serializers.Serializer):
+    role = serializers.PrimaryKeyRelatedField(
+        queryset=AdminRole.objects.all(), required=False
+    )
+    city_codes = serializers.ListField(
+        child=serializers.CharField(max_length=20, trim_whitespace=True),
+        required=False,
+    )
+    is_active = serializers.BooleanField(required=False)
+
+    def validate(self, attrs):
+        role = attrs.get("role")
+        if role and role.organization_id not in (None, self.instance.organization_id):
+            raise serializers.ValidationError({"role": "角色不属于当前成员所在组织。"})
+        if "city_codes" in attrs:
+            attrs["city_codes"] = normalize_city_codes(attrs["city_codes"])
+        return attrs
+
+    def update(self, instance, validated_data):
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.full_clean()
+        instance.save(update_fields=(*validated_data.keys(), "updated_at"))
+        return instance
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
