@@ -100,8 +100,10 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "meeting_location_name", "meeting_address", "contact_name", "contact_gender",
             "contact_gender_label", "contact_phone_masked", "note", "service_fee_amount",
             "transport_fee_amount", "other_fee_amount", "discount_amount", "payable_amount",
-            "pricing_snapshot", "payment_expires_at", "paid_at", "created_at",
-            "accepted_at", "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
+            "pricing_snapshot", "payment_expires_at", "paid_at", "acceptance_expires_at",
+            "created_at",
+            "accepted_at", "provider_rejected_at", "provider_rejection_reason",
+            "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
             "service_started_at", "completion_submitted_at", "customer_confirmed_at",
         )
 
@@ -131,6 +133,10 @@ class ProviderOrderArrivalEvidenceInputSerializer(serializers.Serializer):
     )
 
 
+class ProviderOrderRejectInputSerializer(serializers.Serializer):
+    reason = serializers.CharField(min_length=2, max_length=200, trim_whitespace=True)
+
+
 class ProviderOrderManageQuerySerializer(serializers.Serializer):
     status = serializers.ChoiceField(
         required=False,
@@ -142,18 +148,48 @@ class ProviderOrderManageQuerySerializer(serializers.Serializer):
 class ProviderOrderManageSerializer(ProviderOrderSerializer):
     customer_name = serializers.CharField(source="customer.nickname")
     acceptance_expires_at = serializers.SerializerMethodField()
+    contact_phone_display = serializers.SerializerMethodField()
+    meeting_longitude = serializers.SerializerMethodField()
+    meeting_latitude = serializers.SerializerMethodField()
 
     class Meta(ProviderOrderSerializer.Meta):
         fields = ProviderOrderSerializer.Meta.fields + (
             "customer_name",
-            "acceptance_expires_at",
+            "contact_phone_display",
+            "meeting_longitude",
+            "meeting_latitude",
         )
 
     def get_acceptance_expires_at(self, obj):
-        if not obj.paid_at:
+        if obj.acceptance_expires_at:
+            return obj.acceptance_expires_at
+        if obj.paid_at:
+            timeout = operation_rules().get("acceptance_timeout_minutes", 30)
+            return obj.paid_at + timedelta(minutes=timeout)
+        return None
+
+    def get_contact_phone_display(self, obj):
+        if obj.status in (
+            ProviderOrder.Status.PENDING_ACCEPTANCE,
+            ProviderOrder.Status.PENDING_SUPPORT,
+        ):
+            return self.get_contact_phone_masked(obj)
+        return obj.contact_phone
+
+    def get_meeting_longitude(self, obj):
+        return self.get_meeting_coordinate(obj, "source_longitude")
+
+    def get_meeting_latitude(self, obj):
+        return self.get_meeting_coordinate(obj, "source_latitude")
+
+    @staticmethod
+    def get_meeting_coordinate(obj, field):
+        if obj.status in (
+            ProviderOrder.Status.PENDING_ACCEPTANCE,
+            ProviderOrder.Status.PENDING_SUPPORT,
+        ):
             return None
-        timeout = operation_rules().get("acceptance_timeout_minutes", 30)
-        return obj.paid_at + timedelta(minutes=timeout)
+        return getattr(obj, field)
 
 
 def quote_payload(validated_data):

@@ -79,7 +79,10 @@ class ProviderOrder(models.Model):
     )
     payment_expires_at = models.DateTimeField("支付及档期锁定截止时间")
     paid_at = models.DateTimeField("支付时间", null=True, blank=True)
+    acceptance_expires_at = models.DateTimeField("达人接单截止时间", null=True, blank=True)
     accepted_at = models.DateTimeField("达人接单时间", null=True, blank=True)
+    provider_rejected_at = models.DateTimeField("达人拒单时间", null=True, blank=True)
+    provider_rejection_reason = models.CharField("达人拒单原因", max_length=200, blank=True)
     departed_at = models.DateTimeField("达人出发时间", null=True, blank=True)
     arrival_photo = models.OneToOneField(
         "mediafiles.MediaAsset",

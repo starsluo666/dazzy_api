@@ -20,6 +20,7 @@ from providers.models import (
 )
 from locations.tencent import RouteResult
 from locations.models import UserAddress
+from taskcenter.models import ScheduledTask
 
 from .models import ProviderOrder
 
@@ -140,6 +141,13 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(create.json()["data"]["status"], ProviderOrder.Status.PENDING_PAYMENT)
         self.assertEqual(create.json()["data"]["meeting_location_name"], "邯郸美乐城")
         self.assertEqual(create.json()["data"]["contact_gender_label"], "先生")
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY,
+                business_key=order_no,
+                status=ScheduledTask.Status.PENDING,
+            ).exists()
+        )
 
         conflict = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
@@ -149,11 +157,52 @@ class ProviderOrderApiTests(TestCase):
         paid = self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
         self.assertEqual(paid.status_code, 200)
         self.assertEqual(paid.json()["data"]["status"], ProviderOrder.Status.PENDING_ACCEPTANCE)
+        self.assertIsNotNone(paid.json()["data"]["acceptance_expires_at"])
+        self.assertEqual(
+            ScheduledTask.objects.get(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY,
+                business_key=order_no,
+            ).status,
+            ScheduledTask.Status.CANCELLED,
+        )
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT,
+                business_key=order_no,
+                status=ScheduledTask.Status.PENDING,
+            ).exists()
+        )
+
+    def test_payment_and_acceptance_task_transition_is_atomic(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+
+        with patch(
+            "orders.views.register_provider_acceptance_timeout",
+            side_effect=RuntimeError("task registration failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
+
+        order = ProviderOrder.objects.get(order_no=order_no)
+        payment_task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY,
+            business_key=order_no,
+        )
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(payment_task.status, ScheduledTask.Status.PENDING)
+        self.assertFalse(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT,
+                business_key=order_no,
+            ).exists()
+        )
 
     def test_create_uses_configured_payment_timeout(self):
-        PlatformOperationSetting.objects.create(
-            provider_order_payment_timeout_minutes=25
-        )
+        PlatformOperationSetting.objects.create(provider_order_payment_timeout_minutes=25)
         created_after = timezone.now()
 
         response = self.client.post(
@@ -229,7 +278,16 @@ class ProviderOrderApiTests(TestCase):
         response = self.client.post(f"/api/v1/provider-orders/{order_no}/cancel/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["status"], ProviderOrder.Status.CANCELLED)
-        self.assertEqual(ProviderOrder.objects.get(order_no=order_no).route_distance_km, Decimal("6.80"))
+        self.assertEqual(
+            ProviderOrder.objects.get(order_no=order_no).route_distance_km, Decimal("6.80")
+        )
+        self.assertEqual(
+            ScheduledTask.objects.get(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY,
+                business_key=order_no,
+            ).status,
+            ScheduledTask.Status.CANCELLED,
+        )
 
     def test_expire_command_closes_timed_out_order(self):
         create = self.client.post(
@@ -244,6 +302,10 @@ class ProviderOrderApiTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, ProviderOrder.Status.CANCELLED)
         self.assertIsNotNone(order.cancelled_at)
+        self.assertEqual(
+            ScheduledTask.objects.get(business_key=order.order_no).status,
+            ScheduledTask.Status.SUCCEEDED,
+        )
 
     def test_provider_accepts_paid_order_and_customer_sees_pending_service(self):
         create = self.client.post(
@@ -262,12 +324,26 @@ class ProviderOrderApiTests(TestCase):
         )
         provider_order = provider_orders.json()["data"]["items"][0]
         self.assertEqual(provider_order["customer_name"], self.customer.nickname)
+        self.assertEqual(provider_order["contact_phone_display"], "138****6688")
+        self.assertIsNone(provider_order["meeting_longitude"])
         self.assertIsNotNone(provider_order["acceptance_expires_at"])
 
         accepted = self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(accepted.json()["data"]["status"], ProviderOrder.Status.PENDING_SERVICE)
         self.assertIsNotNone(accepted.json()["data"]["accepted_at"])
+        self.assertEqual(accepted.json()["data"]["contact_phone_display"], "13812346688")
+        self.assertAlmostEqual(
+            float(accepted.json()["data"]["meeting_longitude"]),
+            114.506,
+        )
+        self.assertEqual(
+            ScheduledTask.objects.get(
+                task_type=ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT,
+                business_key=order_no,
+            ).status,
+            ScheduledTask.Status.CANCELLED,
+        )
 
         repeated = self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
         self.assertEqual(repeated.status_code, 200)
@@ -281,6 +357,54 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(
             customer_order.json()["data"]["status"],
             ProviderOrder.Status.PENDING_SERVICE,
+        )
+
+    def test_provider_rejects_paid_order_to_support_with_reason(self):
+        create = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = create.json()["data"]["order_no"]
+        self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
+        self.client.force_login(self.provider_user)
+
+        missing_reason = self.client.post(
+            f"/api/v1/providers/me/orders/{order_no}/reject/",
+            {"reason": ""},
+            content_type="application/json",
+        )
+        self.assertEqual(missing_reason.status_code, 400)
+
+        rejected = self.client.post(
+            f"/api/v1/providers/me/orders/{order_no}/reject/",
+            {"reason": "档期临时冲突"},
+            content_type="application/json",
+        )
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(rejected.json()["data"]["status"], ProviderOrder.Status.PENDING_SUPPORT)
+        self.assertEqual(rejected.json()["data"]["provider_rejection_reason"], "档期临时冲突")
+        self.assertIsNotNone(rejected.json()["data"]["provider_rejected_at"])
+        self.assertEqual(rejected.json()["data"]["contact_phone_display"], "138****6688")
+
+        repeated = self.client.post(
+            f"/api/v1/providers/me/orders/{order_no}/reject/",
+            {"reason": "重复提交不会覆盖"},
+            content_type="application/json",
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(
+            repeated.json()["data"]["provider_rejection_reason"],
+            "档期临时冲突",
+        )
+
+        cannot_accept = self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
+        self.assertEqual(cannot_accept.status_code, 400)
+
+        self.client.force_login(self.customer)
+        customer_detail = self.client.get(f"/api/v1/provider-orders/{order_no}/")
+        self.assertEqual(customer_detail.status_code, 200)
+        self.assertEqual(
+            customer_detail.json()["data"]["provider_rejection_reason"],
+            "档期临时冲突",
         )
 
     def test_pending_review_order_is_counted_in_customer_overview(self):
@@ -306,9 +430,7 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(departed.json()["data"]["status"], ProviderOrder.Status.DEPARTED)
         self.assertIsNotNone(departed.json()["data"]["departed_at"])
 
-        missing_photo = self.client.post(
-            f"/api/v1/providers/me/orders/{order.order_no}/start/"
-        )
+        missing_photo = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/start/")
         self.assertEqual(missing_photo.status_code, 400)
 
         photo = MediaAsset.objects.create(
@@ -330,16 +452,16 @@ class ProviderOrderApiTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(evidence.status_code, 200)
-        self.assertEqual(evidence.json()["data"]["arrival_photo_url"], "https://media.test/arrival.webp")
+        self.assertEqual(
+            evidence.json()["data"]["arrival_photo_url"], "https://media.test/arrival.webp"
+        )
 
         started = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/start/")
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.json()["data"]["status"], ProviderOrder.Status.IN_SERVICE)
         self.assertIsNotNone(started.json()["data"]["service_started_at"])
 
-        completed = self.client.post(
-            f"/api/v1/providers/me/orders/{order.order_no}/complete/"
-        )
+        completed = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/complete/")
         self.assertEqual(completed.status_code, 200)
         self.assertEqual(
             completed.json()["data"]["status"], ProviderOrder.Status.PENDING_CONFIRMATION
@@ -354,9 +476,7 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(confirmed.json()["data"]["status"], ProviderOrder.Status.PENDING_REVIEW)
         self.assertIsNotNone(confirmed.json()["data"]["customer_confirmed_at"])
 
-        repeated = self.client.post(
-            f"/api/v1/provider-orders/{order.order_no}/confirm-completion/"
-        )
+        repeated = self.client.post(f"/api/v1/provider-orders/{order.order_no}/confirm-completion/")
         self.assertEqual(repeated.status_code, 200)
         self.assertEqual(
             repeated.json()["data"]["customer_confirmed_at"],
@@ -413,23 +533,24 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(provider_orders.json()["data"]["items"], [])
         self.assertEqual(detail.status_code, 404)
 
-    def test_provider_cannot_accept_after_thirty_minute_deadline(self):
+    def test_provider_acceptance_after_deadline_moves_order_to_support(self):
         create = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
         )
         order_no = create.json()["data"]["order_no"]
         self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
         ProviderOrder.objects.filter(order_no=order_no).update(
-            paid_at=timezone.now() - timedelta(minutes=31)
+            paid_at=timezone.now() - timedelta(minutes=31),
+            acceptance_expires_at=timezone.now() - timedelta(minutes=1),
         )
 
         self.client.force_login(self.provider_user)
         response = self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
 
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
         self.assertEqual(
             ProviderOrder.objects.get(order_no=order_no).status,
-            ProviderOrder.Status.PENDING_ACCEPTANCE,
+            ProviderOrder.Status.PENDING_SUPPORT,
         )
 
     def test_order_creation_requires_provider_to_be_accepting_orders(self):

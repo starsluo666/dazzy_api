@@ -43,6 +43,9 @@ from .views import (
     ProviderApplicationDetailView,
     ProviderApplicationListView,
     ProviderApplicationReviewView,
+    ScheduledTaskDetailView,
+    ScheduledTaskListView,
+    ScheduledTaskRetryView,
 )
 
 urlpatterns = [
@@ -200,4 +203,15 @@ urlpatterns = [
     path("members/", OrganizationMemberListView.as_view(), name="backoffice-members"),
     path("members/<int:member_id>/", OrganizationMemberDetailView.as_view(), name="backoffice-member-detail"),
     path("audit-logs/", AuditLogListView.as_view(), name="backoffice-audit-logs"),
+    path("tasks/", ScheduledTaskListView.as_view(), name="backoffice-scheduled-tasks"),
+    path(
+        "tasks/<uuid:public_id>/",
+        ScheduledTaskDetailView.as_view(),
+        name="backoffice-scheduled-task-detail",
+    ),
+    path(
+        "tasks/<uuid:public_id>/retry/",
+        ScheduledTaskRetryView.as_view(),
+        name="backoffice-scheduled-task-retry",
+    ),
 ]

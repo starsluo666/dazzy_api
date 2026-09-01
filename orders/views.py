@@ -14,6 +14,14 @@ from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
 from providers.models import ProviderProfile
 from providers.presence import operation_rules
+from taskcenter.services import (
+    cancel_provider_acceptance_timeout,
+    cancel_provider_order_payment_expiry,
+    mark_provider_acceptance_expired,
+    mark_provider_order_payment_expired,
+    register_provider_acceptance_timeout,
+    register_provider_order_payment_expiry,
+)
 
 from .models import ProviderOrder
 from .serializers import (
@@ -21,6 +29,7 @@ from .serializers import (
     ProviderOrderArrivalEvidenceInputSerializer,
     ProviderOrderManageQuerySerializer,
     ProviderOrderManageSerializer,
+    ProviderOrderRejectInputSerializer,
     ProviderOrderSerializer,
     quote_payload,
 )
@@ -68,30 +77,39 @@ class ProviderOrderListCreateView(APIView):
         ensure_slot_available(provider, data["starts_at"], data["ends_at"])
         quote = data["quote"]
         order = ProviderOrder.objects.create(
-            order_no=make_order_no(), customer=request.user, provider=provider, service=service,
+            order_no=make_order_no(),
+            customer=request.user,
+            provider=provider,
+            service=service,
             provider_name_snapshot=provider.user.nickname,
             service_name_snapshot=service.category.name,
             billing_type_snapshot=service.billing_type,
             unit_price_amount=service.price_amount,
-            starts_at=data["starts_at"], ends_at=data["ends_at"],
+            starts_at=data["starts_at"],
+            ends_at=data["ends_at"],
             duration_minutes=data["duration_minutes"],
             meeting_location_name=data["meeting_location_name"],
             meeting_address=data["meeting_address"],
-            source_longitude=data.get("longitude"), source_latitude=data.get("latitude"),
-            route_distance_km=data["route"].distance_km, map_source="tencent",
+            source_longitude=data.get("longitude"),
+            source_latitude=data.get("latitude"),
+            route_distance_km=data["route"].distance_km,
+            map_source="tencent",
             contact_name=data["contact_name"],
             contact_gender=data["contact_gender"],
-            contact_phone=data["contact_phone"], note=data.get("note", ""),
+            contact_phone=data["contact_phone"],
+            note=data.get("note", ""),
             service_fee_amount=quote.service_fee_amount,
             transport_fee_amount=quote.transport_fee_amount,
-            other_fee_amount=quote.other_fee_amount, discount_amount=quote.discount_amount,
-            payable_amount=quote.payable_amount, pricing_snapshot=quote.snapshot,
-            payment_expires_at=timezone.now() + timedelta(
-                minutes=platform_operation_rules()[
-                    "provider_order_payment_timeout_minutes"
-                ]
+            other_fee_amount=quote.other_fee_amount,
+            discount_amount=quote.discount_amount,
+            payable_amount=quote.payable_amount,
+            pricing_snapshot=quote.snapshot,
+            payment_expires_at=timezone.now()
+            + timedelta(
+                minutes=platform_operation_rules()["provider_order_payment_timeout_minutes"]
             ),
         )
+        register_provider_order_payment_expiry(order)
         return Response({"data": ProviderOrderSerializer(order).data}, status=201)
 
 
@@ -99,12 +117,15 @@ class ProviderOrderDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self, request, order_no):
-        expire_pending_orders(ProviderOrder.objects.filter(customer=request.user, order_no=order_no))
+        expire_pending_orders(
+            ProviderOrder.objects.filter(customer=request.user, order_no=order_no)
+        )
         return get_object_or_404(
             ProviderOrder.objects.select_related(
                 "provider__user", "service__category", "arrival_photo"
             ),
-            order_no=order_no, customer=request.user,
+            order_no=order_no,
+            customer=request.user,
         )
 
     def get(self, request, order_no):
@@ -122,6 +143,7 @@ class ProviderOrderCancelView(ProviderOrderDetailView):
         order.status = ProviderOrder.Status.CANCELLED
         order.cancelled_at = timezone.now()
         order.save(update_fields=("status", "cancelled_at", "updated_at"))
+        cancel_provider_order_payment_expiry(order_no, "customer_cancelled")
         return Response({"data": ProviderOrderSerializer(order).data})
 
 
@@ -139,10 +161,17 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
             order.status = ProviderOrder.Status.CANCELLED
             order.cancelled_at = timezone.now()
             order.save(update_fields=("status", "cancelled_at", "updated_at"))
-            raise ValidationError({"status": "支付已超时，档期已释放。"})
+            mark_provider_order_payment_expired(order_no, source="payment_guard")
+            return Response({"error": {"status": "支付已超时，档期已释放。"}}, status=409)
+        paid_at = timezone.now()
+        acceptance_timeout = operation_rules()["acceptance_timeout_minutes"]
         order.status = ProviderOrder.Status.PENDING_ACCEPTANCE
-        order.paid_at = timezone.now()
-        order.save(update_fields=("status", "paid_at", "updated_at"))
+        order.paid_at = paid_at
+        order.acceptance_expires_at = paid_at + timedelta(minutes=acceptance_timeout)
+        order.save(update_fields=("status", "paid_at", "acceptance_expires_at", "updated_at"))
+
+        cancel_provider_order_payment_expiry(order_no, "payment_succeeded")
+        register_provider_acceptance_timeout(order)
         return Response({"data": ProviderOrderSerializer(order).data})
 
 
@@ -195,11 +224,58 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
         if order.status != ProviderOrder.Status.PENDING_ACCEPTANCE:
             raise ValidationError({"status": "订单不在待接单状态。"})
         timeout = operation_rules()["acceptance_timeout_minutes"]
-        if not order.paid_at or order.paid_at + timedelta(minutes=timeout) <= timezone.now():
-            raise ValidationError({"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"})
+        deadline = order.acceptance_expires_at or (
+            order.paid_at + timedelta(minutes=timeout) if order.paid_at else None
+        )
+        if not deadline or deadline <= timezone.now():
+            order.status = ProviderOrder.Status.PENDING_SUPPORT
+            order.save(update_fields=("status", "updated_at"))
+            mark_provider_acceptance_expired(order_no, source="provider_action_guard")
+            return Response(
+                {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
+                status=409,
+            )
         order.status = ProviderOrder.Status.PENDING_SERVICE
         order.accepted_at = timezone.now()
         order.save(update_fields=("status", "accepted_at", "updated_at"))
+        cancel_provider_acceptance_timeout(order_no, "provider_accepted")
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
+class CurrentProviderOrderRejectView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status == ProviderOrder.Status.PENDING_SUPPORT and order.provider_rejected_at:
+            return Response({"data": ProviderOrderManageSerializer(order).data})
+        if order.status != ProviderOrder.Status.PENDING_ACCEPTANCE:
+            raise ValidationError({"status": "订单不在待接单状态。"})
+        timeout = operation_rules()["acceptance_timeout_minutes"]
+        deadline = order.acceptance_expires_at or (
+            order.paid_at + timedelta(minutes=timeout) if order.paid_at else None
+        )
+        if not deadline or deadline <= timezone.now():
+            order.status = ProviderOrder.Status.PENDING_SUPPORT
+            order.save(update_fields=("status", "updated_at"))
+            mark_provider_acceptance_expired(order_no, source="provider_action_guard")
+            return Response(
+                {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
+                status=409,
+            )
+        serializer = ProviderOrderRejectInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order.status = ProviderOrder.Status.PENDING_SUPPORT
+        order.provider_rejected_at = timezone.now()
+        order.provider_rejection_reason = serializer.validated_data["reason"]
+        order.save(
+            update_fields=(
+                "status",
+                "provider_rejected_at",
+                "provider_rejection_reason",
+                "updated_at",
+            )
+        )
+        cancel_provider_acceptance_timeout(order_no, "provider_rejected")
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -244,8 +320,12 @@ class CurrentProviderOrderArrivalEvidenceView(CurrentProviderOrderDetailView):
         order.arrival_location_accuracy_m = data.get("accuracy_m")
         order.save(
             update_fields=(
-                "arrival_photo", "arrival_photo_uploaded_at", "arrival_longitude",
-                "arrival_latitude", "arrival_location_accuracy_m", "updated_at",
+                "arrival_photo",
+                "arrival_photo_uploaded_at",
+                "arrival_longitude",
+                "arrival_latitude",
+                "arrival_location_accuracy_m",
+                "updated_at",
             )
         )
         return Response({"data": ProviderOrderManageSerializer(order).data})
@@ -271,7 +351,10 @@ class CurrentProviderOrderCompleteView(CurrentProviderOrderDetailView):
     @transaction.atomic
     def post(self, request, order_no):
         order = self.get_object(request, order_no, for_update=True)
-        if order.status == ProviderOrder.Status.PENDING_CONFIRMATION and order.completion_submitted_at:
+        if (
+            order.status == ProviderOrder.Status.PENDING_CONFIRMATION
+            and order.completion_submitted_at
+        ):
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.IN_SERVICE:
             raise ValidationError({"status": "订单不在服务中状态。"})

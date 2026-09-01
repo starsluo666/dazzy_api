@@ -66,6 +66,8 @@ PERMISSION_GROUPS = (
         "permissions": (
             ("organization.manage", "管理后台账号与角色"),
             ("audit.view", "查看操作审计"),
+            ("system.task.view", "查看系统任务"),
+            ("system.task.retry", "重试失败任务"),
         ),
     },
 )

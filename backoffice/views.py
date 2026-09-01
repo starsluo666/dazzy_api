@@ -29,6 +29,9 @@ from mediafiles.services import build_media_url
 from orders.models import ProviderOrder
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 from providers.presence import online_provider_query
+from taskcenter.models import ScheduledTask
+from taskcenter.serializers import ScheduledTaskQuerySerializer, ScheduledTaskSerializer
+from taskcenter.services import TASK_LEASE_TIMEOUT, retry_failed_task
 
 from .access import client_ip, resolve_admin_access
 from .models import (
@@ -2097,3 +2100,136 @@ class AuditLogListView(APIView):
         start = (page - 1) * page_size
         items = queryset[start : start + page_size]
         return Response({"data": {"items": AuditLogSerializer(items, many=True).data, "pagination": {"page": page, "page_size": page_size, "total": total}}})
+
+
+def scoped_scheduled_tasks(access):
+    queryset = ScheduledTask.objects.all()
+    if access.all_data:
+        return queryset
+    visible_order_nos = scoped_provider_orders(access).values("order_no")
+    return queryset.filter(
+        business_type="provider_order",
+        business_key__in=visible_order_nos,
+    )
+
+
+class ScheduledTaskListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("system.task.view")
+        query = ScheduledTaskQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        data = query.validated_data
+        scoped = scoped_scheduled_tasks(access)
+        now = timezone.now()
+        today = timezone.localdate()
+        summary = {
+            "total": scoped.count(),
+            "pending": scoped.filter(status=ScheduledTask.Status.PENDING).count(),
+            "running": scoped.filter(status=ScheduledTask.Status.RUNNING).count(),
+            "succeeded_today": scoped.filter(
+                status=ScheduledTask.Status.SUCCEEDED,
+                finished_at__date=today,
+            ).count(),
+            "failed": scoped.filter(status=ScheduledTask.Status.FAILED).count(),
+            "overdue": scoped.filter(
+                Q(
+                    status=ScheduledTask.Status.PENDING,
+                    available_at__lte=now - timedelta(minutes=1),
+                )
+                | Q(
+                    status=ScheduledTask.Status.RUNNING,
+                    started_at__lte=now - TASK_LEASE_TIMEOUT,
+                )
+            ).count(),
+        }
+        queryset = scoped
+        if task_type := data.get("task_type"):
+            queryset = queryset.filter(task_type=task_type)
+        if task_status := data.get("status"):
+            queryset = queryset.filter(status=task_status)
+        if data.get("overdue"):
+            queryset = queryset.filter(
+                Q(
+                    status=ScheduledTask.Status.PENDING,
+                    available_at__lte=now - timedelta(minutes=1),
+                )
+                | Q(
+                    status=ScheduledTask.Status.RUNNING,
+                    started_at__lte=now - TASK_LEASE_TIMEOUT,
+                )
+            )
+        if keyword := data.get("search", "").strip():
+            queryset = queryset.filter(
+                Q(business_key__icontains=keyword)
+                | Q(dedupe_key__icontains=keyword)
+            )
+        page = data["page"]
+        page_size = data["page_size"]
+        total = queryset.count()
+        start = (page - 1) * page_size
+        items = queryset[start : start + page_size]
+        return Response({
+            "data": {
+                "items": ScheduledTaskSerializer(items, many=True).data,
+                "pagination": {"page": page, "page_size": page_size, "total": total},
+                "summary": summary,
+                "task_types": [
+                    {"value": value, "label": label}
+                    for value, label in ScheduledTask.Type.choices
+                ],
+                "statuses": [
+                    {"value": value, "label": label}
+                    for value, label in ScheduledTask.Status.choices
+                ],
+            }
+        })
+
+
+class ScheduledTaskDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, public_id):
+        access = resolve_admin_access(request.user)
+        access.require("system.task.view")
+        task = get_object_or_404(scoped_scheduled_tasks(access), public_id=public_id)
+        return Response({"data": ScheduledTaskSerializer(task).data})
+
+
+class ScheduledTaskRetryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, public_id):
+        access = resolve_admin_access(request.user)
+        access.require("system.task.retry")
+        task = get_object_or_404(
+            scoped_scheduled_tasks(access).select_for_update(),
+            public_id=public_id,
+        )
+        before = ScheduledTaskSerializer(task).data
+        try:
+            retry_failed_task(task)
+        except ValueError as exc:
+            raise ValidationError({"status": str(exc)}) from exc
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="system.task.retry",
+            target_type="scheduled_task",
+            target_id=str(task.public_id),
+            before={
+                "status": before["status"],
+                "attempt_count": before["attempt_count"],
+                "last_error": before["last_error"],
+            },
+            after={
+                "status": task.status,
+                "attempt_count": task.attempt_count,
+                "available_at": task.available_at.isoformat(),
+            },
+            ip_address=client_ip(request),
+        )
+        return Response({"data": ScheduledTaskSerializer(task).data})

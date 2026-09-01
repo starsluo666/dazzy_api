@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "home",
     "health",
     "backoffice",
+    "taskcenter",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -58,9 +59,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 DATABASES = {
     "default": {
-        "ENGINE": os.getenv(
-            "DJANGO_DB_ENGINE", "django.contrib.gis.db.backends.postgis"
-        ),
+        "ENGINE": os.getenv("DJANGO_DB_ENGINE", "django.contrib.gis.db.backends.postgis"),
         "HOST": os.environ["POSTGRES_HOST"],
         "PORT": os.getenv("POSTGRES_PORT", "5432"),
         "NAME": os.environ.get("POSTGRES_DATABASE") or os.environ["POSTGRES_DB"],
@@ -91,6 +90,27 @@ CACHES = {
         "OPTIONS": {"socket_connect_timeout": 5, "socket_timeout": 5},
         "KEY_PREFIX": "dazzy",
     }
+}
+
+redis_celery_db = os.getenv("REDIS_CELERY_DB", "1")
+CELERY_BROKER_URL = (
+    f"{redis_scheme}://{redis_auth}{os.environ['REDIS_HOST']}:"
+    f"{os.getenv('REDIS_PORT', '6379')}/{redis_celery_db}"
+)
+CELERY_RESULT_BACKEND = None
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ("json",)
+CELERY_TIMEZONE = "Asia/Shanghai"
+CELERY_BEAT_SCHEDULE = {
+    "process-due-scheduled-tasks": {
+        "task": "taskcenter.process_due_scheduled_tasks",
+        "schedule": 10.0,
+    },
+    "synchronize-scheduled-tasks": {
+        "task": "taskcenter.synchronize_scheduled_tasks",
+        "schedule": 180.0,
+    },
 }
 
 AUTH_USER_MODEL = "accounts.User"

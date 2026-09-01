@@ -56,6 +56,8 @@ class Command(BaseCommand):
                     "order.after_sales.review",
                     "organization.manage",
                     "audit.view",
+                    "system.task.view",
+                    "system.task.retry",
                     "operations.manage",
                 ],
                 "data_scope": AdminRole.DataScope.ALL,

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -99,10 +100,86 @@ def ensure_slot_available(provider: ProviderProfile, starts_at, ends_at):
         raise ValidationError({"starts_at": "该时间段刚刚被预约，请选择其他时间。"})
 
 
+@transaction.atomic
+def expire_provider_order_payment(order_no: str, *, now=None) -> dict:
+    now = now or timezone.now()
+    order = (
+        ProviderOrder.objects.select_for_update()
+        .filter(order_no=order_no)
+        .only("order_no", "status", "payment_expires_at", "cancelled_at")
+        .first()
+    )
+    if not order:
+        return {"state": "missing", "order_no": order_no}
+    if order.status != ProviderOrder.Status.PENDING_PAYMENT:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "order_status": order.status,
+        }
+    if order.payment_expires_at > now:
+        return {
+            "state": "not_due",
+            "order_no": order_no,
+            "deadline": order.payment_expires_at,
+        }
+    order.status = ProviderOrder.Status.CANCELLED
+    order.cancelled_at = now
+    order.save(update_fields=("status", "cancelled_at", "updated_at"))
+    return {"state": "expired", "order_no": order_no, "action": "cancelled"}
+
+
+@transaction.atomic
+def expire_provider_acceptance(order_no: str, *, now=None) -> dict:
+    now = now or timezone.now()
+    order = (
+        ProviderOrder.objects.select_for_update()
+        .filter(order_no=order_no)
+        .only("order_no", "status", "acceptance_expires_at")
+        .first()
+    )
+    if not order:
+        return {"state": "missing", "order_no": order_no}
+    if order.status != ProviderOrder.Status.PENDING_ACCEPTANCE:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "order_status": order.status,
+        }
+    if not order.acceptance_expires_at:
+        return {"state": "invalid", "order_no": order_no, "reason": "missing_deadline"}
+    if order.acceptance_expires_at > now:
+        return {
+            "state": "not_due",
+            "order_no": order_no,
+            "deadline": order.acceptance_expires_at,
+        }
+    order.status = ProviderOrder.Status.PENDING_SUPPORT
+    order.save(update_fields=("status", "updated_at"))
+    return {
+        "state": "expired",
+        "order_no": order_no,
+        "action": "moved_to_support",
+    }
+
+
 def expire_pending_orders(queryset=None) -> int:
+    from taskcenter.services import (
+        mark_provider_order_payment_expired,
+        register_provider_order_payment_expiry,
+    )
+
     queryset = queryset if queryset is not None else ProviderOrder.objects.all()
     now = timezone.now()
-    return queryset.filter(
+    due_orders = list(queryset.filter(
         status=ProviderOrder.Status.PENDING_PAYMENT,
         payment_expires_at__lte=now,
-    ).update(status=ProviderOrder.Status.CANCELLED, cancelled_at=now, updated_at=now)
+    ).only("order_no", "payment_expires_at"))
+    expired = 0
+    for order in due_orders:
+        register_provider_order_payment_expiry(order)
+        outcome = expire_provider_order_payment(order.order_no, now=now)
+        if outcome["state"] == "expired":
+            expired += 1
+            mark_provider_order_payment_expired(order.order_no, source="request_guard")
+    return expired
