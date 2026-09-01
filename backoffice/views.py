@@ -414,14 +414,17 @@ def order_anomaly_query(code):
         | Q(
             status__in=(ProviderOrder.Status.PENDING_REVIEW, ProviderOrder.Status.COMPLETED),
             customer_confirmed_at__isnull=True,
+            auto_confirmed_at__isnull=True,
         )
     )
     confirmation_overdue = Q(
         status=ProviderOrder.Status.PENDING_CONFIRMATION,
+        confirmation_expires_at__lte=timezone.now(),
+    ) | Q(
+        status=ProviderOrder.Status.PENDING_CONFIRMATION,
+        confirmation_expires_at__isnull=True,
         completion_submitted_at__lte=timezone.now()
-        - timedelta(
-            days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
-        ),
+        - timedelta(days=platform_operation_rules()["provider_order_confirmation_timeout_days"]),
     )
     mapping = {
         "missing_evidence": missing_evidence,

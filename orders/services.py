@@ -163,6 +163,41 @@ def expire_provider_acceptance(order_no: str, *, now=None) -> dict:
     }
 
 
+@transaction.atomic
+def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
+    now = now or timezone.now()
+    order = (
+        ProviderOrder.objects.select_for_update()
+        .filter(order_no=order_no)
+        .only("order_no", "status", "confirmation_expires_at", "auto_confirmed_at")
+        .first()
+    )
+    if not order:
+        return {"state": "missing", "order_no": order_no}
+    if order.status != ProviderOrder.Status.PENDING_CONFIRMATION:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "order_status": order.status,
+        }
+    if not order.confirmation_expires_at:
+        return {"state": "invalid", "order_no": order_no, "reason": "missing_deadline"}
+    if order.confirmation_expires_at > now:
+        return {
+            "state": "not_due",
+            "order_no": order_no,
+            "deadline": order.confirmation_expires_at,
+        }
+    order.status = ProviderOrder.Status.PENDING_REVIEW
+    order.auto_confirmed_at = now
+    order.save(update_fields=("status", "auto_confirmed_at", "updated_at"))
+    return {
+        "state": "expired",
+        "order_no": order_no,
+        "action": "auto_confirmed",
+    }
+
+
 def expire_pending_orders(queryset=None) -> int:
     from taskcenter.services import (
         mark_provider_order_payment_expired,

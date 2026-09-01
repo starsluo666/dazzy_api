@@ -26,6 +26,10 @@ from activities.services import (
 )
 from orders.models import ProviderOrder
 from providers.models import ProviderLiveLocation, ProviderProfile
+from taskcenter.services import (
+    cancel_provider_order_confirmation_timeout,
+    reopen_provider_order_confirmation_timeout,
+)
 
 from .access import client_ip
 from .models import (
@@ -747,6 +751,10 @@ def create_provider_order_after_sales_case(
         raise ValidationError("该订单已有未结束的退款或售后单。") from error
     order.status = ProviderOrder.Status.AFTER_SALES
     order.save(update_fields=("status", "updated_at"))
+    if original_status == ProviderOrder.Status.PENDING_CONFIRMATION:
+        cancel_provider_order_confirmation_timeout(
+            order.order_no, "after_sales_processing"
+        )
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),
@@ -820,6 +828,8 @@ def review_provider_order_after_sales_case(
         if order.status == ProviderOrder.Status.AFTER_SALES:
             order.status = case.original_order_status
             order.save(update_fields=("status", "updated_at"))
+            if order.status == ProviderOrder.Status.PENDING_CONFIRMATION:
+                reopen_provider_order_confirmation_timeout(order)
         audit_action = "order.after_sales.reject"
     case.save()
     AdminAuditLog.objects.create(

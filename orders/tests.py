@@ -467,6 +467,13 @@ class ProviderOrderApiTests(TestCase):
             completed.json()["data"]["status"], ProviderOrder.Status.PENDING_CONFIRMATION
         )
         self.assertIsNotNone(completed.json()["data"]["completion_submitted_at"])
+        self.assertIsNotNone(completed.json()["data"]["confirmation_expires_at"])
+        self.assertIsNone(completed.json()["data"]["auto_confirmed_at"])
+        confirmation_task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+            business_key=order.order_no,
+        )
+        self.assertEqual(confirmation_task.status, ScheduledTask.Status.PENDING)
 
         self.client.force_login(self.customer)
         confirmed = self.client.post(
@@ -475,6 +482,8 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(confirmed.status_code, 200)
         self.assertEqual(confirmed.json()["data"]["status"], ProviderOrder.Status.PENDING_REVIEW)
         self.assertIsNotNone(confirmed.json()["data"]["customer_confirmed_at"])
+        confirmation_task.refresh_from_db()
+        self.assertEqual(confirmation_task.status, ScheduledTask.Status.CANCELLED)
 
         repeated = self.client.post(f"/api/v1/provider-orders/{order.order_no}/confirm-completion/")
         self.assertEqual(repeated.status_code, 200)
@@ -488,6 +497,65 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(order.arrival_photo, photo)
         self.assertEqual(order.arrival_longitude, Decimal("114.5060000"))
         self.assertEqual(order.arrival_latitude, Decimal("36.6200000"))
+
+    def test_completion_uses_configured_confirmation_timeout_snapshot(self):
+        PlatformOperationSetting.objects.create(provider_order_confirmation_timeout_days=5)
+        order = self.create_paid_accepted_order()
+        order.status = ProviderOrder.Status.IN_SERVICE
+        order.service_started_at = timezone.now() - timedelta(hours=2)
+        order.save(update_fields=("status", "service_started_at", "updated_at"))
+        submitted_after = timezone.now()
+
+        completed = self.client.post(
+            f"/api/v1/providers/me/orders/{order.order_no}/complete/"
+        )
+
+        self.assertEqual(completed.status_code, 200)
+        order.refresh_from_db()
+        self.assertGreaterEqual(
+            order.confirmation_expires_at,
+            submitted_after + timedelta(days=5),
+        )
+        self.assertLess(
+            order.confirmation_expires_at,
+            submitted_after + timedelta(days=5, seconds=2),
+        )
+        original_deadline = order.confirmation_expires_at
+        setting = PlatformOperationSetting.current()
+        setting.provider_order_confirmation_timeout_days = 1
+        setting.save(update_fields=("provider_order_confirmation_timeout_days", "updated_at"))
+
+        repeated = self.client.post(
+            f"/api/v1/providers/me/orders/{order.order_no}/complete/"
+        )
+
+        self.assertEqual(repeated.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.confirmation_expires_at, original_deadline)
+
+    def test_completion_and_task_registration_are_atomic(self):
+        order = self.create_paid_accepted_order()
+        order.status = ProviderOrder.Status.IN_SERVICE
+        order.service_started_at = timezone.now() - timedelta(hours=2)
+        order.save(update_fields=("status", "service_started_at", "updated_at"))
+
+        with patch(
+            "orders.views.register_provider_order_confirmation_timeout",
+            side_effect=RuntimeError("task registration failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/complete/")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.IN_SERVICE)
+        self.assertIsNone(order.completion_submitted_at)
+        self.assertIsNone(order.confirmation_expires_at)
+        self.assertFalse(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+                business_key=order.order_no,
+            ).exists()
+        )
 
     def test_fulfillment_rejects_invalid_sequence_and_foreign_photo(self):
         order = self.create_paid_accepted_order()

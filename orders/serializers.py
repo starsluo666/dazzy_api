@@ -104,7 +104,8 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "created_at",
             "accepted_at", "provider_rejected_at", "provider_rejection_reason",
             "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
-            "service_started_at", "completion_submitted_at", "customer_confirmed_at",
+            "service_started_at", "completion_submitted_at", "confirmation_expires_at",
+            "customer_confirmed_at", "auto_confirmed_at",
         )
 
     def get_provider_avatar_url(self, obj):

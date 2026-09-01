@@ -13,6 +13,7 @@ from .models import ScheduledTask
 from .services import (
     process_due_tasks,
     register_provider_acceptance_timeout,
+    register_provider_order_confirmation_timeout,
     register_provider_order_payment_expiry,
     synchronize_provider_order_tasks,
 )
@@ -39,7 +40,10 @@ class TaskCenterTests(TestCase):
             price_amount=10000,
         )
 
-    def make_order(self, *, order_no, status, payment_deadline, acceptance_deadline=None):
+    def make_order(
+        self, *, order_no, status, payment_deadline, acceptance_deadline=None,
+        completion_submitted_at=None, confirmation_deadline=None,
+    ):
         starts_at = timezone.now() + timedelta(days=1)
         return ProviderOrder.objects.create(
             order_no=order_no,
@@ -67,6 +71,8 @@ class TaskCenterTests(TestCase):
             if status == ProviderOrder.Status.PENDING_ACCEPTANCE
             else None,
             acceptance_expires_at=acceptance_deadline,
+            completion_submitted_at=completion_submitted_at,
+            confirmation_expires_at=confirmation_deadline,
         )
 
     def test_payment_expiry_task_closes_order_and_is_idempotent(self):
@@ -108,6 +114,49 @@ class TaskCenterTests(TestCase):
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "moved_to_support")
 
+    def test_confirmation_timeout_moves_order_to_pending_review(self):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYTASKCONFIRM001",
+            status=ProviderOrder.Status.PENDING_CONFIRMATION,
+            payment_deadline=now - timedelta(days=1),
+            completion_submitted_at=now - timedelta(days=3),
+            confirmation_deadline=now - timedelta(seconds=1),
+        )
+        task, _ = register_provider_order_confirmation_timeout(order)
+
+        result = process_due_tasks(now=now)
+
+        order.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_REVIEW)
+        self.assertEqual(order.auto_confirmed_at, now)
+        self.assertIsNone(order.customer_confirmed_at)
+        self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
+        self.assertEqual(task.result["action"], "auto_confirmed")
+
+    def test_compensation_creates_confirmation_deadline_and_task_for_legacy_order(self):
+        now = timezone.now()
+        completed_at = now - timedelta(days=1)
+        order = self.make_order(
+            order_no="DZYTASKCONFIRMLEGACY",
+            status=ProviderOrder.Status.PENDING_CONFIRMATION,
+            payment_deadline=now - timedelta(days=2),
+            completion_submitted_at=completed_at,
+        )
+
+        result = synchronize_provider_order_tasks()
+
+        order.refresh_from_db()
+        task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+            business_key=order.order_no,
+        )
+        self.assertEqual(result["confirmation_created"], 1)
+        self.assertEqual(order.confirmation_expires_at, completed_at + timedelta(days=3))
+        self.assertEqual(task.scheduled_at, order.confirmation_expires_at)
+
     def test_compensation_sync_processes_only_a_bounded_missing_batch(self):
         now = timezone.now()
         for index in range(3):
@@ -144,12 +193,20 @@ class TaskCenterTests(TestCase):
             patch("taskcenter.tasks.process_due_tasks") as process,
             patch(
                 "taskcenter.tasks.synchronize_provider_order_tasks",
-                return_value={"payment_created": 0, "acceptance_created": 0},
+                return_value={
+                    "payment_created": 0,
+                    "acceptance_created": 0,
+                    "confirmation_created": 0,
+                },
             ) as synchronize,
         ):
             self.assertEqual(
                 synchronize_scheduled_tasks(),
-                {"payment_created": 0, "acceptance_created": 0},
+                {
+                    "payment_created": 0,
+                    "acceptance_created": 0,
+                    "confirmation_created": 0,
+                },
             )
             synchronize.assert_called_once_with()
             process.assert_not_called()

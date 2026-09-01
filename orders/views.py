@@ -16,10 +16,12 @@ from providers.models import ProviderProfile
 from providers.presence import operation_rules
 from taskcenter.services import (
     cancel_provider_acceptance_timeout,
+    cancel_provider_order_confirmation_timeout,
     cancel_provider_order_payment_expiry,
     mark_provider_acceptance_expired,
     mark_provider_order_payment_expired,
     register_provider_acceptance_timeout,
+    register_provider_order_confirmation_timeout,
     register_provider_order_payment_expiry,
 )
 
@@ -355,12 +357,29 @@ class CurrentProviderOrderCompleteView(CurrentProviderOrderDetailView):
             order.status == ProviderOrder.Status.PENDING_CONFIRMATION
             and order.completion_submitted_at
         ):
+            if not order.confirmation_expires_at:
+                order.confirmation_expires_at = order.completion_submitted_at + timedelta(
+                    days=platform_operation_rules()[
+                        "provider_order_confirmation_timeout_days"
+                    ]
+                )
+                order.save(update_fields=("confirmation_expires_at", "updated_at"))
+            register_provider_order_confirmation_timeout(order)
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.IN_SERVICE:
             raise ValidationError({"status": "订单不在服务中状态。"})
+        completed_at = timezone.now()
         order.status = ProviderOrder.Status.PENDING_CONFIRMATION
-        order.completion_submitted_at = timezone.now()
-        order.save(update_fields=("status", "completion_submitted_at", "updated_at"))
+        order.completion_submitted_at = completed_at
+        order.confirmation_expires_at = completed_at + timedelta(
+            days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
+        )
+        order.save(
+            update_fields=(
+                "status", "completion_submitted_at", "confirmation_expires_at", "updated_at",
+            )
+        )
+        register_provider_order_confirmation_timeout(order)
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -374,11 +393,16 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
             order_no=order_no,
             customer=request.user,
         )
-        if order.status == ProviderOrder.Status.PENDING_REVIEW and order.customer_confirmed_at:
+        if order.status == ProviderOrder.Status.PENDING_REVIEW and (
+            order.customer_confirmed_at or order.auto_confirmed_at
+        ):
             return Response({"data": ProviderOrderSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_CONFIRMATION:
             raise ValidationError({"status": "订单不在待确认状态。"})
         order.status = ProviderOrder.Status.PENDING_REVIEW
         order.customer_confirmed_at = timezone.now()
         order.save(update_fields=("status", "customer_confirmed_at", "updated_at"))
+        cancel_provider_order_confirmation_timeout(
+            order.order_no, "customer_confirmed_completion"
+        )
         return Response({"data": ProviderOrderSerializer(order).data})

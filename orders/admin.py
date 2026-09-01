@@ -10,5 +10,6 @@ class ProviderOrderAdmin(admin.ModelAdmin):
     search_fields = ("order_no", "customer__phone", "provider_name_snapshot")
     readonly_fields = (
         "public_id", "departed_at", "arrival_photo_uploaded_at", "service_started_at",
-        "completion_submitted_at", "customer_confirmed_at", "created_at", "updated_at",
+        "completion_submitted_at", "confirmation_expires_at", "customer_confirmed_at",
+        "auto_confirmed_at", "created_at", "updated_at",
     )

@@ -74,6 +74,18 @@ def register_provider_acceptance_timeout(order):
     )
 
 
+def register_provider_order_confirmation_timeout(order):
+    if not order.confirmation_expires_at:
+        raise ValueError("用户确认截止时间不能为空。")
+    return _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+        business_type="provider_order",
+        business_key=order.order_no,
+        scheduled_at=order.confirmation_expires_at,
+        payload={"order_no": order.order_no},
+    )
+
+
 def cancel_business_task(*, task_type, business_type, business_key, reason):
     now = timezone.now()
     return ScheduledTask.objects.filter(
@@ -103,6 +115,54 @@ def cancel_provider_acceptance_timeout(order_no: str, reason: str):
         business_key=order_no,
         reason=reason,
     )
+
+
+def cancel_provider_order_confirmation_timeout(order_no: str, reason: str):
+    return cancel_business_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+        business_type="provider_order",
+        business_key=order_no,
+        reason=reason,
+    )
+
+
+def reopen_provider_order_confirmation_timeout(order):
+    if not order.confirmation_expires_at:
+        if not order.completion_submitted_at:
+            raise ValueError("用户确认截止时间不能为空。")
+        from backoffice.operation_settings import platform_operation_rules
+
+        order.confirmation_expires_at = order.completion_submitted_at + timedelta(
+            days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
+        )
+        order.save(update_fields=("confirmation_expires_at", "updated_at"))
+    dedupe_key = task_dedupe_key(
+        ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+        "provider_order",
+        order.order_no,
+    )
+    task = ScheduledTask.objects.select_for_update().filter(dedupe_key=dedupe_key).first()
+    if task is None:
+        return register_provider_order_confirmation_timeout(order)
+    if task.status == ScheduledTask.Status.PENDING:
+        return register_provider_order_confirmation_timeout(order)
+    if task.status != ScheduledTask.Status.CANCELLED:
+        return task, False
+    task.status = ScheduledTask.Status.PENDING
+    task.scheduled_at = order.confirmation_expires_at
+    task.available_at = order.confirmation_expires_at
+    task.attempt_count = 0
+    task.started_at = None
+    task.finished_at = None
+    task.last_error = ""
+    task.result = {}
+    task.save(
+        update_fields=(
+            "status", "scheduled_at", "available_at", "attempt_count", "started_at",
+            "finished_at", "last_error", "result", "updated_at",
+        )
+    )
+    return task, False
 
 
 def mark_business_task_succeeded(*, task_type, business_type, business_key, result):
@@ -159,12 +219,14 @@ def _requiring_task_synchronization(queryset, *, task_type, deadline_field):
 
 
 def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
+    from backoffice.operation_settings import platform_operation_rules
     from orders.models import ProviderOrder
     from providers.presence import operation_rules
 
     batch_size = max(1, min(int(batch_size), 5000))
     payment_created = 0
     acceptance_created = 0
+    confirmation_created = 0
     payment_orders = (
         _requiring_task_synchronization(
             ProviderOrder.objects.filter(status=ProviderOrder.Status.PENDING_PAYMENT),
@@ -197,9 +259,32 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
             order.save(update_fields=("acceptance_expires_at", "updated_at"))
         _, created = register_provider_acceptance_timeout(order)
         acceptance_created += int(created)
+
+    confirmation_timeout = timedelta(
+        days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
+    )
+    confirmation_orders = (
+        _requiring_task_synchronization(
+            ProviderOrder.objects.filter(
+                status=ProviderOrder.Status.PENDING_CONFIRMATION,
+                completion_submitted_at__isnull=False,
+            ),
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
+            deadline_field="confirmation_expires_at",
+        )
+        .only("order_no", "completion_submitted_at", "confirmation_expires_at")
+        .order_by("id")[:batch_size]
+    )
+    for order in confirmation_orders:
+        if not order.confirmation_expires_at:
+            order.confirmation_expires_at = order.completion_submitted_at + confirmation_timeout
+            order.save(update_fields=("confirmation_expires_at", "updated_at"))
+        _, created = register_provider_order_confirmation_timeout(order)
+        confirmation_created += int(created)
     return {
         "payment_created": payment_created,
         "acceptance_created": acceptance_created,
+        "confirmation_created": confirmation_created,
     }
 
 
@@ -241,9 +326,31 @@ def _execute_provider_acceptance_timeout(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _execute_provider_order_confirmation_timeout(task, now):
+    from orders.services import auto_confirm_provider_order
+
+    outcome = auto_confirm_provider_order(task.business_key, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "expired":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result={**outcome, "source": "task_worker"},
+        )
+    return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
+
+
 TASK_HANDLERS = {
     ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY: (_execute_provider_order_payment_expiry),
     ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT: (_execute_provider_acceptance_timeout),
+    ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT: (
+        _execute_provider_order_confirmation_timeout
+    ),
 }
 
 

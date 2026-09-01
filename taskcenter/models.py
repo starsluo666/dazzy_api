@@ -14,6 +14,10 @@ class ScheduledTask(models.Model):
             "provider_acceptance_timeout",
             "达人接单超时",
         )
+        PROVIDER_ORDER_CONFIRMATION_TIMEOUT = (
+            "provider_order_confirmation_timeout",
+            "达人订单确认超时",
+        )
 
     class Status(models.TextChoices):
         PENDING = "pending", "待执行"
@@ -68,4 +72,3 @@ class ScheduledTask(models.Model):
 
     def __str__(self):
         return f"{self.get_task_type_display()} / {self.business_key}"
-

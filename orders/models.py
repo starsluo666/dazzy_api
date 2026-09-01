@@ -105,7 +105,9 @@ class ProviderOrder(models.Model):
     )
     service_started_at = models.DateTimeField("服务开始时间", null=True, blank=True)
     completion_submitted_at = models.DateTimeField("达人提交完成时间", null=True, blank=True)
+    confirmation_expires_at = models.DateTimeField("用户确认截止时间", null=True, blank=True)
     customer_confirmed_at = models.DateTimeField("用户确认完成时间", null=True, blank=True)
+    auto_confirmed_at = models.DateTimeField("系统自动确认时间", null=True, blank=True)
     cancelled_at = models.DateTimeField("取消时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -116,6 +118,7 @@ class ProviderOrder(models.Model):
             models.Index(fields=("customer", "status", "-created_at")),
             models.Index(fields=("provider", "starts_at", "ends_at")),
             models.Index(fields=("status", "payment_expires_at")),
+            models.Index(fields=("status", "confirmation_expires_at")),
             models.Index(fields=("created_at",), name="provider_order_created_idx"),
             models.Index(
                 fields=("paid_at",),

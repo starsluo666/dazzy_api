@@ -33,6 +33,8 @@ from providers.models import (
     ProviderWeeklyAvailability,
     ServiceCategory,
 )
+from taskcenter.models import ScheduledTask
+from taskcenter.services import register_provider_order_confirmation_timeout
 
 from .models import (
     AdminAuditLog,
@@ -150,6 +152,7 @@ class BackofficeProviderReviewTests(APITestCase):
         with_evidence=True, completion_age_days=0,
     ):
         now = timezone.now()
+        completion_submitted_at = now - timedelta(days=completion_age_days)
         service = ProviderService.objects.create(
             provider=provider,
             category=self.order_category,
@@ -193,7 +196,8 @@ class BackofficeProviderReviewTests(APITestCase):
             arrival_latitude="36.6200000" if photo else None,
             arrival_location_accuracy_m="12.50" if photo else None,
             service_started_at=now - timedelta(hours=3),
-            completion_submitted_at=now - timedelta(days=completion_age_days),
+            completion_submitted_at=completion_submitted_at,
+            confirmation_expires_at=completion_submitted_at + timedelta(days=3),
         )
 
     def test_city_member_only_sees_scoped_applications(self):
@@ -889,6 +893,44 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(reject.data["data"]["status"], ProviderOrderAfterSalesCase.Status.REJECTED)
         order.refresh_from_db()
         self.assertEqual(order.status, ProviderOrder.Status.PENDING_REVIEW)
+
+    def test_after_sales_pauses_and_reopens_confirmation_timeout(self):
+        order = self.create_fulfillment_order(
+            order_no="ADMIN-AFTER-SALES-CONFIRM",
+            provider=self.handan,
+        )
+        task, _ = register_provider_order_confirmation_timeout(order)
+
+        create = self.client.post(
+            reverse("backoffice-provider-order-after-sales"),
+            {
+                "order_no": order.order_no,
+                "case_type": ProviderOrderAfterSalesCase.CaseType.SERVICE_DISPUTE,
+                "requested_amount": 0,
+                "reason": "确认期内用户提出服务争议，申请平台复核。",
+            },
+            format="json",
+        )
+
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        task.refresh_from_db()
+        self.assertEqual(task.status, ScheduledTask.Status.CANCELLED)
+
+        reject = self.client.post(
+            reverse(
+                "backoffice-provider-order-after-sales-action",
+                args=(create.data["data"]["case_no"],),
+            ),
+            {"action": "reject", "result_note": "履约记录完整，售后申请不成立。"},
+            format="json",
+        )
+
+        self.assertEqual(reject.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_CONFIRMATION)
+        self.assertEqual(task.status, ScheduledTask.Status.PENDING)
+        self.assertEqual(task.available_at, order.confirmation_expires_at)
 
     def test_after_sales_rejects_duplicate_open_case_and_excess_amount(self):
         order = self.create_fulfillment_order(

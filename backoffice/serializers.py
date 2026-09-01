@@ -971,18 +971,20 @@ def provider_order_anomalies(order):
         or (order.status in COMPLETION_REQUIRED_STATUSES and not order.completion_submitted_at)
         or (
             order.status in CUSTOMER_CONFIRMATION_REQUIRED_STATUSES
-            and not order.customer_confirmed_at
+            and not (order.customer_confirmed_at or order.auto_confirmed_at)
         )
     )
     if timeline_gap:
         anomalies.append({"code": "timeline_gap", "label": "履约时间线缺失"})
-    overdue_before = timezone.now() - timedelta(
-        days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
-    )
+    confirmation_deadline = order.confirmation_expires_at
+    if not confirmation_deadline and order.completion_submitted_at:
+        confirmation_deadline = order.completion_submitted_at + timedelta(
+            days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
+        )
     if (
         order.status == ProviderOrder.Status.PENDING_CONFIRMATION
-        and order.completion_submitted_at
-        and order.completion_submitted_at <= overdue_before
+        and confirmation_deadline
+        and confirmation_deadline <= timezone.now()
     ):
         anomalies.append({"code": "confirmation_overdue", "label": "待确认超时"})
     return anomalies
@@ -1125,7 +1127,8 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "payable_amount", "paid_at", "accepted_at",
             "departed_at", "arrival_photo_available", "arrival_photo_uploaded_at",
             "arrival_location", "service_started_at", "completion_submitted_at",
-            "customer_confirmed_at", "cancelled_at", "created_at", "updated_at",
+            "confirmation_expires_at", "customer_confirmed_at", "auto_confirmed_at",
+            "cancelled_at", "created_at", "updated_at",
             "anomalies", "support_notes", "after_sales_cases",
         )
 
