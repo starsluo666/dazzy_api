@@ -498,6 +498,26 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(order.arrival_longitude, Decimal("114.5060000"))
         self.assertEqual(order.arrival_latitude, Decimal("36.6200000"))
 
+        reviewed = self.client.post(
+            f"/api/v1/provider-orders/{order.order_no}/review/",
+            {"rating": 5, "content": "达人很细心，服务体验很好。"},
+            content_type="application/json",
+        )
+        self.assertEqual(reviewed.status_code, 200)
+        self.assertEqual(reviewed.json()["data"]["status"], ProviderOrder.Status.COMPLETED)
+        self.assertEqual(reviewed.json()["data"]["review"]["rating"], 5)
+        self.provider.refresh_from_db()
+        self.assertEqual(self.provider.rating, Decimal("5.00"))
+        self.assertEqual(self.provider.service_count, 1)
+
+        repeated_review = self.client.post(
+            f"/api/v1/provider-orders/{order.order_no}/review/",
+            {"rating": 1, "content": "不会覆盖已有评价。"},
+            content_type="application/json",
+        )
+        self.assertEqual(repeated_review.status_code, 200)
+        self.assertEqual(repeated_review.json()["data"]["review"]["rating"], 5)
+
     def test_completion_uses_configured_confirmation_timeout_snapshot(self):
         PlatformOperationSetting.objects.create(provider_order_confirmation_timeout_days=5)
         order = self.create_paid_accepted_order()

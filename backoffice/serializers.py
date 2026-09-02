@@ -1113,6 +1113,7 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
     anomalies = serializers.SerializerMethodField()
     support_notes = ProviderOrderSupportNoteSerializer(many=True, read_only=True)
     after_sales_cases = ProviderOrderAfterSalesCaseSerializer(many=True, read_only=True)
+    review = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrder
@@ -1128,7 +1129,7 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "departed_at", "arrival_photo_available", "arrival_photo_uploaded_at",
             "arrival_location", "service_started_at", "completion_submitted_at",
             "confirmation_expires_at", "customer_confirmed_at", "auto_confirmed_at",
-            "cancelled_at", "created_at", "updated_at",
+            "cancelled_at", "review", "created_at", "updated_at",
             "anomalies", "support_notes", "after_sales_cases",
         )
 
@@ -1141,6 +1142,18 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
 
     def get_provider_phone_masked(self, obj):
         return self.mask_phone(obj.provider.user.phone)
+
+    def get_review(self, obj):
+        review = getattr(obj, "review", None)
+        if not review:
+            return None
+        return {
+            "rating": review.rating,
+            "content": review.content,
+            "customer_name": review.customer.nickname,
+            "created_at": review.created_at,
+            "is_visible": review.is_visible,
+        }
 
     def get_contact_phone_masked(self, obj):
         return self.mask_phone(obj.contact_phone)

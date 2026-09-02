@@ -140,3 +140,47 @@ class ProviderOrder(models.Model):
 
     def __str__(self):
         return self.order_no
+
+
+class ProviderOrderReview(models.Model):
+    order = models.OneToOneField(
+        ProviderOrder,
+        on_delete=models.PROTECT,
+        related_name="review",
+        verbose_name="达人订单",
+    )
+    customer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="provider_order_reviews",
+        verbose_name="评价用户",
+    )
+    provider = models.ForeignKey(
+        ProviderProfile,
+        on_delete=models.PROTECT,
+        related_name="order_reviews",
+        verbose_name="达人",
+    )
+    rating = models.PositiveSmallIntegerField("评分")
+    content = models.CharField("评价内容", max_length=500, blank=True)
+    is_visible = models.BooleanField("公开显示", default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_order_review"
+        ordering = ("-created_at",)
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(rating__gte=1) & models.Q(rating__lte=5),
+                name="provider_review_rating_between_1_5",
+            )
+        ]
+        indexes = [
+            models.Index(fields=("provider", "is_visible", "-created_at")),
+        ]
+        verbose_name = "达人订单评价"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"{self.order.order_no} / {self.rating}星"

@@ -25,13 +25,14 @@ from taskcenter.services import (
     register_provider_order_payment_expiry,
 )
 
-from .models import ProviderOrder
+from .models import ProviderOrder, ProviderOrderReview
 from .serializers import (
     ProviderOrderInputSerializer,
     ProviderOrderArrivalEvidenceInputSerializer,
     ProviderOrderManageQuerySerializer,
     ProviderOrderManageSerializer,
     ProviderOrderRejectInputSerializer,
+    ProviderOrderReviewInputSerializer,
     ProviderOrderSerializer,
     quote_payload,
 )
@@ -405,4 +406,39 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
         cancel_provider_order_confirmation_timeout(
             order.order_no, "customer_confirmed_completion"
         )
+        return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class ProviderOrderReviewView(ProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = get_object_or_404(
+            ProviderOrder.objects.select_for_update().select_related("provider"),
+            order_no=order_no,
+            customer=request.user,
+        )
+        if order.status == ProviderOrder.Status.COMPLETED and hasattr(order, "review"):
+            return Response({"data": ProviderOrderSerializer(order).data})
+        if order.status != ProviderOrder.Status.PENDING_REVIEW:
+            raise ValidationError({"status": "订单当前不在待评价状态。"})
+        serializer = ProviderOrderReviewInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ProviderOrderReview.objects.create(
+            order=order,
+            customer=request.user,
+            provider=order.provider,
+            **serializer.validated_data,
+        )
+        order.status = ProviderOrder.Status.COMPLETED
+        order.save(update_fields=("status", "updated_at"))
+        from django.db.models import Avg
+
+        aggregate = ProviderOrderReview.objects.filter(
+            provider=order.provider, is_visible=True
+        ).aggregate(rating=Avg("rating"))
+        order.provider.rating = aggregate["rating"] or 0
+        order.provider.service_count = ProviderOrderReview.objects.filter(
+            provider=order.provider, is_visible=True
+        ).count()
+        order.provider.save(update_fields=("rating", "service_count", "updated_at"))
         return Response({"data": ProviderOrderSerializer(order).data})

@@ -9,7 +9,7 @@ from providers.models import ProviderProfile, ProviderService
 from providers.availability import ensure_booking_within_schedule
 from providers.presence import get_provider_live_location, operation_rules, provider_is_online
 
-from .models import ProviderOrder
+from .models import ProviderOrder, ProviderOrderReview
 from .services import build_quote, validate_booking
 
 
@@ -81,6 +81,19 @@ class ProviderOrderInputSerializer(serializers.Serializer):
         return attrs
 
 
+class ProviderOrderReviewInputSerializer(serializers.Serializer):
+    rating = serializers.IntegerField(min_value=1, max_value=5)
+    content = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class ProviderOrderReviewSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(source="customer.nickname", read_only=True)
+
+    class Meta:
+        model = ProviderOrderReview
+        fields = ("rating", "content", "customer_name", "created_at")
+
+
 class ProviderOrderSerializer(serializers.ModelSerializer):
     provider_public_id = serializers.UUIDField(source="provider.user.public_id")
     provider_name = serializers.CharField(source="provider_name_snapshot")
@@ -90,6 +103,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     contact_gender_label = serializers.CharField(source="get_contact_gender_display")
     contact_phone_masked = serializers.SerializerMethodField()
     arrival_photo_url = serializers.SerializerMethodField()
+    review = ProviderOrderReviewSerializer(read_only=True, allow_null=True)
 
     class Meta:
         model = ProviderOrder
@@ -105,7 +119,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "accepted_at", "provider_rejected_at", "provider_rejection_reason",
             "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
             "service_started_at", "completion_submitted_at", "confirmation_expires_at",
-            "customer_confirmed_at", "auto_confirmed_at",
+            "customer_confirmed_at", "auto_confirmed_at", "review",
         )
 
     def get_provider_avatar_url(self, obj):
