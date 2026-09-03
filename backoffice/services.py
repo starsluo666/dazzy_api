@@ -24,7 +24,8 @@ from activities.services import (
     refund_publish_order,
     sync_activity_formation_status,
 )
-from orders.models import ProviderOrder
+from orders.models import ProviderOrder, ProviderOrderReview
+from orders.services import refresh_provider_review_metrics
 from providers.models import ProviderLiveLocation, ProviderProfile
 from taskcenter.services import (
     cancel_provider_order_confirmation_timeout,
@@ -710,6 +711,40 @@ def _scoped_provider_orders(access):
     if not access.all_data:
         queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
     return queryset
+
+
+@transaction.atomic
+def moderate_provider_order_review(
+    *, order_no, action, reason, actor, access, request
+):
+    order = get_object_or_404(
+        _scoped_provider_orders(access).select_for_update(), order_no=order_no
+    )
+    review = get_object_or_404(
+        ProviderOrderReview.objects.select_for_update().select_related("provider"),
+        order=order,
+    )
+    before_visible = review.is_visible
+    review.is_visible = action == "restore"
+    if review.is_visible != before_visible:
+        review.save(update_fields=("is_visible", "updated_at"))
+        refresh_provider_review_metrics(review.provider)
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"order.review.{action}",
+        target_type="provider_order_review",
+        target_id=str(review.id),
+        before={"order_no": order.order_no, "is_visible": before_visible},
+        after={
+            "order_no": order.order_no,
+            "is_visible": review.is_visible,
+            "reason": reason.strip(),
+        },
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return order
 
 
 @transaction.atomic

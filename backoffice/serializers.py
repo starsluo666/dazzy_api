@@ -1014,6 +1014,18 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
     page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
+class ProviderOrderReviewActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=("hide", "restore"))
+    reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, default=""
+    )
+
+    def validate(self, attrs):
+        if attrs["action"] == "hide" and len(attrs.get("reason", "").strip()) < 2:
+            raise serializers.ValidationError({"reason": "屏蔽评价时请填写至少2个字的原因。"})
+        return attrs
+
+
 class ProviderOrderSupportNoteInputSerializer(serializers.Serializer):
     content = serializers.CharField(min_length=1, max_length=1000, trim_whitespace=True)
 
@@ -1151,6 +1163,8 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "rating": review.rating,
             "content": review.content,
             "customer_name": review.customer.nickname,
+            "is_anonymous": review.is_anonymous,
+            "image_urls": [build_media_url(image.object_key) for image in review.images.all()],
             "created_at": review.created_at,
             "is_visible": review.is_visible,
         }

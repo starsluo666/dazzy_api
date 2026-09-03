@@ -1,7 +1,7 @@
 from datetime import date, time, timedelta
 
 from django.contrib.gis.db.models.functions import Distance
-from django.db.models import Min, Q, Sum
+from django.db.models import Count, Min, Q, Sum
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 from mediafiles.services import build_media_url
-from orders.models import ProviderOrder
+from orders.models import ProviderOrder, ProviderOrderReview
 
 from .selectors import public_providers
 from .availability import _blocking_orders, _local_datetime, build_availability
@@ -32,6 +32,8 @@ from .serializers import (
     ProviderDetailSerializer,
     ProviderListItemSerializer,
     ProviderListQuerySerializer,
+    ProviderReviewQuerySerializer,
+    PublicProviderReviewSerializer,
     ProviderApplicationSerializer,
     ProviderApplicationSubmitSerializer,
     ProviderServiceManageSerializer,
@@ -120,6 +122,43 @@ class ProviderDetailView(APIView):
         provider = get_object_or_404(queryset)
         return Response(
             {"data": ProviderDetailSerializer(provider, context={"request": request}).data}
+        )
+
+
+class ProviderReviewListView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, public_id):
+        provider = get_object_or_404(public_providers(), user__public_id=public_id)
+        query = ProviderReviewQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+        base = ProviderOrderReview.objects.filter(
+            provider=provider, is_visible=True
+        ).select_related("customer", "order").prefetch_related("images")
+        distribution = {str(value): 0 for value in range(1, 6)}
+        for item in base.values("rating").annotate(count=Count("id")):
+            distribution[str(item["rating"])] = item["count"]
+        reviews = base
+        if rating := params.get("rating"):
+            reviews = reviews.filter(rating=rating)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = reviews.count()
+        items = reviews[(page - 1) * page_size : page * page_size]
+        return Response(
+            {
+                "data": {
+                    "items": PublicProviderReviewSerializer(items, many=True).data,
+                    "pagination": {"page": page, "page_size": page_size, "total": total},
+                    "summary": {
+                        "rating": str(provider.rating),
+                        "total": sum(distribution.values()),
+                        "distribution": distribution,
+                    },
+                }
+            }
         )
 
 

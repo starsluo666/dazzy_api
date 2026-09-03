@@ -87,6 +87,7 @@ from .serializers import (
     ProviderOrderAfterSalesCaseSerializer,
     ProviderOrderAdminQuerySerializer,
     ProviderOrderAdminSerializer,
+    ProviderOrderReviewActionSerializer,
     ProviderOrderSupportNoteInputSerializer,
     ProviderOrderSupportNoteSerializer,
     ProviderOrderingSettingSerializer,
@@ -102,6 +103,7 @@ from .services import (
     change_user_account_status,
     change_user_risk_flag,
     create_provider_order_after_sales_case,
+    moderate_provider_order_review,
     review_provider_order_after_sales_case,
     review_provider_application,
     review_activity,
@@ -438,8 +440,10 @@ def order_anomaly_query(code):
 
 def provider_order_queryset(access):
     return scoped_provider_orders(access).select_related(
-        "customer", "provider__user", "service__category", "arrival_photo"
+        "customer", "provider__user", "service__category", "arrival_photo",
+        "review__customer",
     ).prefetch_related(
+        "review__images",
         "support_notes__author",
         "support_notes__organization",
         "after_sales_cases__creator",
@@ -1569,6 +1573,26 @@ class ProviderOrderAdminDetailView(APIView):
         access.require("order.fulfillment.view")
         order = get_admin_provider_order(access, order_no)
         return Response({"data": ProviderOrderAdminSerializer(order).data})
+
+
+class ProviderOrderReviewActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_no):
+        access = resolve_admin_access(request.user)
+        access.require("order.review.manage")
+        serializer = ProviderOrderReviewActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        moderate_provider_order_review(
+            order_no=order_no,
+            actor=request.user,
+            access=access,
+            request=request,
+            **serializer.validated_data,
+        )
+        return Response(
+            {"data": ProviderOrderAdminSerializer(get_admin_provider_order(access, order_no)).data}
+        )
 
 
 class ProviderOrderEvidenceView(APIView):

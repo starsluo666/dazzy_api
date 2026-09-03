@@ -31,12 +31,14 @@ from .serializers import (
     ProviderOrderArrivalEvidenceInputSerializer,
     ProviderOrderManageQuerySerializer,
     ProviderOrderManageSerializer,
+    MyProviderOrderReviewSerializer,
+    ProviderOrderReviewListQuerySerializer,
     ProviderOrderRejectInputSerializer,
     ProviderOrderReviewInputSerializer,
     ProviderOrderSerializer,
     quote_payload,
 )
-from .services import ensure_slot_available, expire_pending_orders
+from .services import ensure_slot_available, expire_pending_orders, refresh_provider_review_metrics
 
 
 def make_order_no():
@@ -66,8 +68,8 @@ class ProviderOrderListCreateView(APIView):
         customer_orders = ProviderOrder.objects.filter(customer=request.user)
         expire_pending_orders(customer_orders)
         orders = customer_orders.select_related(
-            "provider__user", "service__category", "arrival_photo"
-        )[:50]
+            "provider__user", "service__category", "arrival_photo", "review__customer"
+        ).prefetch_related("review__images")[:50]
         return Response({"data": {"items": ProviderOrderSerializer(orders, many=True).data}})
 
     @transaction.atomic
@@ -125,8 +127,8 @@ class ProviderOrderDetailView(APIView):
         )
         return get_object_or_404(
             ProviderOrder.objects.select_related(
-                "provider__user", "service__category", "arrival_photo"
-            ),
+                "provider__user", "service__category", "arrival_photo", "review__customer"
+            ).prefetch_related("review__images"),
             order_no=order_no,
             customer=request.user,
         )
@@ -423,22 +425,49 @@ class ProviderOrderReviewView(ProviderOrderDetailView):
             raise ValidationError({"status": "订单当前不在待评价状态。"})
         serializer = ProviderOrderReviewInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        ProviderOrderReview.objects.create(
+        data = serializer.validated_data.copy()
+        image_ids = data.pop("image_ids", [])
+        unique_image_ids = set(image_ids)
+        images = list(
+            MediaAsset.objects.filter(
+                id__in=unique_image_ids,
+                owner=request.user,
+                category=MediaAsset.Category.REVIEW_IMAGE,
+                status=MediaAsset.Status.UPLOADED,
+                provider_order_reviews__isnull=True,
+            )
+        )
+        if len(images) != len(unique_image_ids):
+            raise ValidationError({"image_ids": "评价图片不存在或不属于当前用户。"})
+        review = ProviderOrderReview.objects.create(
             order=order,
             customer=request.user,
             provider=order.provider,
-            **serializer.validated_data,
+            **data,
         )
+        review.images.set(images)
         order.status = ProviderOrder.Status.COMPLETED
         order.save(update_fields=("status", "updated_at"))
-        from django.db.models import Avg
-
-        aggregate = ProviderOrderReview.objects.filter(
-            provider=order.provider, is_visible=True
-        ).aggregate(rating=Avg("rating"))
-        order.provider.rating = aggregate["rating"] or 0
-        order.provider.service_count = ProviderOrderReview.objects.filter(
-            provider=order.provider, is_visible=True
-        ).count()
-        order.provider.save(update_fields=("rating", "service_count", "updated_at"))
+        refresh_provider_review_metrics(order.provider)
         return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class CurrentUserProviderReviewListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        query = ProviderOrderReviewListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        page = query.validated_data["page"]
+        page_size = query.validated_data["page_size"]
+        reviews = ProviderOrderReview.objects.filter(customer=request.user).select_related(
+            "order", "provider__user", "customer"
+        ).prefetch_related("images")
+        total = reviews.count()
+        items = reviews[(page - 1) * page_size : page * page_size]
+        return Response(
+            {"data": {
+                "items": MyProviderOrderReviewSerializer(items, many=True).data,
+                "pagination": {"page": page, "page_size": page_size, "total": total},
+            }}
+        )

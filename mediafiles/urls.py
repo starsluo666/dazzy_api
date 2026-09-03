@@ -5,6 +5,7 @@ from .views import (
     AvatarUploadView,
     HomeCardAssetView,
     OrderEvidenceUploadView,
+    ReviewImageUploadView,
     ProviderLifestylePhotoUploadView,
 )
 
@@ -18,4 +19,5 @@ urlpatterns = [
     ),
     path("media/avatars/", AvatarUploadView.as_view(), name="avatar-upload"),
     path("media/order-evidence/", OrderEvidenceUploadView.as_view(), name="order-evidence-upload"),
+    path("media/review-images/", ReviewImageUploadView.as_view(), name="review-image-upload"),
 ]

@@ -84,14 +84,45 @@ class ProviderOrderInputSerializer(serializers.Serializer):
 class ProviderOrderReviewInputSerializer(serializers.Serializer):
     rating = serializers.IntegerField(min_value=1, max_value=5)
     content = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    image_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, max_length=3, default=list
+    )
+    is_anonymous = serializers.BooleanField(required=False, default=False)
+
+
+class ProviderOrderReviewListQuerySerializer(serializers.Serializer):
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
 class ProviderOrderReviewSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source="customer.nickname", read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    image_urls = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrderReview
-        fields = ("rating", "content", "customer_name", "created_at")
+        fields = (
+            "rating", "content", "customer_name", "image_urls", "is_anonymous",
+            "created_at",
+        )
+
+    def get_customer_name(self, obj):
+        return "匿名用户" if obj.is_anonymous else obj.customer.nickname
+
+    def get_image_urls(self, obj):
+        return [build_media_url(image.object_key) for image in obj.images.all()]
+
+
+class MyProviderOrderReviewSerializer(ProviderOrderReviewSerializer):
+    order_no = serializers.CharField(source="order.order_no")
+    provider_public_id = serializers.UUIDField(source="provider.user.public_id")
+    provider_name = serializers.CharField(source="order.provider_name_snapshot")
+    service_name = serializers.CharField(source="order.service_name_snapshot")
+
+    class Meta(ProviderOrderReviewSerializer.Meta):
+        fields = ProviderOrderReviewSerializer.Meta.fields + (
+            "order_no", "provider_public_id", "provider_name", "service_name", "is_visible",
+        )
 
 
 class ProviderOrderSerializer(serializers.ModelSerializer):

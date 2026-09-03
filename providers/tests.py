@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from mediafiles.models import MediaAsset
-from orders.models import ProviderOrder
+from orders.models import ProviderOrder, ProviderOrderReview
 
 from .models import (
     ProviderLiveLocation,
@@ -147,6 +147,109 @@ class ProviderModelTests(TestCase):
         response = self.client.get(f"/api/v1/providers/{user.public_id}/")
 
         self.assertEqual(response.status_code, 404)
+
+    def test_provider_reviews_only_return_visible_reviews_and_summary(self):
+        provider_user = User.objects.create_user(
+            phone="13800000006", password="test-password", nickname="甜甜"
+        )
+        customer = User.objects.create_user(
+            phone="13800000007", password="test-password", nickname="小雨"
+        )
+        provider = ProviderProfile.objects.create(
+            user=provider_user,
+            status=ProviderProfile.Status.APPROVED,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+            rating="5.00",
+        )
+        category = ServiceCategory.objects.create(name="桌游陪玩", slug="board-game-review")
+        service = ProviderService.objects.create(
+            provider=provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=12800,
+        )
+        now = timezone.now()
+        visible_order = ProviderOrder.objects.create(
+            order_no="DZY-REVIEW-VISIBLE",
+            customer=customer,
+            provider=provider,
+            service=service,
+            provider_name_snapshot=provider_user.nickname,
+            service_name_snapshot=category.name,
+            billing_type_snapshot=ProviderOrder.BillingType.HOURLY,
+            unit_price_amount=12800,
+            starts_at=now,
+            ends_at=now + timedelta(hours=2),
+            duration_minutes=120,
+            meeting_address="人民路",
+            contact_name="张三",
+            contact_phone="13800000007",
+            service_fee_amount=25600,
+            payable_amount=25600,
+            payment_expires_at=now,
+            status=ProviderOrder.Status.COMPLETED,
+        )
+        hidden_order = ProviderOrder.objects.create(
+            order_no="DZY-REVIEW-HIDDEN",
+            customer=customer,
+            provider=provider,
+            service=service,
+            provider_name_snapshot=provider_user.nickname,
+            service_name_snapshot=category.name,
+            billing_type_snapshot=ProviderOrder.BillingType.HOURLY,
+            unit_price_amount=12800,
+            starts_at=now + timedelta(days=1),
+            ends_at=now + timedelta(days=1, hours=2),
+            duration_minutes=120,
+            meeting_address="人民路",
+            contact_name="张三",
+            contact_phone="13800000007",
+            service_fee_amount=25600,
+            payable_amount=25600,
+            payment_expires_at=now,
+            status=ProviderOrder.Status.COMPLETED,
+        )
+        image = MediaAsset.objects.create(
+            owner=customer,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.REVIEW_IMAGE,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="public/review-images/public-review.webp",
+        )
+        visible_review = ProviderOrderReview.objects.create(
+            order=visible_order,
+            customer=customer,
+            provider=provider,
+            rating=5,
+            content="服务很好",
+            is_anonymous=True,
+        )
+        visible_review.images.add(image)
+        ProviderOrderReview.objects.create(
+            order=hidden_order,
+            customer=customer,
+            provider=provider,
+            rating=1,
+            content="不应公开",
+            is_visible=False,
+        )
+
+        response = self.client.get(f"/api/v1/providers/{provider_user.public_id}/reviews/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["pagination"]["total"], 1)
+        self.assertEqual(data["summary"]["total"], 1)
+        self.assertEqual(data["summary"]["distribution"]["5"], 1)
+        self.assertEqual(data["summary"]["distribution"]["1"], 0)
+        self.assertEqual(data["items"][0]["customer_name"], "匿名用户")
+        self.assertEqual(len(data["items"][0]["image_urls"]), 1)
+
+        filtered = self.client.get(
+            f"/api/v1/providers/{provider_user.public_id}/reviews/", {"rating": 4}
+        )
+        self.assertEqual(filtered.json()["data"]["pagination"]["total"], 0)
 
     def test_provider_list_hides_approved_profile_without_active_service(self):
         user = User.objects.create_user(phone="13800000009", password="test-password")

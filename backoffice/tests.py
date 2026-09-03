@@ -25,7 +25,7 @@ from activities.models import (
 from activities.services import process_activity_timeouts
 from locations.models import UserAddress
 from mediafiles.models import MediaAsset
-from orders.models import ProviderOrder
+from orders.models import ProviderOrder, ProviderOrderReview
 from providers.models import (
     ProviderLiveLocation,
     ProviderProfile,
@@ -80,6 +80,7 @@ class BackofficeProviderReviewTests(APITestCase):
                 "operations.manage",
                 "order.fulfillment.view",
                 "order.support_note.add",
+                "order.review.manage",
                 "order.after_sales.view",
                 "order.after_sales.review",
                 "audit.view",
@@ -773,6 +774,53 @@ class BackofficeProviderReviewTests(APITestCase):
             action="order.fulfillment.evidence.view", target_id=order.order_no
         )
         self.assertEqual(audit.organization, self.organization)
+
+    def test_order_review_can_be_hidden_and_restored_with_audit(self):
+        order = self.create_fulfillment_order(
+            order_no="ADMIN-REVIEW-MODERATE",
+            provider=self.handan,
+            status=ProviderOrder.Status.COMPLETED,
+        )
+        review = ProviderOrderReview.objects.create(
+            order=order,
+            customer=self.order_customer,
+            provider=self.handan,
+            rating=5,
+            content="服务很周到",
+        )
+        self.handan.rating = Decimal("5.00")
+        self.handan.service_count = 1
+        self.handan.save(update_fields=("rating", "service_count", "updated_at"))
+        url = reverse("backoffice-provider-order-review-action", args=(order.order_no,))
+
+        hidden = self.client.post(
+            url, {"action": "hide", "reason": "内容包含用户隐私"}, format="json"
+        )
+
+        self.assertEqual(hidden.status_code, status.HTTP_200_OK)
+        self.assertFalse(hidden.data["data"]["review"]["is_visible"])
+        review.refresh_from_db()
+        self.handan.refresh_from_db()
+        self.assertFalse(review.is_visible)
+        self.assertEqual(self.handan.rating, Decimal("0.00"))
+        self.assertEqual(self.handan.service_count, 1)
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                action="order.review.hide", target_id=str(review.id)
+            ).exists()
+        )
+
+        restored = self.client.post(url, {"action": "restore"}, format="json")
+
+        self.assertEqual(restored.status_code, status.HTTP_200_OK)
+        self.assertTrue(restored.data["data"]["review"]["is_visible"])
+        self.handan.refresh_from_db()
+        self.assertEqual(self.handan.rating, Decimal("5.00"))
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                action="order.review.restore", target_id=str(review.id)
+            ).exists()
+        )
 
     def test_audit_logs_support_search_filters_and_pagination(self):
         AdminAuditLog.objects.create(

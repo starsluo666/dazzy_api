@@ -55,6 +55,7 @@ PERMISSION_GROUPS = (
         "label": "达人订单",
         "permissions": (
             ("order.fulfillment.view", "查看履约订单"),
+            ("order.review.manage", "管理用户评价"),
             ("order.support_note.add", "添加客服跟进记录"),
             ("order.after_sales.view", "查看退款售后"),
             ("order.after_sales.review", "处理退款售后"),

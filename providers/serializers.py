@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
+from orders.models import ProviderOrderReview
 
 from .models import ProviderProfile, ProviderService, ServiceCategory
 from .presence import MAX_LOCATION_ACCURACY_M, provider_is_online
@@ -36,6 +37,31 @@ class ProviderAvailabilityQuerySerializer(serializers.Serializer):
     start_date = serializers.DateField(required=False)
     days = serializers.IntegerField(required=False, default=4, min_value=1, max_value=7)
     duration_minutes = serializers.IntegerField(required=False, min_value=30, max_value=480)
+
+
+class ProviderReviewQuerySerializer(serializers.Serializer):
+    rating = serializers.IntegerField(required=False, min_value=1, max_value=5)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=10, min_value=1, max_value=30)
+
+
+class PublicProviderReviewSerializer(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+    service_name = serializers.CharField(source="order.service_name_snapshot")
+    image_urls = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProviderOrderReview
+        fields = (
+            "id", "customer_name", "rating", "content", "service_name", "image_urls",
+            "created_at",
+        )
+
+    def get_customer_name(self, obj):
+        return "匿名用户" if obj.is_anonymous else obj.customer.nickname
+
+    def get_image_urls(self, obj):
+        return [build_media_url(image.object_key) for image in obj.images.all()]
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):

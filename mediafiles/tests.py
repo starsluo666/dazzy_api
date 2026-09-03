@@ -74,6 +74,23 @@ class MediaAssetTests(TestCase):
         self.assertEqual(asset.category, MediaAsset.Category.ACTIVITY_COVER)
         upload_stream.assert_called_once()
 
+    @patch("mediafiles.views.build_media_url", return_value="https://media.test/review.webp")
+    @patch("mediafiles.views.upload_public_stream", return_value="review-etag")
+    def test_authenticated_user_can_upload_review_image(self, upload_stream, _build_url):
+        user = User.objects.create_user(phone="13900000007")
+        self.client.force_login(user)
+        image = SimpleUploadedFile("review.webp", self.valid_webp(), content_type="image/webp")
+
+        response = self.client.post("/api/v1/media/review-images/", {"file": image})
+
+        self.assertEqual(response.status_code, 201)
+        asset = MediaAsset.objects.get(pk=response.json()["data"]["id"])
+        self.assertEqual(asset.owner, user)
+        self.assertEqual(asset.scope, MediaAsset.Scope.PUBLIC)
+        self.assertEqual(asset.category, MediaAsset.Category.REVIEW_IMAGE)
+        self.assertEqual(asset.status, MediaAsset.Status.UPLOADED)
+        upload_stream.assert_called_once()
+
     @patch("mediafiles.views.build_media_url", return_value="https://media.test/lifestyle.webp")
     @patch("mediafiles.views.upload_public_stream", return_value="lifestyle-etag")
     def test_authenticated_user_can_upload_provider_lifestyle_photo(

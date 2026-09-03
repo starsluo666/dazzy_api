@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Avg, Q
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -17,6 +17,16 @@ MAXIMUM_ADVANCE = timedelta(days=3)
 MINIMUM_HOURLY_MINUTES = 120
 TIME_GRAIN_MINUTES = 30
 PAYMENT_LOCK_MINUTES = 15
+
+
+def refresh_provider_review_metrics(provider) -> None:
+    aggregate = provider.order_reviews.filter(is_visible=True).aggregate(rating=Avg("rating"))
+    provider.rating = aggregate["rating"] or Decimal("0.00")
+    provider.service_count = ProviderOrder.objects.filter(
+        provider=provider,
+        status=ProviderOrder.Status.COMPLETED,
+    ).count()
+    provider.save(update_fields=("rating", "service_count", "updated_at"))
 
 
 @dataclass(frozen=True)

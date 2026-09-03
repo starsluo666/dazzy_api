@@ -8,6 +8,7 @@ from .views import (
     ProviderAvailabilityView,
     ProviderDetailView,
     ProviderListView,
+    ProviderReviewListView,
     ServiceCategoryListView,
     CurrentProviderScheduleDayView,
     CurrentProviderSchedulePeriodView,
@@ -79,5 +80,10 @@ urlpatterns = [
         "providers/<uuid:public_id>/availability/",
         ProviderAvailabilityView.as_view(),
         name="provider-availability",
+    ),
+    path(
+        "providers/<uuid:public_id>/reviews/",
+        ProviderReviewListView.as_view(),
+        name="provider-reviews",
     ),
 ]

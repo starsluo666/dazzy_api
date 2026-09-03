@@ -163,6 +163,13 @@ class ProviderOrderReview(models.Model):
     )
     rating = models.PositiveSmallIntegerField("评分")
     content = models.CharField("评价内容", max_length=500, blank=True)
+    images = models.ManyToManyField(
+        "mediafiles.MediaAsset",
+        related_name="provider_order_reviews",
+        blank=True,
+        verbose_name="评价图片",
+    )
+    is_anonymous = models.BooleanField("匿名评价", default=False)
     is_visible = models.BooleanField("公开显示", default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

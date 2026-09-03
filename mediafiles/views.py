@@ -98,6 +98,10 @@ class PublicImageUploadView(APIView):
                 body=uploaded, object_key=object_key, content_type=uploaded.content_type
             )
         except Exception:
+            logger.exception(
+                "Public media upload failed",
+                extra={"media_category": self.category, "object_key": object_key},
+            )
             asset.status = MediaAsset.Status.REJECTED
             asset.save(update_fields=("status", "updated_at"))
             raise ValidationError({"file": f"{self.field_label}上传失败，请稍后重试。"})
@@ -154,6 +158,20 @@ class OrderEvidenceUploadView(PublicImageUploadView):
                     "url": build_media_url(asset.object_key, private=True),
                 }
             },
+            status=201,
+        )
+
+
+class ReviewImageUploadView(PublicImageUploadView):
+    max_size = 5 * 1024 * 1024
+    folder = "review-images"
+    category = MediaAsset.Category.REVIEW_IMAGE
+    field_label = "评价图片"
+
+    def post(self, request):
+        asset = self.create_asset(request)
+        return Response(
+            {"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key)}},
             status=201,
         )
 
