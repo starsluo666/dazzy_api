@@ -176,6 +176,30 @@ class ReviewImageUploadView(PublicImageUploadView):
         )
 
 
+class SupportAttachmentUploadView(PublicImageUploadView):
+    max_size = 5 * 1024 * 1024
+    folder = "support-attachments"
+    category = MediaAsset.Category.SUPPORT_ATTACHMENT
+    scope = MediaAsset.Scope.PRIVATE
+    prefix_setting = "COS_PRIVATE_PREFIX"
+    field_label = "证据图片"
+
+    def upload_stream(self, *, body, object_key: str, content_type: str) -> str:
+        return upload_private_stream(body=body, object_key=object_key, content_type=content_type)
+
+    def post(self, request):
+        asset = self.create_asset(request)
+        return Response(
+            {
+                "data": {
+                    "id": str(asset.pk),
+                    "url": build_media_url(asset.object_key, private=True),
+                }
+            },
+            status=201,
+        )
+
+
 class AvatarUploadView(PublicImageUploadView):
     max_size = 5 * 1024 * 1024
     folder = "avatars"

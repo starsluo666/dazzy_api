@@ -131,6 +131,26 @@ class MediaAssetTests(TestCase):
         self.assertIn("private/order-evidence", asset.object_key)
         upload_stream.assert_called_once()
 
+    @patch("mediafiles.views.build_media_url", return_value="https://media.test/support.webp")
+    @patch("mediafiles.views.upload_private_stream", return_value="support-etag")
+    def test_authenticated_user_can_upload_private_support_attachment(
+        self, upload_stream, _build_url
+    ):
+        user = User.objects.create_user(phone="13900000008")
+        self.client.force_login(user)
+        image = SimpleUploadedFile("support.webp", self.valid_webp(), content_type="image/webp")
+
+        response = self.client.post("/api/v1/media/support-attachments/", {"file": image})
+
+        self.assertEqual(response.status_code, 201)
+        asset = MediaAsset.objects.get(pk=response.json()["data"]["id"])
+        self.assertEqual(asset.owner, user)
+        self.assertEqual(asset.scope, MediaAsset.Scope.PRIVATE)
+        self.assertEqual(asset.category, MediaAsset.Category.SUPPORT_ATTACHMENT)
+        self.assertEqual(asset.status, MediaAsset.Status.UPLOADED)
+        self.assertIn("private/support-attachments", asset.object_key)
+        upload_stream.assert_called_once()
+
     @patch("mediafiles.views.delete_public_object")
     @patch("mediafiles.views.build_media_url", return_value="https://media.test/avatar.webp")
     @patch("mediafiles.views.upload_public_stream", return_value="avatar-etag")

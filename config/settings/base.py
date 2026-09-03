@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     "health",
     "backoffice",
     "taskcenter",
+    "supportcases",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

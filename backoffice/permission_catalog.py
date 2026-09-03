@@ -62,6 +62,14 @@ PERMISSION_GROUPS = (
         ),
     },
     {
+        "key": "support",
+        "label": "客服与投诉",
+        "permissions": (
+            ("support.case.view", "查看客服工单"),
+            ("support.case.manage", "处理客服工单"),
+        ),
+    },
+    {
         "key": "system",
         "label": "系统管理",
         "permissions": (
