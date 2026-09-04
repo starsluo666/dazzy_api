@@ -24,6 +24,13 @@ from activities.services import (
     refund_publish_order,
     sync_activity_formation_status,
 )
+from notifications.models import UserNotification
+from notifications.services import (
+    create_activity_notification,
+    create_activity_notifications,
+    create_order_notification,
+    create_system_notification,
+)
 from orders.models import ProviderOrder, ProviderOrderReview
 from orders.services import refresh_provider_review_metrics
 from providers.models import ProviderLiveLocation, ProviderProfile
@@ -130,6 +137,18 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
     )
+    create_activity_notification(
+        activity=activity,
+        recipient=activity.organizer,
+        event_type=UserNotification.EventType.ACTIVITY_REVIEW_RESULT,
+        title="活动审核通过" if decision == "approve" else "活动审核未通过",
+        content=(
+            "活动已经发布并开始接受报名。"
+            if decision == "approve"
+            else f"活动未通过审核：{activity.rejection_reason}。发布支付已按规则退款。"
+        ),
+        dedupe_suffix=decision,
+    )
     return activity
 
 
@@ -152,6 +171,13 @@ def cancel_activity_by_admin(*, activity_id, reason, actor, access, request):
 
     before = {"status": activity.status, "cancellation_reason": activity.cancellation_reason}
     now = timezone.now()
+    participant_users = [
+        item.user
+        for item in ActivityParticipation.objects.filter(
+            activity=activity,
+            status=ActivityParticipation.Status.ACTIVE,
+        ).select_related("user")
+    ]
     activity.status = Activity.Status.CANCELLED
     activity.cancellation_reason = reason
     activity.cancelled_by = actor
@@ -191,6 +217,14 @@ def cancel_activity_by_admin(*, activity_id, reason, actor, access, request):
         },
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
+    )
+    create_activity_notifications(
+        activity=activity,
+        recipients=[activity.organizer, *participant_users],
+        event_type=UserNotification.EventType.ACTIVITY_CANCELLED,
+        title="活动已被平台取消",
+        content=f"活动已取消：{reason}。相关退款记录可在活动详情查看。",
+        dedupe_suffix="admin",
     )
     return activity
 
@@ -327,6 +361,15 @@ def review_activity_after_sales_case(
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
     )
+    if action in ("approve", "reject"):
+        create_activity_notification(
+            activity=case.participation.activity,
+            recipient=case.applicant,
+            event_type=UserNotification.EventType.ACTIVITY_AFTER_SALES_RESULT,
+            title="活动售后已同意" if action == "approve" else "活动售后已驳回",
+            content=case.result_note or "活动售后已处理，请查看详情。",
+            dedupe_suffix=f"{case.case_no}:{action}",
+        )
     return case
 
 
@@ -486,6 +529,19 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
         after={"status": profile.status, "rejection_reason": profile.rejection_reason},
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
+    )
+    create_system_notification(
+        recipient=profile.user,
+        event_type=UserNotification.EventType.PROVIDER_APPLICATION_RESULT,
+        title="达人申请审核通过" if decision == "approve" else "达人申请审核未通过",
+        content=(
+            "你的达人申请已通过，可以进入达人端完善服务并开始接单。"
+            if decision == "approve"
+            else f"你的达人申请未通过：{profile.rejection_reason}。修改资料后可重新提交。"
+        ),
+        action_text="查看申请",
+        action_url="/pages/providers/apply",
+        dedupe_key=f"provider-application:{profile.pk}:{decision}:{profile.reviewed_at.isoformat()}",
     )
     return profile
 
@@ -661,6 +717,20 @@ def change_provider_operational_status(*, profile_id, action, reason, actor, acc
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
     )
+    status_messages = {
+        "restrict_orders": ("接单资格已受限", f"平台已限制你的接单资格：{reason}"),
+        "resume_orders": ("接单资格已恢复", "平台已恢复你的接单资格，可在达人端重新开启接单。"),
+        "suspend_qualification": ("达人资格已暂停", f"平台已暂停你的达人资格：{reason}"),
+        "restore_qualification": ("达人资格已恢复", "平台已恢复你的达人资格，可在达人端重新开启接单。"),
+    }
+    title, content = status_messages[action]
+    create_system_notification(
+        recipient=profile.user,
+        event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+        title=title,
+        content=content,
+        dedupe_key=f"provider-status:{profile.pk}:{action}:{profile.updated_at.isoformat()}",
+    )
     return profile
 
 
@@ -702,6 +772,16 @@ def adjust_provider_credit(*, profile_id, delta, reason, actor, access, request)
         },
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
+    )
+    direction = "增加" if delta > 0 else "扣减"
+    create_system_notification(
+        recipient=profile.user,
+        event_type=UserNotification.EventType.PROVIDER_CREDIT_CHANGED,
+        title="达人信用分已变更",
+        content=(
+            f"信用分{direction} {abs(delta)} 分，当前为 {after_score} 分。原因：{reason}"
+        ),
+        dedupe_key=f"provider-credit:{adjustment.pk}",
     )
     return profile
 
@@ -807,6 +887,13 @@ def create_provider_order_after_sales_case(
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
     )
+    create_order_notification(
+        order=order,
+        event_type=UserNotification.EventType.ORDER_AFTER_SALES_STARTED,
+        title="订单已进入售后处理",
+        content="平台已登记退款/售后申请，处理结果会通过通知中心告知你。",
+        dedupe_suffix=case.case_no,
+    )
     return case
 
 
@@ -883,4 +970,12 @@ def review_provider_order_after_sales_case(
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
     )
+    if action in ("approve", "reject"):
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_AFTER_SALES_RESULT,
+            title="订单售后已同意" if action == "approve" else "订单售后已驳回",
+            content=case.result_note or "订单售后已处理，请查看订单详情。",
+            dedupe_suffix=f"{case.case_no}:{action}",
+        )
     return case

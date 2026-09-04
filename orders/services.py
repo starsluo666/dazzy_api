@@ -8,6 +8,9 @@ from django.db.models import Avg, Q
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from notifications.models import UserNotification
+from notifications.services import create_order_notification
+
 from providers.models import ProviderProfile, ProviderService
 
 from .models import ProviderOrder
@@ -145,7 +148,7 @@ def expire_provider_acceptance(order_no: str, *, now=None) -> dict:
     order = (
         ProviderOrder.objects.select_for_update()
         .filter(order_no=order_no)
-        .only("order_no", "status", "acceptance_expires_at")
+        .select_related("customer")
         .first()
     )
     if not order:
@@ -166,6 +169,12 @@ def expire_provider_acceptance(order_no: str, *, now=None) -> dict:
         }
     order.status = ProviderOrder.Status.PENDING_SUPPORT
     order.save(update_fields=("status", "updated_at"))
+    create_order_notification(
+        order=order,
+        event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+        title="订单已转客服处理",
+        content="达人未在时限内接单，平台客服将继续协助处理。",
+    )
     return {
         "state": "expired",
         "order_no": order_no,
@@ -179,7 +188,7 @@ def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
     order = (
         ProviderOrder.objects.select_for_update()
         .filter(order_no=order_no)
-        .only("order_no", "status", "confirmation_expires_at", "auto_confirmed_at")
+        .select_related("customer")
         .first()
     )
     if not order:
@@ -201,6 +210,12 @@ def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
     order.status = ProviderOrder.Status.PENDING_REVIEW
     order.auto_confirmed_at = now
     order.save(update_fields=("status", "auto_confirmed_at", "updated_at"))
+    create_order_notification(
+        order=order,
+        event_type=UserNotification.EventType.ORDER_AUTO_CONFIRMED,
+        title="订单已自动确认完成",
+        content="订单已按规则自动确认完成，可以前往订单详情评价本次服务。",
+    )
     return {
         "state": "expired",
         "order_no": order_no,

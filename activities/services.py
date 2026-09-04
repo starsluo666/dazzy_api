@@ -7,6 +7,11 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 
 from backoffice.operation_settings import platform_operation_rules
 from config.geospatial import gcj02_to_wgs84
+from notifications.models import UserNotification
+from notifications.services import (
+    create_activity_notification,
+    create_activity_notifications,
+)
 
 from .models import (
     Activity,
@@ -113,6 +118,17 @@ def refund_publish_order(
             else ActivityPublishOrder.Status.PARTIALLY_REFUNDED
         )
         publish_order.save(update_fields=("status", "updated_at"))
+        create_activity_notification(
+            activity=activity,
+            recipient=publish_order.payer,
+            event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
+            title="活动退款已完成",
+            content=(
+                f"发起活动支付已退款 ¥{refund.refund_amount // 100}."
+                f"{refund.refund_amount % 100:02d}，请留意原支付渠道到账。"
+            ),
+            dedupe_suffix=refund.refund_no,
+        )
     return refund
 
 
@@ -191,6 +207,13 @@ def simulate_publish_payment(*, activity_id: int, user):
     order.save(update_fields=("status", "paid_at", "updated_at"))
     activity.status = Activity.Status.PENDING_REVIEW
     activity.save(update_fields=("status", "updated_at"))
+    create_activity_notification(
+        activity=activity,
+        recipient=user,
+        event_type=UserNotification.EventType.ACTIVITY_PUBLISH_SUBMITTED,
+        title="活动已提交审核",
+        content="发布支付成功，平台会尽快完成内容审核。",
+    )
     return order
 
 
@@ -223,6 +246,19 @@ def sync_activity_formation_status(activity: Activity, participant_count: int) -
     if target != activity.status:
         activity.status = target
         activity.save(update_fields=("status", "updated_at"))
+        if target == Activity.Status.FORMED:
+            participations = ActivityParticipation.objects.filter(
+                activity=activity,
+                status=ActivityParticipation.Status.ACTIVE,
+            ).select_related("user")
+            create_activity_notifications(
+                activity=activity,
+                recipients=[activity.organizer, *(item.user for item in participations)],
+                event_type=UserNotification.EventType.ACTIVITY_FORMED,
+                title="活动已成局",
+                content=f"活动已达到最少成局人数（当前 {participant_count} 人），请按计划参加。",
+                dedupe_suffix=f"formed-{activity.updated_at.isoformat()}",
+            )
 
 
 def _close_pending_payment_order(order, *, now):
@@ -407,6 +443,22 @@ def simulate_participation_payment(*, activity_id: int, user):
     )
     participant_count = _active_count(activity)
     sync_activity_formation_status(activity, participant_count)
+    create_activity_notification(
+        activity=activity,
+        recipient=user,
+        event_type=UserNotification.EventType.ACTIVITY_SIGNUP_SUCCESS,
+        title="活动报名成功",
+        content="报名支付成功，活动名额已经为你保留。",
+        dedupe_suffix=str(participation.pk),
+    )
+    create_activity_notification(
+        activity=activity,
+        recipient=activity.organizer,
+        event_type=UserNotification.EventType.ACTIVITY_SIGNUP_SUCCESS,
+        title="活动有新成员报名",
+        content=f"{user.nickname or '一位用户'}已完成报名，当前共有 {participant_count} 位参与者。",
+        dedupe_suffix=f"organizer-{participation.pk}",
+    )
     return participation, order, True
 
 
@@ -525,6 +577,17 @@ def create_and_process_participation_refund(
     elif refunded_total:
         payment_order.status = ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED
     payment_order.save(update_fields=("status", "updated_at"))
+    create_activity_notification(
+        activity=participation.activity,
+        recipient=participation.user,
+        event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
+        title="活动退款已完成",
+        content=(
+            f"退款 ¥{refund.refund_amount // 100}.{refund.refund_amount % 100:02d} "
+            "已提交原支付渠道，请留意到账。"
+        ),
+        dedupe_suffix=refund.refund_no,
+    )
     return refund, True
 
 
@@ -734,6 +797,13 @@ def cancel_activity_by_organizer(*, activity_id: int, organizer, reason: str):
     ).order_by("-created_at").first()
     if not publish_order:
         raise ValidationError("活动发布支付单不在可退款状态。")
+    participant_users = [
+        item.user
+        for item in ActivityParticipation.objects.filter(
+            activity=activity,
+            status=ActivityParticipation.Status.ACTIVE,
+        ).select_related("user")
+    ]
     refund_all_activity_participations(
         activity=activity,
         refund_type=ActivityParticipationRefundOrder.RefundType.ORGANIZER_CANCELLATION,
@@ -773,6 +843,13 @@ def cancel_activity_by_organizer(*, activity_id: int, organizer, reason: str):
     activity.save(update_fields=(
         "status", "cancellation_reason", "cancelled_by", "cancelled_at", "updated_at",
     ))
+    create_activity_notifications(
+        activity=activity,
+        recipients=[activity.organizer, *participant_users],
+        event_type=UserNotification.EventType.ACTIVITY_CANCELLED,
+        title="活动已取消",
+        content="活动已按取消规则关闭，相关退款记录可在活动详情查看。",
+    )
     return activity, publish_refund
 
 
@@ -1010,11 +1087,12 @@ def release_activity_settlement_after_sales(*, activity, now=None):
 def advance_activity_settlement(*, settlement_id: int, now=None):
     now = now or timezone.now()
     settlement = ActivitySettlement.objects.select_for_update().select_related(
-        "activity"
+        "activity__organizer"
     ).get(pk=settlement_id)
     if settlement.status == ActivitySettlement.Status.SETTLED:
         return settlement, False
     activity = settlement.activity
+    previous_status = settlement.status
     if _has_open_activity_after_sales(activity):
         if settlement.dispute_source != ActivitySettlement.DisputeSource.ADMIN:
             settlement.status = ActivitySettlement.Status.DISPUTE_FROZEN
@@ -1052,6 +1130,21 @@ def advance_activity_settlement(*, settlement_id: int, now=None):
         "retained_participant_principal_amount", "settlement_amount",
         "platform_service_fee_amount", "calculation_snapshot", "updated_at",
     ))
+    if (
+        previous_status != ActivitySettlement.Status.SETTLED
+        and settlement.status == ActivitySettlement.Status.SETTLED
+    ):
+        create_activity_notification(
+            activity=activity,
+            recipient=settlement.beneficiary,
+            event_type=UserNotification.EventType.ACTIVITY_SETTLED,
+            title="活动结算已入账",
+            content=(
+                f"活动可结算金额 ¥{settlement.settlement_amount // 100}."
+                f"{settlement.settlement_amount % 100:02d} 已入账。"
+            ),
+            dedupe_suffix=settlement.settlement_no,
+        )
     return settlement, changed
 
 
@@ -1079,6 +1172,13 @@ def fail_unformed_activity(*, activity_id: int, now=None):
     if not publish_order:
         raise ValidationError("未成局活动缺少可退款发布支付单。")
     reason = "达到成局截止时间仍未满足最少成局人数"
+    participant_users = [
+        item.user
+        for item in ActivityParticipation.objects.filter(
+            activity=activity,
+            status=ActivityParticipation.Status.ACTIVE,
+        ).select_related("user")
+    ]
     refund_all_activity_participations(
         activity=activity,
         refund_type=ActivityParticipationRefundOrder.RefundType.FAILED_TO_FORM,
@@ -1098,6 +1198,13 @@ def fail_unformed_activity(*, activity_id: int, now=None):
     activity.save(update_fields=(
         "status", "cancellation_reason", "cancelled_at", "updated_at",
     ))
+    create_activity_notifications(
+        activity=activity,
+        recipients=[activity.organizer, *participant_users],
+        event_type=UserNotification.EventType.ACTIVITY_FAILED_TO_FORM,
+        title="活动未成局",
+        content="成局截止时人数不足，活动已取消并按规则完成退款。",
+    )
     return activity, True
 
 
@@ -1111,6 +1218,17 @@ def start_formed_activity(*, activity_id: int, now=None):
         return activity, False
     activity.status = Activity.Status.IN_PROGRESS
     activity.save(update_fields=("status", "updated_at"))
+    participations = ActivityParticipation.objects.filter(
+        activity=activity,
+        status=ActivityParticipation.Status.ACTIVE,
+    ).select_related("user")
+    create_activity_notifications(
+        activity=activity,
+        recipients=[activity.organizer, *(item.user for item in participations)],
+        event_type=UserNotification.EventType.ACTIVITY_STARTED,
+        title="活动已经开始",
+        content="活动已进入进行中，请按约定地点和时间参与。",
+    )
     return activity, True
 
 
@@ -1124,6 +1242,17 @@ def complete_started_activity(*, activity_id: int, now=None):
         return activity, False
     activity.status = Activity.Status.COMPLETED
     activity.save(update_fields=("status", "updated_at"))
+    participations = ActivityParticipation.objects.filter(
+        activity=activity,
+        status=ActivityParticipation.Status.ACTIVE,
+    ).select_related("user")
+    create_activity_notifications(
+        activity=activity,
+        recipients=[activity.organizer, *(item.user for item in participations)],
+        event_type=UserNotification.EventType.ACTIVITY_COMPLETED,
+        title="活动已经结束",
+        content="活动已结束并进入履约确认期，可在活动详情查看后续结算状态。",
+    )
     return activity, True
 
 

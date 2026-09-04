@@ -25,6 +25,7 @@ from activities.models import (
 from activities.services import process_activity_timeouts
 from locations.models import UserAddress
 from mediafiles.models import MediaAsset
+from notifications.models import UserNotification
 from orders.models import ProviderOrder, ProviderOrderReview
 from providers.models import (
     ProviderLiveLocation,
@@ -221,6 +222,12 @@ class BackofficeProviderReviewTests(APITestCase):
         audit = AdminAuditLog.objects.get(target_id=str(self.handan.id))
         self.assertEqual(audit.action, "provider.application.approve")
         self.assertEqual(audit.organization, self.organization)
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.handan_user,
+                event_type=UserNotification.EventType.PROVIDER_APPLICATION_RESULT,
+            ).exists()
+        )
 
     def test_reject_requires_reason(self):
         response = self.client.post(
@@ -405,6 +412,12 @@ class BackofficeProviderReviewTests(APITestCase):
                 action="provider.management.restrict_orders", target_id=str(self.handan.id)
             ).exists()
         )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.handan_user,
+                event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+            ).exists()
+        )
 
     def test_provider_qualification_can_be_suspended_and_restored(self):
         self.handan.status = ProviderProfile.Status.APPROVED
@@ -444,6 +457,12 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertTrue(
             AdminAuditLog.objects.filter(
                 action="provider.credit.adjust", target_id=str(self.handan.id)
+            ).exists()
+        )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.handan_user,
+                event_type=UserNotification.EventType.PROVIDER_CREDIT_CHANGED,
             ).exists()
         )
 
@@ -911,6 +930,18 @@ class BackofficeProviderReviewTests(APITestCase):
             AdminAuditLog.objects.filter(
                 action="order.after_sales.approve", target_id=case_no
             ).exists()
+        )
+        self.assertSetEqual(
+            set(
+                UserNotification.objects.filter(
+                    recipient=order.customer,
+                    target_id=order.order_no,
+                ).values_list("event_type", flat=True)
+            ),
+            {
+                UserNotification.EventType.ORDER_AFTER_SALES_STARTED,
+                UserNotification.EventType.ORDER_AFTER_SALES_RESULT,
+            },
         )
 
     def test_after_sales_reject_restores_original_order_status(self):
@@ -1428,6 +1459,13 @@ class BackofficeActivityManagementTests(APITestCase):
         self.assertTrue(AdminAuditLog.objects.filter(
             action="activity.review.approve", target_id=str(self.handan_activity.id)
         ).exists())
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.organizer,
+                event_type=UserNotification.EventType.ACTIVITY_REVIEW_RESULT,
+                target_id=str(self.handan_activity.id),
+            ).exists()
+        )
 
     def test_activity_reject_refunds_simulated_publish_order(self):
         response = self.client.post(
@@ -1663,6 +1701,13 @@ class BackofficeActivityManagementTests(APITestCase):
         self.assertTrue(AdminAuditLog.objects.filter(
             action="activity.after_sales.approve", target_id=case_no
         ).exists())
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.participant,
+                event_type=UserNotification.EventType.ACTIVITY_AFTER_SALES_RESULT,
+                target_id=str(self.handan_activity.id),
+            ).exists()
+        )
 
     def test_after_sales_freezes_settlement_and_admin_can_release_risk_freeze(self):
         now = timezone.now()

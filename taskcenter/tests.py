@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from backoffice.models import AdminAuditLog
+from notifications.models import UserNotification
 from orders.models import ProviderOrder
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 
@@ -113,6 +114,23 @@ class TaskCenterTests(TestCase):
         self.assertEqual(order.status, ProviderOrder.Status.PENDING_SUPPORT)
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "moved_to_support")
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+                target_id=order.order_no,
+            ).count(),
+            1,
+        )
+        self.assertEqual(process_due_tasks(now=now)["claimed"], 0)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+                target_id=order.order_no,
+            ).count(),
+            1,
+        )
 
     def test_confirmation_timeout_moves_order_to_pending_review(self):
         now = timezone.now()
@@ -135,6 +153,23 @@ class TaskCenterTests(TestCase):
         self.assertIsNone(order.customer_confirmed_at)
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "auto_confirmed")
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_AUTO_CONFIRMED,
+                target_id=order.order_no,
+            ).count(),
+            1,
+        )
+        self.assertEqual(process_due_tasks(now=now)["claimed"], 0)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_AUTO_CONFIRMED,
+                target_id=order.order_no,
+            ).count(),
+            1,
+        )
 
     def test_compensation_creates_confirmation_deadline_and_task_for_legacy_order(self):
         now = timezone.now()

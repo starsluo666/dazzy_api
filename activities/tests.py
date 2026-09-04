@@ -9,6 +9,7 @@ from django.utils import timezone
 from accounts.models import User
 from backoffice.models import PlatformOperationSetting
 from mediafiles.models import MediaAsset
+from notifications.models import UserNotification
 
 from .models import (
     Activity,
@@ -157,6 +158,20 @@ class ActivityModelTests(TestCase):
         self.assertEqual(detail.json()["data"]["participant_count"], 1)
         self.assertTrue(detail.json()["data"]["is_joined"])
         self.assertEqual(detail.json()["data"]["participation_status"], "active")
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=participant,
+                event_type=UserNotification.EventType.ACTIVITY_SIGNUP_SUCCESS,
+                target_id=str(activity.pk),
+            ).exists()
+        )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.organizer,
+                event_type=UserNotification.EventType.ACTIVITY_SIGNUP_SUCCESS,
+                target_id=str(activity.pk),
+            ).exists()
+        )
 
     @override_settings(DEBUG=True)
     def test_participation_forms_activity_and_cancel_reopens_it(self):
@@ -190,6 +205,13 @@ class ActivityModelTests(TestCase):
         self.assertEqual(joined.status_code, 200, joined.json())
         self.assertEqual(activity.status, Activity.Status.FORMED)
         self.assertEqual(joined.json()["data"]["participant_count"], 2)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                event_type=UserNotification.EventType.ACTIVITY_FORMED,
+                target_id=str(activity.pk),
+            ).count(),
+            3,
+        )
 
         cancelled = self.client.delete(f"/api/v1/activities/{activity.pk}/participation/")
         activity.refresh_from_db()
@@ -199,6 +221,27 @@ class ActivityModelTests(TestCase):
         self.assertEqual(
             ActivityParticipation.objects.filter(status="active").count(),
             1,
+        )
+
+        third = User.objects.create_user(
+            phone="13800000012", password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.client.force_login(third)
+        self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+        reformed = self.client.post(
+            f"/api/v1/activities/{activity.pk}/participation/simulate-payment/"
+        )
+        activity.refresh_from_db()
+
+        self.assertEqual(reformed.status_code, 200, reformed.json())
+        self.assertEqual(activity.status, Activity.Status.FORMED)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                event_type=UserNotification.EventType.ACTIVITY_FORMED,
+                target_id=str(activity.pk),
+            ).count(),
+            6,
         )
 
     @override_settings(DEBUG=True)
@@ -405,6 +448,14 @@ class ActivityModelTests(TestCase):
             refund.retained_principal_destination,
             ActivityParticipationRefundOrder.PrincipalDestination.ORGANIZER,
         )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=participant,
+                event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
+                target_id=str(activity.pk),
+            ).count(),
+            1,
+        )
 
     @override_settings(DEBUG=True)
     def test_activity_after_sales_is_idempotent_and_links_paid_participation(self):
@@ -474,6 +525,13 @@ class ActivityModelTests(TestCase):
         self.assertEqual(
             activity.refund_records.get().refund_type,
             "failed_to_form",
+        )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.organizer,
+                event_type=UserNotification.EventType.ACTIVITY_FAILED_TO_FORM,
+                target_id=str(activity.pk),
+            ).exists()
         )
 
     def test_activity_lifecycle_creates_and_advances_settlement_idempotently(self):
@@ -551,6 +609,14 @@ class ActivityModelTests(TestCase):
         settlement.refresh_from_db()
         self.assertEqual(settlement.status, ActivitySettlement.Status.SETTLED)
         self.assertEqual(ActivitySettlement.objects.filter(activity=activity).count(), 1)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.organizer,
+                event_type=UserNotification.EventType.ACTIVITY_SETTLED,
+                target_id=str(activity.pk),
+            ).count(),
+            1,
+        )
 
         self.client.force_login(self.organizer)
         organizer_detail = self.client.get(f"/api/v1/activities/{activity.pk}/")
@@ -675,6 +741,13 @@ class ActivityModelTests(TestCase):
         self.assertEqual(paid.status_code, 200)
         self.assertEqual(order.status, ActivityPublishOrder.Status.PAID)
         self.assertEqual(activity.status, Activity.Status.PENDING_REVIEW)
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.organizer,
+                event_type=UserNotification.EventType.ACTIVITY_PUBLISH_SUBMITTED,
+                target_id=str(activity.pk),
+            ).exists()
+        )
 
     def test_activity_create_enforces_verification_and_start_window(self):
         self.client.force_login(self.organizer)

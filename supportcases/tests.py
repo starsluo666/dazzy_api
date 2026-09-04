@@ -5,6 +5,7 @@ from rest_framework.test import APITestCase
 from accounts.models import User
 from backoffice.models import AdminAuditLog, AdminRole, Organization, OrganizationMember
 from mediafiles.models import MediaAsset
+from notifications.models import UserNotification
 from providers.models import ProviderProfile
 
 from .models import SupportCase, SupportCaseRecord
@@ -184,6 +185,13 @@ class AdminSupportCaseApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(reply.status_code, 201)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.case.reporter,
+                event_type=UserNotification.EventType.SUPPORT_REPLY,
+            ).count(),
+            1,
+        )
 
         resolved = self.client.post(
             reverse("admin-support-case-action", args=(self.case.case_no,)),
@@ -192,6 +200,13 @@ class AdminSupportCaseApiTests(APITestCase):
         )
         self.assertEqual(resolved.status_code, 200)
         self.assertEqual(resolved.data["data"]["status"], SupportCase.Status.RESOLVED)
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.case.reporter,
+                event_type=UserNotification.EventType.SUPPORT_RESULT,
+            ).count(),
+            1,
+        )
         self.assertEqual(
             AdminAuditLog.objects.filter(
                 target_id=self.case.case_no, action="support.case.resolve"
@@ -232,3 +247,28 @@ class AdminSupportCaseApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["summary"]["resolved"], 3)
         self.assertEqual(response.data["data"]["pagination"]["total"], 3)
+
+    def test_review_resolution_creates_review_result_notification(self):
+        self.case.status = SupportCase.Status.REVIEWING
+        self.case.review_requested_at = timezone.now()
+        self.case.review_reason = "用户补充了新的沟通记录。"
+        self.case.save(
+            update_fields=(
+                "status",
+                "review_requested_at",
+                "review_reason",
+                "updated_at",
+            )
+        )
+        response = self.client.post(
+            reverse("admin-support-case-action", args=(self.case.case_no,)),
+            {"action": "resolve", "result_note": "复核完成，维持原处理结论。"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        notification = UserNotification.objects.get(recipient=self.case.reporter)
+        self.assertEqual(
+            notification.event_type,
+            UserNotification.EventType.SUPPORT_REVIEW_RESULT,
+        )
+        self.assertEqual(notification.title, "工单复核已完成")

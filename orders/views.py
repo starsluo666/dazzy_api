@@ -12,6 +12,8 @@ from rest_framework.views import APIView
 
 from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
+from notifications.models import UserNotification
+from notifications.services import create_order_notification
 from providers.models import ProviderProfile
 from providers.presence import operation_rules
 from taskcenter.services import (
@@ -177,6 +179,12 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
 
         cancel_provider_order_payment_expiry(order_no, "payment_succeeded")
         register_provider_acceptance_timeout(order)
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_PAYMENT_SUCCESS,
+            title="订单支付成功",
+            content="订单已进入待接单，达人会在接单时限内处理。",
+        )
         return Response({"data": ProviderOrderSerializer(order).data})
 
 
@@ -236,6 +244,12 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
             order.status = ProviderOrder.Status.PENDING_SUPPORT
             order.save(update_fields=("status", "updated_at"))
             mark_provider_acceptance_expired(order_no, source="provider_action_guard")
+            create_order_notification(
+                order=order,
+                event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+                title="订单已转客服处理",
+                content="达人未在时限内接单，平台客服将继续协助处理。",
+            )
             return Response(
                 {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
                 status=409,
@@ -244,6 +258,12 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
         order.accepted_at = timezone.now()
         order.save(update_fields=("status", "accepted_at", "updated_at"))
         cancel_provider_acceptance_timeout(order_no, "provider_accepted")
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_ACCEPTED,
+            title="达人已接单",
+            content=f"{order.provider_name_snapshot}已确认接单，请按预约时间前往集合地点。",
+        )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -263,6 +283,12 @@ class CurrentProviderOrderRejectView(CurrentProviderOrderDetailView):
             order.status = ProviderOrder.Status.PENDING_SUPPORT
             order.save(update_fields=("status", "updated_at"))
             mark_provider_acceptance_expired(order_no, source="provider_action_guard")
+            create_order_notification(
+                order=order,
+                event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+                title="订单已转客服处理",
+                content="达人未在时限内接单，平台客服将继续协助处理。",
+            )
             return Response(
                 {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
                 status=409,
@@ -281,6 +307,12 @@ class CurrentProviderOrderRejectView(CurrentProviderOrderDetailView):
             )
         )
         cancel_provider_acceptance_timeout(order_no, "provider_rejected")
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+            title="订单已转客服处理",
+            content="达人暂时无法接单，平台客服将协助更换达人或处理退款。",
+        )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -295,6 +327,12 @@ class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
         order.status = ProviderOrder.Status.DEPARTED
         order.departed_at = timezone.now()
         order.save(update_fields=("status", "departed_at", "updated_at"))
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_DEPARTED,
+            title="达人已出发",
+            content=f"{order.provider_name_snapshot}已前往集合地点，请留意联系。",
+        )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -349,6 +387,12 @@ class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
         order.status = ProviderOrder.Status.IN_SERVICE
         order.service_started_at = timezone.now()
         order.save(update_fields=("status", "service_started_at", "updated_at"))
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_STARTED,
+            title="服务已经开始",
+            content="本次达人服务已开始，平台正在记录履约状态。",
+        )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -383,6 +427,12 @@ class CurrentProviderOrderCompleteView(CurrentProviderOrderDetailView):
             )
         )
         register_provider_order_confirmation_timeout(order)
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_COMPLETION_SUBMITTED,
+            title="达人已提交服务完成",
+            content="请确认本次服务是否完成；逾期未操作，系统将按规则自动确认。",
+        )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 

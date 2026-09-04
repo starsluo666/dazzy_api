@@ -11,6 +11,7 @@ from django.utils import timezone
 from accounts.models import User
 from backoffice.models import PlatformOperationSetting
 from mediafiles.models import MediaAsset
+from notifications.models import UserNotification
 from providers.models import (
     ProviderLiveLocation,
     ProviderProfile,
@@ -171,6 +172,14 @@ class ProviderOrderApiTests(TestCase):
                 business_key=order_no,
                 status=ScheduledTask.Status.PENDING,
             ).exists()
+        )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_PAYMENT_SUCCESS,
+                target_id=order_no,
+            ).count(),
+            1,
         )
 
     def test_payment_and_acceptance_task_transition_is_atomic(self):
@@ -351,6 +360,14 @@ class ProviderOrderApiTests(TestCase):
             repeated.json()["data"]["accepted_at"],
             accepted.json()["data"]["accepted_at"],
         )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_ACCEPTED,
+                target_id=order_no,
+            ).count(),
+            1,
+        )
 
         self.client.force_login(self.customer)
         customer_order = self.client.get(f"/api/v1/provider-orders/{order_no}/")
@@ -394,6 +411,14 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(
             repeated.json()["data"]["provider_rejection_reason"],
             "档期临时冲突",
+        )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+                target_id=order_no,
+            ).count(),
+            1,
         )
 
         cannot_accept = self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
@@ -474,6 +499,21 @@ class ProviderOrderApiTests(TestCase):
             business_key=order.order_no,
         )
         self.assertEqual(confirmation_task.status, ScheduledTask.Status.PENDING)
+        self.assertSetEqual(
+            set(
+                UserNotification.objects.filter(
+                    recipient=self.customer,
+                    target_id=order.order_no,
+                ).values_list("event_type", flat=True)
+            ),
+            {
+                UserNotification.EventType.ORDER_PAYMENT_SUCCESS,
+                UserNotification.EventType.ORDER_ACCEPTED,
+                UserNotification.EventType.ORDER_DEPARTED,
+                UserNotification.EventType.ORDER_STARTED,
+                UserNotification.EventType.ORDER_COMPLETION_SUBMITTED,
+            },
+        )
 
         self.client.force_login(self.customer)
         confirmed = self.client.post(
@@ -659,6 +699,13 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(
             ProviderOrder.objects.get(order_no=order_no).status,
             ProviderOrder.Status.PENDING_SUPPORT,
+        )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
+                target_id=order_no,
+            ).exists()
         )
 
     def test_order_creation_requires_provider_to_be_accepting_orders(self):

@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "backoffice",
     "taskcenter",
     "supportcases",
+    "notifications",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
