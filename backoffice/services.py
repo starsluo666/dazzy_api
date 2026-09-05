@@ -31,11 +31,18 @@ from notifications.services import (
     create_order_notification,
     create_system_notification,
 )
-from orders.models import ProviderOrder, ProviderOrderReview
-from orders.services import refresh_provider_review_metrics
+from orders.models import (
+    ProviderOrder,
+    ProviderOrderRefundOrder,
+    ProviderOrderReview,
+    ProviderOrderSettlement,
+)
+from orders.services import create_provider_order_refund, refresh_provider_review_metrics
 from providers.models import ProviderLiveLocation, ProviderProfile
 from taskcenter.services import (
+    cancel_provider_order_settlement,
     cancel_provider_order_confirmation_timeout,
+    reopen_provider_order_settlement,
     reopen_provider_order_confirmation_timeout,
 )
 
@@ -838,6 +845,9 @@ def create_provider_order_after_sales_case(
         raise ValidationError("未支付订单不能登记退款或售后。")
     if order.status == ProviderOrder.Status.REFUNDED:
         raise ValidationError("该订单已经退款，不能重复登记售后。")
+    settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
+    if settlement and settlement.status == ProviderOrderSettlement.Status.SETTLED:
+        raise ValidationError("该订单资金已经结算，请转异常交易流程处理。")
     if case_type == ProviderOrderAfterSalesCase.CaseType.REFUND and requested_amount <= 0:
         raise ValidationError({"requested_amount": "退款申请金额必须大于 0。"})
     if requested_amount > order.payable_amount:
@@ -866,6 +876,11 @@ def create_provider_order_after_sales_case(
         raise ValidationError("该订单已有未结束的退款或售后单。") from error
     order.status = ProviderOrder.Status.AFTER_SALES
     order.save(update_fields=("status", "updated_at"))
+    if settlement and settlement.status == ProviderOrderSettlement.Status.RISK_FROZEN:
+        settlement.status = ProviderOrderSettlement.Status.DISPUTE_FROZEN
+        settlement.dispute_reason = f"存在待处理退款售后：{case.case_no}"
+        settlement.save(update_fields=("status", "dispute_reason", "updated_at"))
+        cancel_provider_order_settlement(order.order_no, "after_sales_processing")
     if original_status == ProviderOrder.Status.PENDING_CONFIRMATION:
         cancel_provider_order_confirmation_timeout(
             order.order_no, "after_sales_processing"
@@ -916,6 +931,18 @@ def review_provider_order_after_sales_case(
             raise ValidationError("仅待处理售后单可以开始处理。")
         case.status = ProviderOrderAfterSalesCase.Status.PROCESSING
         audit_action = "order.after_sales.start_review"
+    elif action == "retry_refund":
+        if case.status != ProviderOrderAfterSalesCase.Status.APPROVED:
+            raise ValidationError("仅退款失败或待退款的售后单可以重试。")
+        refund = ProviderOrderRefundOrder.objects.filter(
+            idempotency_key=f"provider-after-sales:{case.case_no}"
+        ).first()
+        if not refund or refund.status not in (
+            ProviderOrderRefundOrder.Status.PENDING,
+            ProviderOrderRefundOrder.Status.FAILED,
+        ):
+            raise ValidationError("当前退款单不需要重试。")
+        audit_action = "order.after_sales.retry_refund"
     elif action == "approve":
         if case.status not in (
             ProviderOrderAfterSalesCase.Status.PENDING,
@@ -924,8 +951,8 @@ def review_provider_order_after_sales_case(
             raise ValidationError("仅待处理或处理中的售后单可以审核通过。")
         if approved_amount is None:
             raise ValidationError({"approved_amount": "请填写核准退款金额。"})
-        if case.case_type == ProviderOrderAfterSalesCase.CaseType.REFUND and approved_amount <= 0:
-            raise ValidationError({"approved_amount": "退款申请的核准金额必须大于 0。"})
+        if approved_amount <= 0:
+            raise ValidationError({"approved_amount": "审核通过时核准退款金额必须大于 0。"})
         if approved_amount > case.requested_amount:
             raise ValidationError({"approved_amount": "核准金额不能超过申请金额。"})
         case.status = ProviderOrderAfterSalesCase.Status.APPROVED
@@ -935,6 +962,15 @@ def review_provider_order_after_sales_case(
         case.reviewed_at = timezone.now()
         order.status = ProviderOrder.Status.AFTER_SALES
         order.save(update_fields=("status", "updated_at"))
+        create_provider_order_refund(
+            order_no=order.order_no,
+            amount=approved_amount,
+            source_type=ProviderOrderRefundOrder.SourceType.AFTER_SALES,
+            source_reference=case.case_no,
+            idempotency_key=f"provider-after-sales:{case.case_no}",
+            reason=result_note,
+            operator=actor,
+        )
         audit_action = "order.after_sales.approve"
     else:
         if case.status not in (
@@ -952,6 +988,12 @@ def review_provider_order_after_sales_case(
             order.save(update_fields=("status", "updated_at"))
             if order.status == ProviderOrder.Status.PENDING_CONFIRMATION:
                 reopen_provider_order_confirmation_timeout(order)
+        settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
+        if settlement and settlement.status == ProviderOrderSettlement.Status.DISPUTE_FROZEN:
+            settlement.status = ProviderOrderSettlement.Status.RISK_FROZEN
+            settlement.dispute_reason = ""
+            settlement.save(update_fields=("status", "dispute_reason", "updated_at"))
+            reopen_provider_order_settlement(settlement)
         audit_action = "order.after_sales.reject"
     case.save()
     AdminAuditLog.objects.create(

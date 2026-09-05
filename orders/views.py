@@ -21,13 +21,12 @@ from taskcenter.services import (
     cancel_provider_order_confirmation_timeout,
     cancel_provider_order_payment_expiry,
     mark_provider_acceptance_expired,
-    mark_provider_order_payment_expired,
-    register_provider_acceptance_timeout,
     register_provider_order_confirmation_timeout,
     register_provider_order_payment_expiry,
 )
 
-from .models import ProviderOrder, ProviderOrderReview
+from .models import ProviderOrder, ProviderOrderPaymentOrder, ProviderOrderReview
+from .payment_gateway import get_provider_order_payment_gateway
 from .serializers import (
     ProviderOrderInputSerializer,
     ProviderOrderArrivalEvidenceInputSerializer,
@@ -40,7 +39,14 @@ from .serializers import (
     ProviderOrderSerializer,
     quote_payload,
 )
-from .services import ensure_slot_available, expire_pending_orders, refresh_provider_review_metrics
+from .services import (
+    apply_provider_order_payment_success,
+    create_provider_order_payment_order,
+    ensure_provider_order_settlement,
+    ensure_slot_available,
+    expire_pending_orders,
+    refresh_provider_review_metrics,
+)
 
 
 def make_order_no():
@@ -70,8 +76,9 @@ class ProviderOrderListCreateView(APIView):
         customer_orders = ProviderOrder.objects.filter(customer=request.user)
         expire_pending_orders(customer_orders)
         orders = customer_orders.select_related(
-            "provider__user", "service__category", "arrival_photo", "review__customer"
-        ).prefetch_related("review__images")[:50]
+            "provider__user", "service__category", "arrival_photo", "review__customer",
+            "payment_order", "settlement",
+        ).prefetch_related("review__images", "refund_orders")[:50]
         return Response({"data": {"items": ProviderOrderSerializer(orders, many=True).data}})
 
     @transaction.atomic
@@ -116,6 +123,7 @@ class ProviderOrderListCreateView(APIView):
                 minutes=platform_operation_rules()["provider_order_payment_timeout_minutes"]
             ),
         )
+        create_provider_order_payment_order(order)
         register_provider_order_payment_expiry(order)
         return Response({"data": ProviderOrderSerializer(order).data}, status=201)
 
@@ -129,8 +137,9 @@ class ProviderOrderDetailView(APIView):
         )
         return get_object_or_404(
             ProviderOrder.objects.select_related(
-                "provider__user", "service__category", "arrival_photo", "review__customer"
-            ).prefetch_related("review__images"),
+                "provider__user", "service__category", "arrival_photo", "review__customer",
+                "payment_order", "settlement",
+            ).prefetch_related("review__images", "refund_orders"),
             order_no=order_no,
             customer=request.user,
         )
@@ -150,40 +159,47 @@ class ProviderOrderCancelView(ProviderOrderDetailView):
         order.status = ProviderOrder.Status.CANCELLED
         order.cancelled_at = timezone.now()
         order.save(update_fields=("status", "cancelled_at", "updated_at"))
+        payment = ProviderOrderPaymentOrder.objects.select_for_update().filter(order=order).first()
+        if payment and payment.status == ProviderOrderPaymentOrder.Status.PENDING_PAYMENT:
+            payment.status = ProviderOrderPaymentOrder.Status.CLOSED
+            payment.closed_at = order.cancelled_at
+            payment.save(update_fields=("status", "closed_at", "updated_at"))
         cancel_provider_order_payment_expiry(order_no, "customer_cancelled")
         return Response({"data": ProviderOrderSerializer(order).data})
 
 
 class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
-    @transaction.atomic
     def post(self, request, order_no):
         if not settings.DEBUG:
             raise ValidationError("模拟支付仅在本地环境开放。")
         order = get_object_or_404(
-            ProviderOrder.objects.select_for_update(), order_no=order_no, customer=request.user
+            ProviderOrder.objects.select_related("payment_order"),
+            order_no=order_no,
+            customer=request.user,
         )
+        if order.paid_at and order.status != ProviderOrder.Status.PENDING_PAYMENT:
+            return Response({"data": ProviderOrderSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_PAYMENT:
             raise ValidationError({"status": "订单不在待支付状态。"})
         if order.payment_expires_at <= timezone.now():
-            order.status = ProviderOrder.Status.CANCELLED
-            order.cancelled_at = timezone.now()
-            order.save(update_fields=("status", "cancelled_at", "updated_at"))
-            mark_provider_order_payment_expired(order_no, source="payment_guard")
+            apply_provider_order_payment_success(
+                order_no=order_no,
+                customer_id=request.user.pk,
+                channel=ProviderOrderPaymentOrder.Channel.MOCK_WECHAT,
+                gateway_trade_no=f"EXPIRED-{order_no}",
+            )
             return Response({"error": {"status": "支付已超时，档期已释放。"}}, status=409)
-        paid_at = timezone.now()
-        acceptance_timeout = operation_rules()["acceptance_timeout_minutes"]
-        order.status = ProviderOrder.Status.PENDING_ACCEPTANCE
-        order.paid_at = paid_at
-        order.acceptance_expires_at = paid_at + timedelta(minutes=acceptance_timeout)
-        order.save(update_fields=("status", "paid_at", "acceptance_expires_at", "updated_at"))
-
-        cancel_provider_order_payment_expiry(order_no, "payment_succeeded")
-        register_provider_acceptance_timeout(order)
-        create_order_notification(
-            order=order,
-            event_type=UserNotification.EventType.ORDER_PAYMENT_SUCCESS,
-            title="订单支付成功",
-            content="订单已进入待接单，达人会在接单时限内处理。",
+        payment, _ = create_provider_order_payment_order(order)
+        channel = ProviderOrderPaymentOrder.Channel.MOCK_WECHAT
+        result = get_provider_order_payment_gateway(channel).confirm_payment(
+            payment_no=payment.payment_no,
+            amount=payment.payable_amount,
+        )
+        order, _payment, _changed = apply_provider_order_payment_success(
+            order_no=order_no,
+            customer_id=request.user.pk,
+            channel=channel,
+            gateway_trade_no=result.gateway_trade_no,
         )
         return Response({"data": ProviderOrderSerializer(order).data})
 
@@ -198,7 +214,10 @@ class CurrentProviderOrderListView(APIView):
         orders = ProviderOrder.objects.filter(
             provider=provider,
             paid_at__isnull=False,
-        ).select_related("customer", "provider__user", "service__category", "arrival_photo")
+        ).select_related(
+            "customer", "provider__user", "service__category", "arrival_photo",
+            "payment_order", "settlement",
+        ).prefetch_related("refund_orders")
         if order_status := query.validated_data.get("status"):
             orders = orders.filter(status=order_status)
         return Response(
@@ -216,8 +235,9 @@ class CurrentProviderOrderDetailView(APIView):
             queryset = queryset.select_for_update(of=("self",))
         return get_object_or_404(
             queryset.select_related(
-                "customer", "provider__user", "service__category", "arrival_photo"
-            ),
+                "customer", "provider__user", "service__category", "arrival_photo",
+                "payment_order", "settlement",
+            ).prefetch_related("refund_orders"),
             provider=provider,
             paid_at__isnull=False,
             order_no=order_no,
@@ -441,7 +461,8 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
     def post(self, request, order_no):
         order = get_object_or_404(
             ProviderOrder.objects.select_related(
-                "provider__user", "service__category", "arrival_photo"
+                "provider__user", "service__category", "arrival_photo", "payment_order",
+                "settlement",
             ).select_for_update(of=("self",)),
             order_no=order_no,
             customer=request.user,
@@ -458,6 +479,11 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
         cancel_provider_order_confirmation_timeout(
             order.order_no, "customer_confirmed_completion"
         )
+        ensure_provider_order_settlement(order_no=order.order_no)
+        order = ProviderOrder.objects.select_related(
+            "provider__user", "service__category", "arrival_photo", "payment_order",
+            "settlement",
+        ).prefetch_related("review__images", "refund_orders").get(pk=order.pk)
         return Response({"data": ProviderOrderSerializer(order).data})
 
 

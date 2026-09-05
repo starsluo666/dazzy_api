@@ -37,6 +37,8 @@ from .views import (
     ProviderOrderAdminDetailView,
     ProviderOrderAdminListView,
     ProviderOrderEvidenceView,
+    ProviderOrderFinanceListView,
+    ProviderOrderRefundRetryView,
     ProviderOrderReviewActionView,
     ProviderOrderSupportNoteView,
     ProviderOrderingSettingView,
@@ -54,6 +56,16 @@ urlpatterns = [
     path("operation-settings/platform/", PlatformOperationSettingView.as_view(), name="backoffice-platform-operation-setting"),
     path("me/", AdminMeView.as_view(), name="backoffice-me"),
     path("overview/", AdminOverviewView.as_view(), name="backoffice-overview"),
+    path(
+        "provider-order-finance/",
+        ProviderOrderFinanceListView.as_view(),
+        name="backoffice-provider-order-finance",
+    ),
+    path(
+        "provider-order-refunds/<str:refund_no>/retry/",
+        ProviderOrderRefundRetryView.as_view(),
+        name="backoffice-provider-order-refund-retry",
+    ),
     path("activities/", AdminActivityListView.as_view(), name="backoffice-activities"),
     path(
         "activities/<int:activity_id>/",

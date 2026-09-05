@@ -26,7 +26,13 @@ from activities.services import process_activity_timeouts
 from locations.models import UserAddress
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
-from orders.models import ProviderOrder, ProviderOrderReview
+from orders.models import (
+    ProviderOrder,
+    ProviderOrderPaymentOrder,
+    ProviderOrderRefundOrder,
+    ProviderOrderReview,
+)
+from orders.services import create_provider_order_payment_order
 from providers.models import (
     ProviderLiveLocation,
     ProviderProfile,
@@ -84,6 +90,8 @@ class BackofficeProviderReviewTests(APITestCase):
                 "order.review.manage",
                 "order.after_sales.view",
                 "order.after_sales.review",
+                "order.finance.view",
+                "order.finance.manage",
                 "audit.view",
             ],
             data_scope=AdminRole.DataScope.CITY,
@@ -170,7 +178,7 @@ class BackofficeProviderReviewTests(APITestCase):
                 status=MediaAsset.Status.UPLOADED,
                 object_key=f"private/order-evidence/{order_no}.webp",
             )
-        return ProviderOrder.objects.create(
+        order = ProviderOrder.objects.create(
             order_no=order_no,
             customer=self.order_customer,
             provider=provider,
@@ -201,6 +209,17 @@ class BackofficeProviderReviewTests(APITestCase):
             completion_submitted_at=completion_submitted_at,
             confirmation_expires_at=completion_submitted_at + timedelta(days=3),
         )
+        payment, _ = create_provider_order_payment_order(order)
+        payment.status = ProviderOrderPaymentOrder.Status.PAID
+        payment.channel = ProviderOrderPaymentOrder.Channel.MOCK_WECHAT
+        payment.gateway_trade_no = f"MOCK-{order_no}"
+        payment.paid_at = order.paid_at
+        payment.save(
+            update_fields=(
+                "status", "channel", "gateway_trade_no", "paid_at", "updated_at",
+            )
+        )
+        return order
 
     def test_city_member_only_sees_scoped_applications(self):
         response = self.client.get(reverse("backoffice-provider-applications"))
@@ -653,12 +672,16 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(
             response.data["data"]["provider_order_payment_timeout_minutes"], 15
         )
+        self.assertEqual(
+            response.data["data"]["provider_order_settlement_freeze_days"], 1
+        )
 
         response = self.client.patch(
             detail_url,
             {
                 "provider_order_payment_timeout_minutes": 20,
                 "provider_order_confirmation_timeout_days": 5,
+                "provider_order_settlement_freeze_days": 2,
                 "activity_payment_timeout_minutes": 15,
                 "activity_minimum_advance_hours": 24,
                 "activity_maximum_advance_days": 45,
@@ -672,6 +695,7 @@ class BackofficeProviderReviewTests(APITestCase):
         setting = PlatformOperationSetting.current()
         self.assertEqual(setting.provider_order_payment_timeout_minutes, 20)
         self.assertEqual(setting.provider_order_confirmation_timeout_days, 5)
+        self.assertEqual(setting.provider_order_settlement_freeze_days, 2)
         self.assertEqual(setting.activity_payment_timeout_minutes, 15)
         self.assertEqual(setting.activity_minimum_advance_hours, 24)
         self.assertEqual(setting.activity_maximum_advance_days, 45)
@@ -924,8 +948,26 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(start.status_code, status.HTTP_200_OK)
         self.assertEqual(start.data["data"]["status"], ProviderOrderAfterSalesCase.Status.PROCESSING)
         self.assertEqual(approve.status_code, status.HTTP_200_OK)
-        self.assertEqual(approve.data["data"]["status"], ProviderOrderAfterSalesCase.Status.APPROVED)
+        self.assertEqual(approve.data["data"]["status"], ProviderOrderAfterSalesCase.Status.REFUNDED)
         self.assertEqual(approve.data["data"]["approved_amount"], 12800)
+        refund = ProviderOrderRefundOrder.objects.get(
+            idempotency_key=f"provider-after-sales:{case_no}"
+        )
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
+        self.assertEqual(refund.refund_amount, 12800)
+        self.assertEqual(refund.service_fee_refund_amount, 12800)
+        self.assertEqual(refund.transport_fee_refund_amount, 0)
+        self.assertTrue(refund.gateway_refund_no.startswith("MOCKREF"))
+        self.assertEqual(
+            approve.data["data"]["refund_order"]["refund_no"], refund.refund_no
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_CONFIRMATION)
+        order.payment_order.refresh_from_db()
+        self.assertEqual(
+            order.payment_order.status,
+            ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+        )
         self.assertTrue(
             AdminAuditLog.objects.filter(
                 action="order.after_sales.approve", target_id=case_no
@@ -941,8 +983,18 @@ class BackofficeProviderReviewTests(APITestCase):
             {
                 UserNotification.EventType.ORDER_AFTER_SALES_STARTED,
                 UserNotification.EventType.ORDER_AFTER_SALES_RESULT,
+                UserNotification.EventType.ORDER_REFUND_COMPLETED,
             },
         )
+
+        finance = self.client.get(
+            reverse("backoffice-provider-order-finance"),
+            {"record_type": "refund", "search": refund.refund_no},
+        )
+        self.assertEqual(finance.status_code, status.HTTP_200_OK)
+        self.assertEqual(finance.data["data"]["pagination"]["total"], 1)
+        self.assertEqual(finance.data["data"]["items"][0]["refund_no"], refund.refund_no)
+        self.assertEqual(finance.data["data"]["summary"]["refunded_amount"], 12800)
 
     def test_after_sales_reject_restores_original_order_status(self):
         order = self.create_fulfillment_order(
@@ -972,6 +1024,73 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(reject.data["data"]["status"], ProviderOrderAfterSalesCase.Status.REJECTED)
         order.refresh_from_db()
         self.assertEqual(order.status, ProviderOrder.Status.PENDING_REVIEW)
+
+    def test_failed_full_refund_can_be_retried_from_finance_center(self):
+        order = self.create_fulfillment_order(
+            order_no="ADMIN-AFTER-SALES-RETRY",
+            provider=self.handan,
+        )
+        created = self.client.post(
+            reverse("backoffice-provider-order-after-sales"),
+            {
+                "order_no": order.order_no,
+                "case_type": ProviderOrderAfterSalesCase.CaseType.REFUND,
+                "requested_amount": 16800,
+                "reason": "测试退款渠道失败后的重试闭环。",
+            },
+            format="json",
+        )
+        case_no = created.data["data"]["case_no"]
+
+        with patch(
+            "orders.payment_gateway.MockProviderOrderPaymentGateway.refund",
+            side_effect=RuntimeError("模拟支付渠道超时"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    reverse(
+                        "backoffice-provider-order-after-sales-action",
+                        args=(case_no,),
+                    ),
+                    {
+                        "action": "approve",
+                        "approved_amount": 16800,
+                        "result_note": "核查后同意订单全额退款。",
+                    },
+                    format="json",
+                )
+
+        case = ProviderOrderAfterSalesCase.objects.get(case_no=case_no)
+        refund = ProviderOrderRefundOrder.objects.get(
+            idempotency_key=f"provider-after-sales:{case_no}"
+        )
+        self.assertEqual(case.status, ProviderOrderAfterSalesCase.Status.APPROVED)
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.FAILED)
+        self.assertIn("支付渠道超时", refund.failure_reason)
+
+        retried = self.client.post(
+            reverse("backoffice-provider-order-refund-retry", args=(refund.refund_no,)),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(retried.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            retried.data["data"]["status"], ProviderOrderRefundOrder.Status.SUCCEEDED
+        )
+        case.refresh_from_db()
+        order.refresh_from_db()
+        order.payment_order.refresh_from_db()
+        self.assertEqual(case.status, ProviderOrderAfterSalesCase.Status.REFUNDED)
+        self.assertEqual(order.status, ProviderOrder.Status.REFUNDED)
+        self.assertEqual(
+            order.payment_order.status, ProviderOrderPaymentOrder.Status.REFUNDED
+        )
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                action="order.finance.refund.retry", target_id=refund.refund_no
+            ).exists()
+        )
 
     def test_after_sales_pauses_and_reopens_confirmation_timeout(self):
         order = self.create_fulfillment_order(

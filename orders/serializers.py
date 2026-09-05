@@ -9,7 +9,13 @@ from providers.models import ProviderProfile, ProviderService
 from providers.availability import ensure_booking_within_schedule
 from providers.presence import get_provider_live_location, operation_rules, provider_is_online
 
-from .models import ProviderOrder, ProviderOrderReview
+from .models import (
+    ProviderOrder,
+    ProviderOrderPaymentOrder,
+    ProviderOrderRefundOrder,
+    ProviderOrderReview,
+    ProviderOrderSettlement,
+)
 from .services import build_quote, validate_booking
 
 
@@ -125,6 +131,40 @@ class MyProviderOrderReviewSerializer(ProviderOrderReviewSerializer):
         )
 
 
+class ProviderOrderPaymentSummarySerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    channel_label = serializers.CharField(source="get_channel_display")
+
+    class Meta:
+        model = ProviderOrderPaymentOrder
+        fields = (
+            "payment_no", "channel", "channel_label", "status", "status_label",
+            "payable_amount", "paid_at", "closed_at",
+        )
+
+
+class ProviderOrderRefundSummarySerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = ProviderOrderRefundOrder
+        fields = (
+            "refund_no", "status", "status_label", "refund_amount", "reason",
+            "requested_at", "refunded_at",
+        )
+
+
+class ProviderOrderSettlementSummarySerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = ProviderOrderSettlement
+        fields = (
+            "settlement_no", "status", "status_label", "platform_commission_amount",
+            "provider_settlement_amount", "freeze_until", "settled_at",
+        )
+
+
 class ProviderOrderSerializer(serializers.ModelSerializer):
     provider_public_id = serializers.UUIDField(source="provider.user.public_id")
     provider_name = serializers.CharField(source="provider_name_snapshot")
@@ -135,6 +175,9 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     contact_phone_masked = serializers.SerializerMethodField()
     arrival_photo_url = serializers.SerializerMethodField()
     review = ProviderOrderReviewSerializer(read_only=True, allow_null=True)
+    payment_order = ProviderOrderPaymentSummarySerializer(read_only=True, allow_null=True)
+    refund_orders = ProviderOrderRefundSummarySerializer(many=True, read_only=True)
+    settlement = ProviderOrderSettlementSummarySerializer(read_only=True, allow_null=True)
 
     class Meta:
         model = ProviderOrder
@@ -150,7 +193,8 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "accepted_at", "provider_rejected_at", "provider_rejection_reason",
             "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
             "service_started_at", "completion_submitted_at", "confirmation_expires_at",
-            "customer_confirmed_at", "auto_confirmed_at", "review",
+            "customer_confirmed_at", "auto_confirmed_at", "review", "payment_order",
+            "refund_orders", "settlement",
         )
 
     def get_provider_avatar_url(self, obj):

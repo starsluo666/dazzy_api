@@ -4,6 +4,7 @@ from django.db import DatabaseError
 DEFAULT_PLATFORM_OPERATION_RULES = {
     "provider_order_payment_timeout_minutes": 15,
     "provider_order_confirmation_timeout_days": 3,
+    "provider_order_settlement_freeze_days": 1,
     "activity_payment_timeout_minutes": 30,
     "activity_minimum_advance_hours": 48,
     "activity_maximum_advance_days": 30,

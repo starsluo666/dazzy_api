@@ -55,6 +55,8 @@ class Command(BaseCommand):
                     "order.review.manage",
                     "order.after_sales.view",
                     "order.after_sales.review",
+                    "order.finance.view",
+                    "order.finance.manage",
                     "support.case.view",
                     "support.case.manage",
                     "organization.manage",

@@ -17,6 +17,7 @@ from .views import (
     CurrentProviderOnlineStartView,
     CurrentProviderOnlineStopView,
     CurrentProviderWorkbenchView,
+    CurrentProviderIncomeView,
 )
 
 urlpatterns = [
@@ -45,6 +46,7 @@ urlpatterns = [
     path(
         "providers/me/workbench/", CurrentProviderWorkbenchView.as_view(), name="provider-workbench"
     ),
+    path("providers/me/income/", CurrentProviderIncomeView.as_view(), name="provider-income"),
     path(
         "providers/me/online/start/",
         CurrentProviderOnlineStartView.as_view(),

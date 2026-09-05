@@ -26,7 +26,12 @@ from activities.models import (
 )
 from config.api import paginated_response
 from mediafiles.services import build_media_url
-from orders.models import ProviderOrder
+from orders.models import (
+    ProviderOrder,
+    ProviderOrderPaymentOrder,
+    ProviderOrderRefundOrder,
+    ProviderOrderSettlement,
+)
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 from providers.presence import online_provider_query
 from taskcenter.models import ScheduledTask
@@ -85,6 +90,10 @@ from .serializers import (
     ProviderOrderAfterSalesCaseCreateSerializer,
     ProviderOrderAfterSalesCaseQuerySerializer,
     ProviderOrderAfterSalesCaseSerializer,
+    ProviderOrderFinanceQuerySerializer,
+    ProviderOrderPaymentOrderSerializer,
+    ProviderOrderRefundOrderSerializer,
+    ProviderOrderSettlementSerializer,
     ProviderOrderAdminQuerySerializer,
     ProviderOrderAdminSerializer,
     ProviderOrderReviewActionSerializer,
@@ -281,6 +290,7 @@ def service_category_audit_snapshot(category):
         "city_codes": category.city_codes,
         "sort_order": category.sort_order,
         "is_active": category.is_active,
+        "platform_commission_rate": str(category.platform_commission_rate),
     }
 
 
@@ -442,6 +452,8 @@ def provider_order_queryset(access):
     return scoped_provider_orders(access).select_related(
         "customer", "provider__user", "service__category", "arrival_photo",
         "review__customer",
+        "payment_order",
+        "settlement",
     ).prefetch_related(
         "review__images",
         "support_notes__author",
@@ -449,6 +461,7 @@ def provider_order_queryset(access):
         "after_sales_cases__creator",
         "after_sales_cases__organization",
         "after_sales_cases__reviewed_by",
+        "refund_orders",
     )
 
 
@@ -463,7 +476,7 @@ def provider_order_after_sales_queryset(access):
         "creator",
         "organization",
         "reviewed_by",
-    )
+    ).prefetch_related("order__refund_orders__payment_order", "order__refund_orders__operator")
     if not access.all_data:
         queryset = queryset.filter(order__provider__service_city_code__in=access.city_codes)
     return queryset
@@ -1114,6 +1127,143 @@ class AdminActivityFinanceListView(APIView):
         }})
 
 
+class ProviderOrderFinanceListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("order.finance.view")
+        query = ProviderOrderFinanceQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+
+        payments = ProviderOrderPaymentOrder.objects.select_related(
+            "order__provider", "payer"
+        )
+        refunds = ProviderOrderRefundOrder.objects.select_related(
+            "order__provider", "payment_order", "beneficiary", "operator"
+        )
+        settlements = ProviderOrderSettlement.objects.select_related(
+            "order", "provider"
+        )
+        if not access.all_data:
+            payments = payments.filter(order__provider__service_city_code__in=access.city_codes)
+            refunds = refunds.filter(order__provider__service_city_code__in=access.city_codes)
+            settlements = settlements.filter(provider__service_city_code__in=access.city_codes)
+        if city_code := params.get("city_code", "").strip():
+            payments = payments.filter(order__provider__service_city_code=city_code)
+            refunds = refunds.filter(order__provider__service_city_code=city_code)
+            settlements = settlements.filter(provider__service_city_code=city_code)
+
+        summary = {
+            "paid_amount": payments.filter(
+                status__in=(
+                    ProviderOrderPaymentOrder.Status.PAID,
+                    ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+                    ProviderOrderPaymentOrder.Status.REFUNDED,
+                )
+            ).aggregate(total=Sum("payable_amount"))["total"] or 0,
+            "refunded_amount": refunds.filter(
+                status=ProviderOrderRefundOrder.Status.SUCCEEDED
+            ).aggregate(total=Sum("refund_amount"))["total"] or 0,
+            "pending_settlement_amount": settlements.filter(
+                status__in=(
+                    ProviderOrderSettlement.Status.RISK_FROZEN,
+                    ProviderOrderSettlement.Status.DISPUTE_FROZEN,
+                )
+            ).aggregate(total=Sum("provider_settlement_amount"))["total"] or 0,
+            "settled_amount": settlements.filter(
+                status=ProviderOrderSettlement.Status.SETTLED
+            ).aggregate(total=Sum("provider_settlement_amount"))["total"] or 0,
+            "exception_count": refunds.filter(
+                status=ProviderOrderRefundOrder.Status.FAILED
+            ).count(),
+        }
+
+        record_type = params["record_type"]
+        search = params.get("search", "").strip()
+        status_value = params.get("status", "").strip()
+        if record_type == "payment":
+            queryset = payments
+            serializer_class = ProviderOrderPaymentOrderSerializer
+            if search:
+                queryset = queryset.filter(
+                    Q(payment_no__icontains=search)
+                    | Q(order__order_no__icontains=search)
+                    | Q(payer__nickname__icontains=search)
+                    | Q(order__provider_name_snapshot__icontains=search)
+                )
+        elif record_type in ("refund", "exception"):
+            queryset = refunds
+            serializer_class = ProviderOrderRefundOrderSerializer
+            if record_type == "exception":
+                queryset = queryset.filter(status=ProviderOrderRefundOrder.Status.FAILED)
+            if search:
+                queryset = queryset.filter(
+                    Q(refund_no__icontains=search)
+                    | Q(order__order_no__icontains=search)
+                    | Q(beneficiary__nickname__icontains=search)
+                    | Q(order__provider_name_snapshot__icontains=search)
+                )
+        else:
+            queryset = settlements
+            serializer_class = ProviderOrderSettlementSerializer
+            if search:
+                queryset = queryset.filter(
+                    Q(settlement_no__icontains=search)
+                    | Q(order__order_no__icontains=search)
+                    | Q(order__provider_name_snapshot__icontains=search)
+                )
+        if status_value and record_type != "exception":
+            queryset = queryset.filter(status=status_value)
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset[(page - 1) * page_size : page * page_size]
+        return Response({"data": {
+            "items": serializer_class(items, many=True).data,
+            "pagination": {"page": page, "page_size": page_size, "total": total},
+            "summary": summary,
+        }})
+
+
+class ProviderOrderRefundRetryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, refund_no):
+        access = resolve_admin_access(request.user)
+        access.require("order.finance.manage")
+        queryset = ProviderOrderRefundOrder.objects.select_related("order__provider")
+        if not access.all_data:
+            queryset = queryset.filter(
+                order__provider__service_city_code__in=access.city_codes
+            )
+        refund = get_object_or_404(queryset, refund_no=refund_no)
+        if refund.status not in (
+            ProviderOrderRefundOrder.Status.PENDING,
+            ProviderOrderRefundOrder.Status.FAILED,
+        ):
+            raise ValidationError("当前退款单不需要重试。")
+        from orders.services import process_provider_order_refund
+
+        process_provider_order_refund(refund.refund_no)
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="order.finance.refund.retry",
+            target_type="provider_order_refund",
+            target_id=refund.refund_no,
+            before={"status": refund.status},
+            after={"status": ProviderOrderRefundOrder.Status.SUCCEEDED},
+            request_id=request.headers.get("X-Request-ID", ""),
+            ip_address=client_ip(request),
+        )
+        refund = ProviderOrderRefundOrder.objects.select_related(
+            "order__provider", "payment_order", "beneficiary", "operator"
+        ).get(pk=refund.pk)
+        return Response({"data": ProviderOrderRefundOrderSerializer(refund).data})
+
+
 class AdminActivityAfterSalesActionView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1690,6 +1840,9 @@ class ProviderOrderAfterSalesListView(APIView):
             "approved": summary_queryset.filter(
                 status=ProviderOrderAfterSalesCase.Status.APPROVED
             ).count(),
+            "refunded": summary_queryset.filter(
+                status=ProviderOrderAfterSalesCase.Status.REFUNDED
+            ).count(),
         }
         if case_status := params.get("status"):
             queryset = queryset.filter(status=case_status)
@@ -1755,6 +1908,14 @@ class ProviderOrderAfterSalesActionView(APIView):
             result_note=serializer.validated_data.get("result_note", ""),
             action=serializer.validated_data["action"],
         )
+        if serializer.validated_data["action"] in ("approve", "retry_refund"):
+            from orders.models import ProviderOrderRefundOrder
+            from orders.services import process_provider_order_refund
+
+            refund = ProviderOrderRefundOrder.objects.get(
+                idempotency_key=f"provider-after-sales:{case.case_no}"
+            )
+            process_provider_order_refund(refund.refund_no)
         case = get_object_or_404(provider_order_after_sales_queryset(access), pk=case.pk)
         return Response({"data": ProviderOrderAfterSalesCaseSerializer(case).data})
 

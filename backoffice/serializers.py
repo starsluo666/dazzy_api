@@ -17,7 +17,12 @@ from activities.models import (
 )
 from activities.serializers import ActivityParticipationRefundOrderSerializer
 from mediafiles.services import build_media_url
-from orders.models import ProviderOrder
+from orders.models import (
+    ProviderOrder,
+    ProviderOrderPaymentOrder,
+    ProviderOrderRefundOrder,
+    ProviderOrderSettlement,
+)
 from providers.models import ProviderProfile, ServiceCategory
 from providers.presence import (
     get_provider_live_location,
@@ -75,7 +80,7 @@ class AdminServiceCategorySerializer(serializers.ModelSerializer):
         model = ServiceCategory
         fields = (
             "id", "name", "slug", "icon_object_key", "icon_url", "city_codes",
-            "sort_order", "is_active", "service_count", "active_service_count",
+            "sort_order", "is_active", "platform_commission_rate", "service_count", "active_service_count",
             "provider_count", "created_at", "updated_at",
         )
         read_only_fields = ("id", "icon_url", "created_at", "updated_at")
@@ -1056,6 +1061,19 @@ class ProviderOrderAfterSalesCaseQuerySerializer(serializers.Serializer):
     page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
+class ProviderOrderFinanceQuerySerializer(serializers.Serializer):
+    record_type = serializers.ChoiceField(
+        required=False,
+        default="payment",
+        choices=("payment", "refund", "settlement", "exception"),
+    )
+    status = serializers.CharField(required=False, allow_blank=True, max_length=24)
+    city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    search = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
+
+
 class ProviderOrderAfterSalesCaseCreateSerializer(serializers.Serializer):
     order_no = serializers.CharField(max_length=32)
     case_type = serializers.ChoiceField(choices=ProviderOrderAfterSalesCase.CaseType.choices)
@@ -1064,7 +1082,9 @@ class ProviderOrderAfterSalesCaseCreateSerializer(serializers.Serializer):
 
 
 class ProviderOrderAfterSalesCaseActionSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=("start_review", "approve", "reject"))
+    action = serializers.ChoiceField(
+        choices=("start_review", "approve", "reject", "retry_refund")
+    )
     approved_amount = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     result_note = serializers.CharField(
         required=False, allow_blank=True, max_length=1000, trim_whitespace=True
@@ -1093,6 +1113,7 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
     reviewed_by_name = serializers.CharField(
         source="reviewed_by.nickname", allow_null=True
     )
+    refund_order = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrderAfterSalesCase
@@ -1103,6 +1124,84 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
             "service_city_code", "service_city_name", "requested_amount",
             "approved_amount", "reason", "result_note", "creator_name",
             "organization_name", "reviewed_by_name", "reviewed_at", "created_at",
+            "updated_at", "refund_order",
+        )
+
+    def get_refund_order(self, obj):
+        refund = next(
+            (
+                item
+                for item in obj.order.refund_orders.all()
+                if item.source_reference == obj.case_no
+            ),
+            None,
+        )
+        return ProviderOrderRefundOrderSerializer(refund).data if refund else None
+
+
+class ProviderOrderPaymentOrderSerializer(serializers.ModelSerializer):
+    payment_no = serializers.CharField()
+    order_no = serializers.CharField(source="order.order_no")
+    customer_name = serializers.CharField(source="payer.nickname")
+    provider_name = serializers.CharField(source="order.provider_name_snapshot")
+    service_name = serializers.CharField(source="order.service_name_snapshot")
+    city_code = serializers.CharField(source="order.provider.service_city_code")
+    city_name = serializers.CharField(source="order.provider.service_city_name")
+    channel_label = serializers.CharField(source="get_channel_display")
+    status_label = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = ProviderOrderPaymentOrder
+        fields = (
+            "payment_no", "order_no", "customer_name", "provider_name", "service_name",
+            "city_code", "city_name", "channel", "channel_label", "status", "status_label",
+            "service_fee_amount", "transport_fee_amount", "other_fee_amount",
+            "discount_amount", "payable_amount", "gateway_trade_no", "expires_at",
+            "paid_at", "closed_at", "created_at", "updated_at",
+        )
+
+
+class ProviderOrderRefundOrderSerializer(serializers.ModelSerializer):
+    order_no = serializers.CharField(source="order.order_no")
+    payment_no = serializers.CharField(source="payment_order.payment_no")
+    customer_name = serializers.CharField(source="beneficiary.nickname")
+    provider_name = serializers.CharField(source="order.provider_name_snapshot")
+    service_name = serializers.CharField(source="order.service_name_snapshot")
+    city_code = serializers.CharField(source="order.provider.service_city_code")
+    city_name = serializers.CharField(source="order.provider.service_city_name")
+    source_type_label = serializers.CharField(source="get_source_type_display")
+    status_label = serializers.CharField(source="get_status_display")
+    operator_name = serializers.CharField(source="operator.nickname", allow_null=True)
+
+    class Meta:
+        model = ProviderOrderRefundOrder
+        fields = (
+            "refund_no", "order_no", "payment_no", "customer_name", "provider_name",
+            "service_name", "city_code", "city_name", "source_type", "source_type_label",
+            "source_reference", "status", "status_label", "service_fee_refund_amount",
+            "transport_fee_refund_amount", "other_fee_refund_amount", "refund_amount",
+            "gateway_refund_no", "reason", "operator_name", "requested_at", "refunded_at",
+            "failure_reason", "created_at", "updated_at",
+        )
+
+
+class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
+    order_no = serializers.CharField(source="order.order_no")
+    provider_name = serializers.CharField(source="order.provider_name_snapshot")
+    service_name = serializers.CharField(source="order.service_name_snapshot")
+    city_code = serializers.CharField(source="provider.service_city_code")
+    city_name = serializers.CharField(source="provider.service_city_name")
+    status_label = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = ProviderOrderSettlement
+        fields = (
+            "settlement_no", "order_no", "provider_name", "service_name", "city_code",
+            "city_name", "status", "status_label", "paid_amount", "refunded_amount",
+            "net_service_fee_amount", "net_transport_fee_amount", "net_other_fee_amount",
+            "platform_commission_rate", "platform_commission_amount",
+            "provider_service_income_amount", "provider_settlement_amount", "frozen_at",
+            "freeze_until", "dispute_reason", "settled_at", "cancelled_at", "created_at",
             "updated_at",
         )
 
@@ -1415,6 +1514,11 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
     def validate_provider_order_confirmation_timeout_days(self, value):
         if not 1 <= value <= 15:
             raise serializers.ValidationError("用户确认时限必须在 1–15 天之间。")
+        return value
+
+    def validate_provider_order_settlement_freeze_days(self, value):
+        if not 0 <= value <= 30:
+            raise serializers.ValidationError("达人订单资金冻结期必须在 0–30 天之间。")
         return value
 
     def validate_activity_payment_timeout_minutes(self, value):

@@ -13,6 +13,16 @@ class ServiceCategory(models.Model):
     city_codes = models.JSONField("展示城市编码", default=list, blank=True)
     sort_order = models.PositiveIntegerField("排序", default=0)
     is_active = models.BooleanField("启用", default=True)
+    platform_commission_rate = models.DecimalField(
+        "平台抽成比例（%）",
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("20.00"),
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

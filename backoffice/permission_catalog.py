@@ -59,6 +59,8 @@ PERMISSION_GROUPS = (
             ("order.support_note.add", "添加客服跟进记录"),
             ("order.after_sales.view", "查看退款售后"),
             ("order.after_sales.review", "处理退款售后"),
+            ("order.finance.view", "查看达人订单账务"),
+            ("order.finance.manage", "处理达人订单异常账务"),
         ),
     },
     {

@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from mediafiles.models import MediaAsset
-from orders.models import ProviderOrder, ProviderOrderReview
+from orders.models import ProviderOrder, ProviderOrderReview, ProviderOrderSettlement
 
 from .models import (
     ProviderLiveLocation,
@@ -622,6 +622,79 @@ class ProviderSelfManagementTests(TestCase):
         self.assertEqual(data["upcoming_order"]["customer_name"], "张")
         self.assertEqual(data["upcoming_order"]["customer_gender_label"], "女士")
         self.assertEqual(data["upcoming_order"]["meeting_location_name"], "邯郸美乐城")
+
+    def test_income_returns_real_settlement_ledger(self):
+        provider = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+        customer = User.objects.create_user(
+            phone="13800000023", password="test-password", nickname="收入订单用户"
+        )
+        category = ServiceCategory.objects.create(
+            name="收入测试服务", slug="provider-income-ledger"
+        )
+        service = ProviderService.objects.create(
+            provider=provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=16800,
+        )
+        now = timezone.now()
+        order = ProviderOrder.objects.create(
+            order_no="INCOME202609050001",
+            customer=customer,
+            provider=provider,
+            service=service,
+            provider_name_snapshot=self.user.nickname,
+            service_name_snapshot=category.name,
+            billing_type_snapshot=ProviderOrder.BillingType.HOURLY,
+            unit_price_amount=16800,
+            starts_at=now - timedelta(days=2, hours=2),
+            ends_at=now - timedelta(days=2),
+            duration_minutes=120,
+            meeting_location_name="邯郸美乐城",
+            meeting_address="人民东路456号",
+            contact_name="张三",
+            contact_gender=ProviderOrder.ContactGender.MR,
+            contact_phone="13812346688",
+            service_fee_amount=33600,
+            payable_amount=33600,
+            status=ProviderOrder.Status.COMPLETED,
+            payment_expires_at=now - timedelta(days=3),
+            paid_at=now - timedelta(days=3),
+            customer_confirmed_at=now - timedelta(days=1),
+        )
+        settlement = ProviderOrderSettlement.objects.create(
+            order=order,
+            provider=provider,
+            paid_amount=33600,
+            refunded_amount=0,
+            net_service_fee_amount=33600,
+            net_transport_fee_amount=0,
+            net_other_fee_amount=0,
+            platform_commission_rate=Decimal("20.00"),
+            platform_commission_amount=6720,
+            provider_service_income_amount=26880,
+            provider_settlement_amount=26880,
+            status=ProviderOrderSettlement.Status.SETTLED,
+            frozen_at=now - timedelta(days=1),
+            freeze_until=now,
+            settled_at=now,
+        )
+
+        response = self.client.get("/api/v1/providers/me/income/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["summary"]["month_income_amount"], 26880)
+        self.assertEqual(data["summary"]["pending_amount"], 0)
+        self.assertEqual(data["summary"]["settled_amount"], 26880)
+        self.assertEqual(data["summary"]["month_order_count"], 1)
+        self.assertEqual(data["items"][0]["settlement_no"], settlement.settlement_no)
+        self.assertEqual(data["items"][0]["settlement_amount"], 26880)
 
     def test_provider_needs_active_service_and_accurate_first_location_to_start(self):
         ProviderProfile.objects.create(

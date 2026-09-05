@@ -7,7 +7,12 @@ from django.utils import timezone
 from accounts.models import User
 from backoffice.models import AdminAuditLog
 from notifications.models import UserNotification
-from orders.models import ProviderOrder
+from orders.models import (
+    ProviderOrder,
+    ProviderOrderPaymentOrder,
+    ProviderOrderSettlement,
+)
+from orders.services import create_provider_order_payment_order
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 
 from .models import ScheduledTask
@@ -45,8 +50,13 @@ class TaskCenterTests(TestCase):
         self, *, order_no, status, payment_deadline, acceptance_deadline=None,
         completion_submitted_at=None, confirmation_deadline=None,
     ):
-        starts_at = timezone.now() + timedelta(days=1)
-        return ProviderOrder.objects.create(
+        now = timezone.now()
+        starts_at = now + timedelta(days=1)
+        is_paid = status not in (
+            ProviderOrder.Status.PENDING_PAYMENT,
+            ProviderOrder.Status.CANCELLED,
+        )
+        order = ProviderOrder.objects.create(
             order_no=order_no,
             customer=self.customer,
             provider=self.provider,
@@ -68,13 +78,23 @@ class TaskCenterTests(TestCase):
             pricing_snapshot={"version": "test"},
             status=status,
             payment_expires_at=payment_deadline,
-            paid_at=(timezone.now() - timedelta(minutes=40))
-            if status == ProviderOrder.Status.PENDING_ACCEPTANCE
-            else None,
+            paid_at=now - timedelta(minutes=40) if is_paid else None,
             acceptance_expires_at=acceptance_deadline,
             completion_submitted_at=completion_submitted_at,
             confirmation_expires_at=confirmation_deadline,
         )
+        payment, _ = create_provider_order_payment_order(order)
+        if is_paid:
+            payment.status = ProviderOrderPaymentOrder.Status.PAID
+            payment.channel = ProviderOrderPaymentOrder.Channel.MOCK_WECHAT
+            payment.gateway_trade_no = f"MOCK-{order_no}"
+            payment.paid_at = order.paid_at
+            payment.save(
+                update_fields=(
+                    "status", "channel", "gateway_trade_no", "paid_at", "updated_at",
+                )
+            )
+        return order
 
     def test_payment_expiry_task_closes_order_and_is_idempotent(self):
         now = timezone.now()
@@ -92,6 +112,10 @@ class TaskCenterTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(result["succeeded"], 1)
         self.assertEqual(order.status, ProviderOrder.Status.CANCELLED)
+        order.payment_order.refresh_from_db()
+        self.assertEqual(
+            order.payment_order.status, ProviderOrderPaymentOrder.Status.CLOSED
+        )
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "cancelled")
         self.assertEqual(process_due_tasks(now=now)["claimed"], 0)
@@ -151,6 +175,16 @@ class TaskCenterTests(TestCase):
         self.assertEqual(order.status, ProviderOrder.Status.PENDING_REVIEW)
         self.assertEqual(order.auto_confirmed_at, now)
         self.assertIsNone(order.customer_confirmed_at)
+        settlement = ProviderOrderSettlement.objects.get(order=order)
+        self.assertEqual(settlement.status, ProviderOrderSettlement.Status.RISK_FROZEN)
+        self.assertEqual(settlement.platform_commission_amount, 4000)
+        self.assertEqual(settlement.provider_settlement_amount, 16000)
+        settlement_task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+            business_key=order.order_no,
+        )
+        self.assertEqual(settlement_task.status, ScheduledTask.Status.PENDING)
+        self.assertEqual(settlement_task.available_at, settlement.freeze_until)
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "auto_confirmed")
         self.assertEqual(
@@ -158,6 +192,23 @@ class TaskCenterTests(TestCase):
                 recipient=self.customer,
                 event_type=UserNotification.EventType.ORDER_AUTO_CONFIRMED,
                 target_id=order.order_no,
+            ).count(),
+            1,
+        )
+
+        settlement_result = process_due_tasks(now=settlement.freeze_until)
+        settlement.refresh_from_db()
+        settlement_task.refresh_from_db()
+        self.assertEqual(settlement_result["succeeded"], 1)
+        self.assertEqual(settlement.status, ProviderOrderSettlement.Status.SETTLED)
+        self.assertEqual(settlement.settled_at, settlement.freeze_until)
+        self.assertEqual(settlement_task.status, ScheduledTask.Status.SUCCEEDED)
+        self.assertEqual(settlement_task.result["state"], "settled")
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.provider.user,
+                event_type=UserNotification.EventType.PROVIDER_ORDER_SETTLED,
+                target_id=settlement.settlement_no,
             ).count(),
             1,
         )

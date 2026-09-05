@@ -159,6 +159,7 @@ class PlatformOperationSetting(models.Model):
     singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
+    provider_order_settlement_freeze_days = models.PositiveSmallIntegerField(default=1)
     activity_payment_timeout_minutes = models.PositiveSmallIntegerField(default=30)
     activity_minimum_advance_hours = models.PositiveSmallIntegerField(default=48)
     activity_maximum_advance_days = models.PositiveSmallIntegerField(default=30)
@@ -218,6 +219,7 @@ class ProviderOrderAfterSalesCase(models.Model):
         PENDING = "pending", "待处理"
         PROCESSING = "processing", "处理中"
         APPROVED = "approved", "已同意·待退款"
+        REFUNDED = "refunded", "退款成功"
         REJECTED = "rejected", "已驳回"
 
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)

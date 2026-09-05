@@ -4,6 +4,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import F, OuterRef, Q, Subquery
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 
 from .models import ScheduledTask
 
@@ -86,6 +87,19 @@ def register_provider_order_confirmation_timeout(order):
     )
 
 
+def register_provider_order_settlement(settlement):
+    return _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+        business_type="provider_order",
+        business_key=settlement.order.order_no,
+        scheduled_at=settlement.freeze_until,
+        payload={
+            "order_no": settlement.order.order_no,
+            "settlement_no": settlement.settlement_no,
+        },
+    )
+
+
 def cancel_business_task(*, task_type, business_type, business_key, reason):
     now = timezone.now()
     return ScheduledTask.objects.filter(
@@ -124,6 +138,53 @@ def cancel_provider_order_confirmation_timeout(order_no: str, reason: str):
         business_key=order_no,
         reason=reason,
     )
+
+
+def cancel_provider_order_settlement(order_no: str, reason: str):
+    return cancel_business_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+        business_type="provider_order",
+        business_key=order_no,
+        reason=reason,
+    )
+
+
+def reopen_provider_order_settlement(settlement):
+    scheduled_at = max(settlement.freeze_until, timezone.now())
+    dedupe_key = task_dedupe_key(
+        ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+        "provider_order",
+        settlement.order.order_no,
+    )
+    task = ScheduledTask.objects.select_for_update().filter(dedupe_key=dedupe_key).first()
+    if task is None:
+        return register_provider_order_settlement(settlement)
+    if task.status == ScheduledTask.Status.PENDING:
+        return _register_task(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+            business_type="provider_order",
+            business_key=settlement.order.order_no,
+            scheduled_at=scheduled_at,
+            payload={
+                "order_no": settlement.order.order_no,
+                "settlement_no": settlement.settlement_no,
+            },
+        )
+    if task.status != ScheduledTask.Status.CANCELLED:
+        return task, False
+    task.status = ScheduledTask.Status.PENDING
+    task.scheduled_at = scheduled_at
+    task.available_at = scheduled_at
+    task.attempt_count = 0
+    task.started_at = None
+    task.finished_at = None
+    task.last_error = ""
+    task.result = {}
+    task.save(update_fields=(
+        "status", "scheduled_at", "available_at", "attempt_count", "started_at",
+        "finished_at", "last_error", "result", "updated_at",
+    ))
+    return task, False
 
 
 def reopen_provider_order_confirmation_timeout(order):
@@ -221,12 +282,16 @@ def _requiring_task_synchronization(queryset, *, task_type, deadline_field):
 def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     from backoffice.operation_settings import platform_operation_rules
     from orders.models import ProviderOrder
+    from orders.models import ProviderOrderSettlement
+    from orders.services import ensure_provider_order_settlement
     from providers.presence import operation_rules
 
     batch_size = max(1, min(int(batch_size), 5000))
     payment_created = 0
     acceptance_created = 0
     confirmation_created = 0
+    settlement_created = 0
+    settlement_task_created = 0
     payment_orders = (
         _requiring_task_synchronization(
             ProviderOrder.objects.filter(status=ProviderOrder.Status.PENDING_PAYMENT),
@@ -281,10 +346,37 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
             order.save(update_fields=("confirmation_expires_at", "updated_at"))
         _, created = register_provider_order_confirmation_timeout(order)
         confirmation_created += int(created)
+
+    confirmed_without_settlement = ProviderOrder.objects.filter(
+        Q(customer_confirmed_at__isnull=False) | Q(auto_confirmed_at__isnull=False),
+        settlement__isnull=True,
+    ).only("order_no").order_by("id")[:batch_size]
+    for order in confirmed_without_settlement:
+        try:
+            _, created = ensure_provider_order_settlement(order_no=order.order_no)
+            settlement_created += int(created)
+        except ValidationError:
+            continue
+
+    settlement_task_query = ProviderOrderSettlement.objects.filter(
+        status=ProviderOrderSettlement.Status.RISK_FROZEN,
+    ).select_related("order").order_by("id")[:batch_size]
+    for settlement in settlement_task_query:
+        task_exists = ScheduledTask.objects.filter(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+            business_type="provider_order",
+            business_key=settlement.order.order_no,
+            status__in=(ScheduledTask.Status.PENDING, ScheduledTask.Status.RUNNING),
+        ).exists()
+        if not task_exists:
+            reopen_provider_order_settlement(settlement)
+            settlement_task_created += 1
     return {
         "payment_created": payment_created,
         "acceptance_created": acceptance_created,
         "confirmation_created": confirmation_created,
+        "settlement_created": settlement_created,
+        "settlement_task_created": settlement_task_created,
     }
 
 
@@ -345,12 +437,35 @@ def _execute_provider_order_confirmation_timeout(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _execute_provider_order_settlement(task, now):
+    from orders.services import advance_provider_order_settlement
+
+    outcome = advance_provider_order_settlement(order_no=task.business_key, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "dispute_frozen":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result=outcome,
+            available_at=now + timedelta(minutes=5),
+        )
+    if outcome["state"] in ("settled", "cancelled"):
+        return TaskExecutionOutcome(status=ScheduledTask.Status.SUCCEEDED, result=outcome)
+    return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
+
+
 TASK_HANDLERS = {
     ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY: (_execute_provider_order_payment_expiry),
     ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT: (_execute_provider_acceptance_timeout),
     ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT: (
         _execute_provider_order_confirmation_timeout
     ),
+    ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT: _execute_provider_order_settlement,
 }
 
 

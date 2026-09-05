@@ -23,7 +23,11 @@ from locations.tencent import RouteResult
 from locations.models import UserAddress
 from taskcenter.models import ScheduledTask
 
-from .models import ProviderOrder
+from .models import (
+    ProviderOrder,
+    ProviderOrderPaymentOrder,
+    ProviderOrderSettlement,
+)
 
 
 @override_settings(DEBUG=True)
@@ -142,6 +146,11 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(create.json()["data"]["status"], ProviderOrder.Status.PENDING_PAYMENT)
         self.assertEqual(create.json()["data"]["meeting_location_name"], "邯郸美乐城")
         self.assertEqual(create.json()["data"]["contact_gender_label"], "先生")
+        payment = ProviderOrderPaymentOrder.objects.get(order__order_no=order_no)
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PENDING_PAYMENT)
+        self.assertEqual(payment.service_fee_amount, 35600)
+        self.assertEqual(payment.transport_fee_amount, 1000)
+        self.assertEqual(payment.payable_amount, 36600)
         self.assertTrue(
             ScheduledTask.objects.filter(
                 task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY,
@@ -159,6 +168,17 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(paid.status_code, 200)
         self.assertEqual(paid.json()["data"]["status"], ProviderOrder.Status.PENDING_ACCEPTANCE)
         self.assertIsNotNone(paid.json()["data"]["acceptance_expires_at"])
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PAID)
+        self.assertEqual(payment.channel, ProviderOrderPaymentOrder.Channel.MOCK_WECHAT)
+        self.assertTrue(payment.gateway_trade_no.startswith("MOCKPAY"))
+        original_gateway_trade_no = payment.gateway_trade_no
+        repeated_payment = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/simulate-payment/"
+        )
+        self.assertEqual(repeated_payment.status_code, 200)
+        payment.refresh_from_db()
+        self.assertEqual(payment.gateway_trade_no, original_gateway_trade_no)
         self.assertEqual(
             ScheduledTask.objects.get(
                 task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY,
@@ -189,7 +209,7 @@ class ProviderOrderApiTests(TestCase):
         order_no = created.json()["data"]["order_no"]
 
         with patch(
-            "orders.views.register_provider_acceptance_timeout",
+            "taskcenter.services.register_provider_acceptance_timeout",
             side_effect=RuntimeError("task registration failed"),
         ):
             with self.assertRaises(RuntimeError):
@@ -202,6 +222,9 @@ class ProviderOrderApiTests(TestCase):
         )
         self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
         self.assertIsNone(order.paid_at)
+        payment = ProviderOrderPaymentOrder.objects.get(order=order)
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PENDING_PAYMENT)
+        self.assertEqual(payment.gateway_trade_no, "")
         self.assertEqual(payment_task.status, ScheduledTask.Status.PENDING)
         self.assertFalse(
             ScheduledTask.objects.filter(
@@ -516,12 +539,33 @@ class ProviderOrderApiTests(TestCase):
         )
 
         self.client.force_login(self.customer)
+        category = self.service.category
+        category.platform_commission_rate = Decimal("30.00")
+        category.save(update_fields=("platform_commission_rate", "updated_at"))
         confirmed = self.client.post(
             f"/api/v1/provider-orders/{order.order_no}/confirm-completion/"
         )
         self.assertEqual(confirmed.status_code, 200)
         self.assertEqual(confirmed.json()["data"]["status"], ProviderOrder.Status.PENDING_REVIEW)
         self.assertIsNotNone(confirmed.json()["data"]["customer_confirmed_at"])
+        settlement = ProviderOrderSettlement.objects.get(order=order)
+        self.assertEqual(settlement.status, ProviderOrderSettlement.Status.RISK_FROZEN)
+        self.assertEqual(settlement.paid_amount, 36600)
+        self.assertEqual(settlement.platform_commission_rate, Decimal("20.00"))
+        self.assertEqual(settlement.platform_commission_amount, 7120)
+        self.assertEqual(settlement.provider_service_income_amount, 28480)
+        self.assertEqual(settlement.provider_settlement_amount, 29480)
+        self.assertEqual(
+            confirmed.json()["data"]["settlement"]["settlement_no"],
+            settlement.settlement_no,
+        )
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
+                business_key=order.order_no,
+                status=ScheduledTask.Status.PENDING,
+            ).exists()
+        )
         confirmation_task.refresh_from_db()
         self.assertEqual(confirmation_task.status, ScheduledTask.Status.CANCELLED)
 

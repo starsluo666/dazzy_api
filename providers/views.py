@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 from mediafiles.services import build_media_url
-from orders.models import ProviderOrder, ProviderOrderReview
+from orders.models import ProviderOrder, ProviderOrderReview, ProviderOrderSettlement
 
 from .selectors import public_providers
 from .availability import _blocking_orders, _local_datetime, build_availability
@@ -417,6 +417,53 @@ class CurrentProviderWorkbenchView(APIView):
             }
         )
 
+
+class CurrentProviderIncomeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        provider = current_approved_provider(request)
+        today = timezone.localdate()
+        month_start = _local_datetime(today.replace(day=1), time.min)
+        settlements = ProviderOrderSettlement.objects.filter(
+            provider=provider
+        ).select_related("order")
+        month_settlements = settlements.filter(
+            frozen_at__gte=month_start,
+        ).exclude(status=ProviderOrderSettlement.Status.CANCELLED)
+        summary = {
+            "month_income_amount": month_settlements.aggregate(
+                total=Sum("provider_settlement_amount")
+            )["total"] or 0,
+            "pending_amount": settlements.filter(
+                status__in=(
+                    ProviderOrderSettlement.Status.RISK_FROZEN,
+                    ProviderOrderSettlement.Status.DISPUTE_FROZEN,
+                )
+            ).aggregate(total=Sum("provider_settlement_amount"))["total"] or 0,
+            "settled_amount": settlements.filter(
+                status=ProviderOrderSettlement.Status.SETTLED
+            ).aggregate(total=Sum("provider_settlement_amount"))["total"] or 0,
+            "month_order_count": month_settlements.count(),
+        }
+        items = [
+            {
+                "settlement_no": item.settlement_no,
+                "order_no": item.order.order_no,
+                "service_name": item.order.service_name_snapshot,
+                "status": item.status,
+                "status_label": item.get_status_display(),
+                "service_income_amount": item.provider_service_income_amount,
+                "transport_income_amount": item.net_transport_fee_amount,
+                "other_income_amount": item.net_other_fee_amount,
+                "settlement_amount": item.provider_settlement_amount,
+                "freeze_until": item.freeze_until,
+                "settled_at": item.settled_at,
+                "created_at": item.created_at,
+            }
+            for item in settlements[:100]
+        ]
+        return Response({"data": {"summary": summary, "items": items}})
 
 
 def _online_payload(provider, location=None):

@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.gis.db import models
@@ -141,6 +142,318 @@ class ProviderOrder(models.Model):
     def __str__(self):
         return self.order_no
 
+
+def generate_provider_payment_no():
+    return f"POP{uuid.uuid4().hex[:20].upper()}"
+
+
+class ProviderOrderPaymentOrder(models.Model):
+    class Channel(models.TextChoices):
+        UNSELECTED = "unselected", "待选择"
+        MOCK_WECHAT = "mock_wechat", "模拟微信支付"
+        MOCK_ALIPAY = "mock_alipay", "模拟支付宝"
+        WECHAT = "wechat", "微信支付"
+        ALIPAY = "alipay", "支付宝"
+
+    class Status(models.TextChoices):
+        PENDING_PAYMENT = "pending_payment", "待支付"
+        PAID = "paid", "已支付"
+        CLOSED = "closed", "已关闭"
+        PARTIALLY_REFUNDED = "partially_refunded", "部分退款"
+        REFUNDED = "refunded", "已退款"
+
+    payment_no = models.CharField(
+        "支付单号",
+        max_length=24,
+        unique=True,
+        default=generate_provider_payment_no,
+        editable=False,
+    )
+    order = models.OneToOneField(
+        ProviderOrder,
+        on_delete=models.PROTECT,
+        related_name="payment_order",
+        verbose_name="达人订单",
+    )
+    payer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="provider_order_payment_orders",
+        verbose_name="付款人",
+    )
+    service_fee_amount = models.PositiveBigIntegerField("服务费（分）")
+    transport_fee_amount = models.PositiveBigIntegerField("交通费（分）")
+    other_fee_amount = models.PositiveBigIntegerField("其他费用（分）")
+    discount_amount = models.PositiveBigIntegerField("优惠金额（分）")
+    payable_amount = models.PositiveBigIntegerField("应付金额（分）")
+    pricing_snapshot = models.JSONField("计价规则快照", default=dict)
+    channel = models.CharField(
+        "支付渠道",
+        max_length=20,
+        choices=Channel,
+        default=Channel.UNSELECTED,
+    )
+    status = models.CharField(
+        "支付状态",
+        max_length=24,
+        choices=Status,
+        default=Status.PENDING_PAYMENT,
+    )
+    gateway_trade_no = models.CharField("渠道交易号", max_length=64, blank=True)
+    expires_at = models.DateTimeField("支付失效时间")
+    paid_at = models.DateTimeField("支付时间", null=True, blank=True)
+    closed_at = models.DateTimeField("关闭时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_order_payment_order"
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("payer", "status", "-created_at"),
+                name="provider_pay_payer_status_idx",
+            ),
+            models.Index(
+                fields=("status", "expires_at"),
+                name="provider_pay_status_exp_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(
+                    payable_amount=(
+                        models.F("service_fee_amount")
+                        + models.F("transport_fee_amount")
+                        + models.F("other_fee_amount")
+                        - models.F("discount_amount")
+                    )
+                ),
+                name="provider_payment_amount_matches",
+            ),
+            models.UniqueConstraint(
+                fields=("gateway_trade_no",),
+                condition=~Q(gateway_trade_no=""),
+                name="uniq_provider_gateway_trade_no",
+            ),
+        ]
+        verbose_name = "达人订单支付单"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"{self.payment_no} / {self.order.order_no}"
+
+
+def generate_provider_refund_no():
+    return f"POR{uuid.uuid4().hex[:20].upper()}"
+
+
+class ProviderOrderRefundOrder(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "待退款"
+        PROCESSING = "processing", "退款处理中"
+        SUCCEEDED = "succeeded", "退款成功"
+        FAILED = "failed", "退款失败"
+
+    class SourceType(models.TextChoices):
+        AFTER_SALES = "after_sales", "退款售后"
+        ADMIN = "admin", "后台退款"
+        SYSTEM = "system", "系统退款"
+
+    refund_no = models.CharField(
+        "退款单号",
+        max_length=24,
+        unique=True,
+        default=generate_provider_refund_no,
+        editable=False,
+    )
+    idempotency_key = models.CharField("幂等键", max_length=120, unique=True)
+    order = models.ForeignKey(
+        ProviderOrder,
+        on_delete=models.PROTECT,
+        related_name="refund_orders",
+        verbose_name="达人订单",
+    )
+    payment_order = models.ForeignKey(
+        ProviderOrderPaymentOrder,
+        on_delete=models.PROTECT,
+        related_name="refund_orders",
+        verbose_name="原支付单",
+    )
+    beneficiary = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="provider_order_refund_orders",
+        verbose_name="退款用户",
+    )
+    source_type = models.CharField("退款来源", max_length=20, choices=SourceType)
+    source_reference = models.CharField("来源单号", max_length=64)
+    service_fee_refund_amount = models.PositiveBigIntegerField("服务费退款（分）")
+    transport_fee_refund_amount = models.PositiveBigIntegerField("交通费退款（分）")
+    other_fee_refund_amount = models.PositiveBigIntegerField("其他费用退款（分）")
+    refund_amount = models.PositiveBigIntegerField("退款总额（分）")
+    allocation_snapshot = models.JSONField("退款分配快照", default=dict)
+    status = models.CharField(
+        "退款状态", max_length=20, choices=Status, default=Status.PENDING
+    )
+    gateway_refund_no = models.CharField("渠道退款号", max_length=64, blank=True)
+    reason = models.CharField("退款原因", max_length=1000)
+    operator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="operated_provider_order_refunds",
+        null=True,
+        blank=True,
+        verbose_name="操作人",
+    )
+    requested_at = models.DateTimeField("申请时间", auto_now_add=True)
+    refunded_at = models.DateTimeField("退款完成时间", null=True, blank=True)
+    failure_reason = models.CharField("失败原因", max_length=1000, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_order_refund_order"
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("order", "status", "-created_at"),
+                name="provider_ref_order_status_idx",
+            ),
+            models.Index(
+                fields=("status", "requested_at"),
+                name="provider_ref_status_req_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(
+                    refund_amount=(
+                        models.F("service_fee_refund_amount")
+                        + models.F("transport_fee_refund_amount")
+                        + models.F("other_fee_refund_amount")
+                    )
+                ),
+                name="provider_refund_amount_matches",
+            ),
+            models.CheckConstraint(
+                condition=Q(refund_amount__gt=0),
+                name="provider_refund_amount_positive",
+            ),
+            models.UniqueConstraint(
+                fields=("gateway_refund_no",),
+                condition=~Q(gateway_refund_no=""),
+                name="uniq_provider_gateway_refund_no",
+            ),
+        ]
+        verbose_name = "达人订单退款单"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"{self.refund_no} / {self.order.order_no}"
+
+
+def generate_provider_settlement_no():
+    return f"POS{uuid.uuid4().hex[:20].upper()}"
+
+
+class ProviderOrderSettlement(models.Model):
+    class Status(models.TextChoices):
+        RISK_FROZEN = "risk_frozen", "风险冻结中"
+        DISPUTE_FROZEN = "dispute_frozen", "争议冻结中"
+        SETTLED = "settled", "已结算入账"
+        CANCELLED = "cancelled", "已取消"
+
+    settlement_no = models.CharField(
+        "结算单号",
+        max_length=24,
+        unique=True,
+        default=generate_provider_settlement_no,
+        editable=False,
+    )
+    order = models.OneToOneField(
+        ProviderOrder,
+        on_delete=models.PROTECT,
+        related_name="settlement",
+        verbose_name="达人订单",
+    )
+    provider = models.ForeignKey(
+        ProviderProfile,
+        on_delete=models.PROTECT,
+        related_name="order_settlements",
+        verbose_name="结算达人",
+    )
+    paid_amount = models.PositiveBigIntegerField("实付金额（分）")
+    refunded_amount = models.PositiveBigIntegerField("已退款金额（分）", default=0)
+    net_service_fee_amount = models.PositiveBigIntegerField("净服务费（分）")
+    net_transport_fee_amount = models.PositiveBigIntegerField("净交通费（分）")
+    net_other_fee_amount = models.PositiveBigIntegerField("净其他费用（分）")
+    platform_commission_rate = models.DecimalField(
+        "平台抽成比例（%）", max_digits=5, decimal_places=2, default=Decimal("20.00")
+    )
+    platform_commission_amount = models.PositiveBigIntegerField("平台抽成（分）")
+    provider_service_income_amount = models.PositiveBigIntegerField("达人服务收入（分）")
+    provider_settlement_amount = models.PositiveBigIntegerField("达人结算金额（分）")
+    status = models.CharField(
+        "结算状态", max_length=24, choices=Status, default=Status.RISK_FROZEN
+    )
+    frozen_at = models.DateTimeField("冻结开始时间")
+    freeze_until = models.DateTimeField("冻结截止时间")
+    dispute_reason = models.CharField("争议冻结原因", max_length=1000, blank=True)
+    calculation_snapshot = models.JSONField("结算计算快照", default=dict)
+    settled_at = models.DateTimeField("结算入账时间", null=True, blank=True)
+    cancelled_at = models.DateTimeField("取消时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_order_settlement"
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("status", "freeze_until"),
+                name="provider_set_status_freeze_idx",
+            ),
+            models.Index(
+                fields=("provider", "status", "-created_at"),
+                name="provider_set_owner_status_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(refunded_amount__lte=models.F("paid_amount")),
+                name="provider_set_refunded_lte_paid",
+            ),
+            models.CheckConstraint(
+                condition=Q(
+                    provider_settlement_amount=(
+                        models.F("provider_service_income_amount")
+                        + models.F("net_transport_fee_amount")
+                        + models.F("net_other_fee_amount")
+                    )
+                ),
+                name="provider_settlement_amount_matches",
+            ),
+            models.CheckConstraint(
+                condition=Q(
+                    paid_amount=(
+                        models.F("refunded_amount")
+                        + models.F("platform_commission_amount")
+                        + models.F("provider_settlement_amount")
+                    )
+                ),
+                name="provider_settlement_balance_matches",
+            ),
+            models.CheckConstraint(
+                condition=Q(freeze_until__gte=models.F("frozen_at")),
+                name="provider_settlement_freeze_valid",
+            ),
+        ]
+        verbose_name = "达人订单结算单"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"{self.settlement_no} / {self.order.order_no}"
 
 class ProviderOrderReview(models.Model):
     order = models.OneToOneField(
