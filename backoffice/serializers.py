@@ -1362,6 +1362,7 @@ class AdminRoleMutationSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         organization = attrs.get("organization") or getattr(self.instance, "organization", None)
         data_scope = attrs.get("data_scope") or getattr(self.instance, "data_scope", None)
+        permissions = attrs.get("permissions", getattr(self.instance, "permissions", []))
         if (
             data_scope == AdminRole.DataScope.ALL
             and organization
@@ -1369,6 +1370,14 @@ class AdminRoleMutationSerializer(serializers.ModelSerializer):
         ):
             raise serializers.ValidationError(
                 {"data_scope": "只有平台组织的角色可以使用全部数据范围。"}
+            )
+        if (
+            organization
+            and organization.organization_type != Organization.Type.PLATFORM
+            and "operations.manage" in permissions
+        ):
+            raise serializers.ValidationError(
+                {"permissions": "只有平台组织的角色可以管理全局运营参数。"}
             )
         return attrs
 
@@ -1420,6 +1429,20 @@ class OrganizationMemberCreateSerializer(serializers.Serializer):
         role = attrs["role"]
         if role.organization_id not in (None, organization.id):
             raise serializers.ValidationError({"role": "角色不属于所选组织。"})
+        if (
+            organization.organization_type != Organization.Type.PLATFORM
+            and role.data_scope == AdminRole.DataScope.ALL
+        ):
+            raise serializers.ValidationError(
+                {"role": "非平台组织不能使用全部数据范围的角色。"}
+            )
+        if (
+            organization.organization_type != Organization.Type.PLATFORM
+            and "operations.manage" in role.permissions
+        ):
+            raise serializers.ValidationError(
+                {"role": "非平台组织不能使用全局运营管理角色。"}
+            )
         try:
             user = User.objects.get(phone=attrs["phone"])
         except User.DoesNotExist as exc:
@@ -1453,6 +1476,24 @@ class OrganizationMemberUpdateSerializer(serializers.Serializer):
         role = attrs.get("role")
         if role and role.organization_id not in (None, self.instance.organization_id):
             raise serializers.ValidationError({"role": "角色不属于当前成员所在组织。"})
+        if (
+            role
+            and self.instance.organization.organization_type
+            != Organization.Type.PLATFORM
+            and role.data_scope == AdminRole.DataScope.ALL
+        ):
+            raise serializers.ValidationError(
+                {"role": "非平台组织不能使用全部数据范围的角色。"}
+            )
+        if (
+            role
+            and self.instance.organization.organization_type
+            != Organization.Type.PLATFORM
+            and "operations.manage" in role.permissions
+        ):
+            raise serializers.ValidationError(
+                {"role": "非平台组织不能使用全局运营管理角色。"}
+            )
         if "city_codes" in attrs:
             attrs["city_codes"] = normalize_city_codes(attrs["city_codes"])
         return attrs
@@ -1463,6 +1504,14 @@ class OrganizationMemberUpdateSerializer(serializers.Serializer):
         instance.full_clean()
         instance.save(update_fields=(*validated_data.keys(), "updated_at"))
         return instance
+
+
+class AuditLogQuerySerializer(serializers.Serializer):
+    search = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    action = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    target_type = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

@@ -18,6 +18,7 @@ from .models import (
     ActivityReport,
     ActivitySettlement,
 )
+from .pricing import calculate_publish_service_fee
 
 
 STANDARD_REFUND_SNAPSHOT = {
@@ -424,7 +425,7 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
         )
 
     def get_platform_service_fee_amount(self, obj) -> int:
-        return round(obj.aa_principal_amount * 0.1)
+        return calculate_publish_service_fee(obj.aa_principal_amount)
 
     def get_payable_amount(self, obj) -> int:
         return obj.aa_principal_amount + self.get_platform_service_fee_amount(obj)

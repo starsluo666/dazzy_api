@@ -25,6 +25,16 @@ class LocationApiTests(TestCase):
         self.assertEqual(response.json()["data"]["items"][0]["name"], "邯郸美乐城")
         search.assert_called_once_with("美乐城", "邯郸市")
 
+    def test_reverse_geocode_rejects_missing_or_invalid_coordinates(self):
+        missing = self.client.get("/api/v1/locations/reverse-geocode/")
+        invalid = self.client.get(
+            "/api/v1/locations/reverse-geocode/",
+            {"longitude": "invalid", "latitude": "36.613"},
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(invalid.status_code, 400)
+
     def test_create_and_list_saved_address(self):
         payload = {
             "name": "邯郸美乐城", "address": "人民东路456号", "city_name": "邯郸市",

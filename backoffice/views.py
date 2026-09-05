@@ -6,7 +6,7 @@ from django.db.models import CharField, Count, Prefetch, Q, Sum
 from django.db.models.functions import Cast, TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -78,6 +78,7 @@ from .serializers import (
     AdminUserRiskActionSerializer,
     AdminRoleMutationSerializer,
     AdminRoleSerializer,
+    AuditLogQuerySerializer,
     AuditLogSerializer,
     OrganizationMemberSerializer,
     OrganizationMemberCreateSerializer,
@@ -2086,19 +2087,24 @@ class ProviderOrderingSettingView(APIView):
     def get(self, request):
         access = resolve_admin_access(request.user)
         access.require("operations.manage")
+        if not access.all_data:
+            raise PermissionDenied("只有平台管理员可以查看全局接单规则。")
         return Response({"data": ProviderOrderingSettingSerializer(ProviderOrderingSetting.current()).data})
 
     @transaction.atomic
     def patch(self, request):
         access = resolve_admin_access(request.user)
         access.require("operations.manage")
+        if not access.all_data:
+            raise PermissionDenied("只有平台管理员可以修改全局接单规则。")
         setting = ProviderOrderingSetting.current()
         before = ProviderOrderingSettingSerializer(setting).data
         serializer = ProviderOrderingSettingSerializer(setting, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         AdminAuditLog.objects.create(
-            actor=request.user, organization=access.member.organization,
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
             action="operations.provider_ordering.update", target_type="operation_setting",
             target_id="provider-ordering", before=before, after=serializer.data,
             ip_address=client_ip(request),
@@ -2112,6 +2118,8 @@ class PlatformOperationSettingView(APIView):
     def get(self, request):
         access = resolve_admin_access(request.user)
         access.require("operations.manage")
+        if not access.all_data:
+            raise PermissionDenied("只有平台管理员可以查看全局运营参数。")
         setting = PlatformOperationSetting.current()
         return Response({"data": PlatformOperationSettingSerializer(setting).data})
 
@@ -2119,6 +2127,8 @@ class PlatformOperationSettingView(APIView):
     def patch(self, request):
         access = resolve_admin_access(request.user)
         access.require("operations.manage")
+        if not access.all_data:
+            raise PermissionDenied("只有平台管理员可以修改全局运营参数。")
         setting = PlatformOperationSetting.current()
         before = PlatformOperationSettingSerializer(setting).data
         serializer = PlatformOperationSettingSerializer(
@@ -2128,7 +2138,7 @@ class PlatformOperationSettingView(APIView):
         serializer.save()
         AdminAuditLog.objects.create(
             actor=request.user,
-            organization=access.member.organization,
+            organization=access.member.organization if access.member else None,
             action="operations.platform.update",
             target_type="operation_setting",
             target_id="platform",
@@ -2266,12 +2276,15 @@ class AuditLogListView(APIView):
     def get(self, request):
         access = resolve_admin_access(request.user)
         access.require("audit.view")
+        query = AuditLogQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
         queryset = AdminAuditLog.objects.select_related("actor", "organization")
         if not access.all_data:
             queryset = queryset.filter(organization=access.member.organization)
-        keyword = request.query_params.get("search", "").strip()
-        action = request.query_params.get("action", "").strip()
-        target_type = request.query_params.get("target_type", "").strip()
+        keyword = params.get("search", "").strip()
+        action = params.get("action", "").strip()
+        target_type = params.get("target_type", "").strip()
         if keyword:
             queryset = queryset.filter(
                 Q(action__icontains=keyword)
@@ -2283,8 +2296,8 @@ class AuditLogListView(APIView):
         if target_type:
             queryset = queryset.filter(target_type=target_type)
         total = queryset.count()
-        page = max(int(request.query_params.get("page", 1) or 1), 1)
-        page_size = min(max(int(request.query_params.get("page_size", 20) or 20), 1), 100)
+        page = params["page"]
+        page_size = params["page_size"]
         start = (page - 1) * page_size
         items = queryset[start : start + page_size]
         return Response({"data": {"items": AuditLogSerializer(items, many=True).data, "pagination": {"page": page, "page_size": page_size, "total": total}}})

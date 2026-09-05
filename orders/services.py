@@ -642,6 +642,7 @@ def ensure_slot_available(provider: ProviderProfile, starts_at, ends_at):
             ProviderOrder.Status.DEPARTED,
             ProviderOrder.Status.IN_SERVICE,
             ProviderOrder.Status.PENDING_CONFIRMATION,
+            ProviderOrder.Status.AFTER_SALES,
         )
     )
     if ProviderOrder.objects.filter(

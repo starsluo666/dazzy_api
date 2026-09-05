@@ -1,6 +1,7 @@
 import re
 
 from django.contrib.auth import authenticate, password_validation
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
@@ -84,11 +85,25 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
     def create(self, validated_data):
-        verify_sms_code(phone=validated_data["phone"], purpose="register", code=validated_data["code"])
-        return User.objects.create_user(
-            phone=validated_data["phone"], password=validated_data["password"],
-            nickname=f"用户{validated_data['phone'][-4:]}",
-        )
+        phone = validated_data["phone"]
+        ensure_auth_attempt_allowed(phone=phone, purpose="register")
+        try:
+            verify_sms_code(phone=phone, purpose="register", code=validated_data["code"])
+        except serializers.ValidationError:
+            record_auth_failure(phone=phone, purpose="register")
+            raise
+        clear_auth_failures(phone=phone, purpose="register")
+        try:
+            # Keep the unique-phone IntegrityError inside a savepoint so the outer
+            # RegisterView transaction remains usable for a clean 400 response.
+            with transaction.atomic():
+                return User.objects.create_user(
+                    phone=phone,
+                    password=validated_data["password"],
+                    nickname=f"用户{phone[-4:]}",
+                )
+        except IntegrityError as exc:
+            raise serializers.ValidationError({"phone": "该手机号已注册。"}) from exc
 
 
 class PasswordLoginSerializer(serializers.Serializer):

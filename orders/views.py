@@ -15,6 +15,7 @@ from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from notifications.services import create_order_notification
+from providers.availability import ensure_booking_within_schedule
 from providers.models import ProviderProfile
 from providers.presence import operation_rules
 from taskcenter.services import (
@@ -48,7 +49,6 @@ from .services import (
     create_provider_order_payment_order,
     ensure_provider_order_settlement,
     ensure_slot_available,
-    expire_pending_orders,
     refresh_provider_review_metrics,
 )
 
@@ -78,7 +78,6 @@ class ProviderOrderListCreateView(APIView):
 
     def get(self, request):
         customer_orders = ProviderOrder.objects.filter(customer=request.user)
-        expire_pending_orders(customer_orders)
         orders = customer_orders.select_related(
             "provider__user", "service__category", "arrival_photo", "review__customer",
             "payment_order", "settlement",
@@ -87,50 +86,62 @@ class ProviderOrderListCreateView(APIView):
         )[:50]
         return Response({"data": {"items": ProviderOrderSerializer(orders, many=True).data}})
 
-    @transaction.atomic
     def post(self, request):
         serializer = ProviderOrderInputSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         service = data["service"]
-        provider = ProviderProfile.objects.select_for_update().get(pk=service.provider_id)
-        ensure_slot_available(provider, data["starts_at"], data["ends_at"])
-        quote = data["quote"]
-        order = ProviderOrder.objects.create(
-            order_no=make_order_no(),
-            customer=request.user,
-            provider=provider,
-            service=service,
-            provider_name_snapshot=provider.user.nickname,
-            service_name_snapshot=service.category.name,
-            billing_type_snapshot=service.billing_type,
-            unit_price_amount=service.price_amount,
-            starts_at=data["starts_at"],
-            ends_at=data["ends_at"],
-            duration_minutes=data["duration_minutes"],
-            meeting_location_name=data["meeting_location_name"],
-            meeting_address=data["meeting_address"],
-            source_longitude=data.get("longitude"),
-            source_latitude=data.get("latitude"),
-            route_distance_km=data["route"].distance_km,
-            map_source="tencent",
-            contact_name=data["contact_name"],
-            contact_gender=data["contact_gender"],
-            contact_phone=data["contact_phone"],
-            note=data.get("note", ""),
-            service_fee_amount=quote.service_fee_amount,
-            transport_fee_amount=quote.transport_fee_amount,
-            other_fee_amount=quote.other_fee_amount,
-            discount_amount=quote.discount_amount,
-            payable_amount=quote.payable_amount,
-            pricing_snapshot=quote.snapshot,
-            payment_expires_at=timezone.now()
-            + timedelta(
-                minutes=platform_operation_rules()["provider_order_payment_timeout_minutes"]
-            ),
-        )
-        create_provider_order_payment_order(order)
-        register_provider_order_payment_expiry(order)
+        # The route lookup in serializer validation is network I/O and must stay
+        # outside the database transaction. Recheck mutable scheduling state only
+        # after taking the provider lock.
+        with transaction.atomic():
+            provider = (
+                ProviderProfile.objects.select_for_update()
+                .select_related("user")
+                .get(pk=service.provider_id)
+            )
+            ensure_booking_within_schedule(
+                provider, data["starts_at"], data["ends_at"]
+            )
+            ensure_slot_available(provider, data["starts_at"], data["ends_at"])
+            quote = data["quote"]
+            order = ProviderOrder.objects.create(
+                order_no=make_order_no(),
+                customer=request.user,
+                provider=provider,
+                service=service,
+                provider_name_snapshot=provider.user.nickname,
+                service_name_snapshot=service.category.name,
+                billing_type_snapshot=service.billing_type,
+                unit_price_amount=service.price_amount,
+                starts_at=data["starts_at"],
+                ends_at=data["ends_at"],
+                duration_minutes=data["duration_minutes"],
+                meeting_location_name=data["meeting_location_name"],
+                meeting_address=data["meeting_address"],
+                source_longitude=data.get("longitude"),
+                source_latitude=data.get("latitude"),
+                route_distance_km=data["route"].distance_km,
+                map_source="tencent",
+                contact_name=data["contact_name"],
+                contact_gender=data["contact_gender"],
+                contact_phone=data["contact_phone"],
+                note=data.get("note", ""),
+                service_fee_amount=quote.service_fee_amount,
+                transport_fee_amount=quote.transport_fee_amount,
+                other_fee_amount=quote.other_fee_amount,
+                discount_amount=quote.discount_amount,
+                payable_amount=quote.payable_amount,
+                pricing_snapshot=quote.snapshot,
+                payment_expires_at=timezone.now()
+                + timedelta(
+                    minutes=platform_operation_rules()[
+                        "provider_order_payment_timeout_minutes"
+                    ]
+                ),
+            )
+            create_provider_order_payment_order(order)
+            register_provider_order_payment_expiry(order)
         return Response({"data": ProviderOrderSerializer(order).data}, status=201)
 
 
@@ -138,9 +149,6 @@ class ProviderOrderDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self, request, order_no):
-        expire_pending_orders(
-            ProviderOrder.objects.filter(customer=request.user, order_no=order_no)
-        )
         return get_object_or_404(
             ProviderOrder.objects.select_related(
                 "provider__user", "service__category", "arrival_photo", "review__customer",

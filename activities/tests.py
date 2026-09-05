@@ -101,7 +101,10 @@ class ActivityModelTests(TestCase):
         self.assertNotIn("meeting_address", item)
 
     def test_activity_detail_returns_display_fields_and_calculated_fee(self):
-        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity = self.build_activity(
+            status=Activity.Status.RECRUITING,
+            aa_principal_amount=1045,
+        )
         activity.full_clean()
         activity.save()
 
@@ -111,8 +114,8 @@ class ActivityModelTests(TestCase):
         data = response.json()["data"]
         self.assertEqual(data["meeting_address"], "北京市测试地址")
         self.assertEqual(data["participant_count"], 0)
-        self.assertEqual(data["platform_service_fee_amount"], 480)
-        self.assertEqual(data["payable_amount"], 5280)
+        self.assertEqual(data["platform_service_fee_amount"], 105)
+        self.assertEqual(data["payable_amount"], 1150)
 
     def test_activity_detail_returns_not_found_for_unknown_id(self):
         response = self.client.get("/api/v1/activities/999999/")

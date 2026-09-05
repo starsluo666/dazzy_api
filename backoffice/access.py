@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from rest_framework.exceptions import PermissionDenied
 
-from .models import AdminRole, OrganizationMember
+from .models import AdminRole, Organization, OrganizationMember
 
 
 @dataclass(frozen=True)
@@ -33,9 +33,15 @@ def resolve_admin_access(user) -> AdminAccess:
     if not membership:
         raise PermissionDenied("当前账号未开通运营后台权限。")
     role = membership.role
-    all_data = role.data_scope == AdminRole.DataScope.ALL
+    is_platform_member = (
+        membership.organization.organization_type == Organization.Type.PLATFORM
+    )
+    all_data = is_platform_member and role.data_scope == AdminRole.DataScope.ALL
+    permissions = set(role.permissions)
+    if not is_platform_member:
+        permissions.discard("operations.manage")
     cities = set(membership.organization.city_codes) | set(membership.city_codes)
-    return AdminAccess(membership, frozenset(role.permissions), all_data, frozenset(cities))
+    return AdminAccess(membership, frozenset(permissions), all_data, frozenset(cities))
 
 
 def client_ip(request):

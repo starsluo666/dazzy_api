@@ -38,6 +38,13 @@ class EngagementApiTests(TestCase):
         self.assertEqual(self.client.delete(url).status_code, 204)
         self.assertFalse(ProviderFavorite.objects.filter(user=self.user).exists())
 
+    def test_list_endpoints_reject_invalid_pagination(self):
+        favorites = self.client.get("/api/v1/favorites/providers/", {"page": "invalid"})
+        history = self.client.get("/api/v1/browsing-history/", {"page_size": "invalid"})
+
+        self.assertEqual(favorites.status_code, 400)
+        self.assertEqual(history.status_code, 400)
+
     def test_repeated_provider_view_updates_one_history_row(self):
         url = f"/api/v1/providers/{self.provider.user.public_id}/history/"
         self.client.post(url)

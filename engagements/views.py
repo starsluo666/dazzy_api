@@ -1,6 +1,7 @@
 from django.db.models import F
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,6 +13,11 @@ from providers.selectors import public_providers
 from providers.serializers import ProviderListItemSerializer
 
 from .models import BrowsingHistory, ProviderFavorite
+
+
+class EngagementListQuerySerializer(serializers.Serializer):
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
 def record_history(*, user, target_type, provider=None, activity=None):
@@ -44,8 +50,10 @@ class ProviderFavoriteListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        page = max(1, int(request.query_params.get("page", 1)))
-        page_size = min(50, max(1, int(request.query_params.get("page_size", 20))))
+        query = EngagementListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        page = query.validated_data["page"]
+        page_size = query.validated_data["page_size"]
         favorites = ProviderFavorite.objects.filter(user=request.user, provider__status="approved").select_related("provider__user").prefetch_related("provider__services__category")
         total = favorites.count()
         items = [favorite.provider for favorite in favorites[(page - 1) * page_size:page * page_size]]
@@ -75,8 +83,10 @@ class BrowsingHistoryListView(APIView):
 
     def get(self, request):
         target_type = request.query_params.get("type", "all")
-        page = max(1, int(request.query_params.get("page", 1)))
-        page_size = min(50, max(1, int(request.query_params.get("page_size", 20))))
+        query = EngagementListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        page = query.validated_data["page"]
+        page_size = query.validated_data["page_size"]
         queryset = BrowsingHistory.objects.filter(user=request.user).select_related("provider__user", "activity__category", "activity__organizer", "activity__cover")
         if target_type in ("provider", "activity"):
             queryset = queryset.filter(target_type=target_type)

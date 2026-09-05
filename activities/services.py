@@ -25,6 +25,7 @@ from .models import (
     ActivitySettlement,
 )
 from .payment_gateway import get_activity_payment_gateway
+from .pricing import calculate_publish_service_fee
 from .serializers import STANDARD_REFUND_SNAPSHOT
 
 
@@ -51,11 +52,6 @@ def create_activity_draft(*, organizer, validated_data) -> Activity:
 
 def _publish_order_no() -> str:
     return f"ACT{timezone.now():%Y%m%d%H%M%S%f}"
-
-
-def calculate_publish_service_fee(principal_amount: int) -> int:
-    """Calculate 10% in cents using explicit round-half-up semantics."""
-    return (principal_amount + 5) // 10
 
 
 def refund_publish_order(

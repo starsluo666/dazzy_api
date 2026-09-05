@@ -63,6 +63,9 @@ class BackofficeProviderReviewTests(APITestCase):
         cls.admin_user = User.objects.create_user(
             phone="19900001111", password="test-password", nickname="城市审核员"
         )
+        cls.platform_admin = User.objects.create_superuser(
+            phone="19900001112", password="test-password", nickname="平台超级管理员"
+        )
         cls.organization = Organization.objects.create(
             name="邯郸运营中心",
             code="handan-operations",
@@ -84,7 +87,6 @@ class BackofficeProviderReviewTests(APITestCase):
                 "provider.credit.adjust",
                 "service_category.view",
                 "service_category.manage",
-                "operations.manage",
                 "order.fulfillment.view",
                 "order.support_note.add",
                 "order.review.manage",
@@ -557,6 +559,23 @@ class BackofficeProviderReviewTests(APITestCase):
             status.HTTP_403_FORBIDDEN,
         )
 
+    def test_city_scoped_role_cannot_access_global_operation_settings(self):
+        self.role.permissions = [*self.role.permissions, "operations.manage"]
+        self.role.save(update_fields=("permissions", "updated_at"))
+
+        self.assertEqual(
+            self.client.get(reverse("backoffice-provider-ordering-setting")).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.patch(
+                reverse("backoffice-platform-operation-setting"),
+                {"provider_order_payment_timeout_minutes": 20},
+                format="json",
+            ).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
     def test_service_category_list_has_summary_and_relationship_counts(self):
         ProviderService.objects.create(
             provider=self.handan,
@@ -626,6 +645,7 @@ class BackofficeProviderReviewTests(APITestCase):
         )
 
     def test_provider_ordering_setting_can_be_updated_and_is_audited(self):
+        self.client.force_authenticate(self.platform_admin)
         detail_url = reverse("backoffice-provider-ordering-setting")
 
         response = self.client.get(detail_url)
@@ -665,6 +685,7 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(ProviderOrderingSetting.current().max_location_accuracy_m, 150)
 
     def test_platform_operation_setting_can_be_updated_and_is_audited(self):
+        self.client.force_authenticate(self.platform_admin)
         detail_url = reverse("backoffice-platform-operation-setting")
 
         response = self.client.get(detail_url)
@@ -883,6 +904,10 @@ class BackofficeProviderReviewTests(APITestCase):
         data = response.data["data"]
         self.assertEqual(data["pagination"], {"page": 1, "page_size": 1, "total": 1})
         self.assertEqual(data["items"][0]["target_id"], "AUDIT-ORDER-1")
+        invalid = self.client.get(
+            reverse("backoffice-audit-logs"), {"page": "invalid"}
+        )
+        self.assertEqual(invalid.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_support_note_is_append_only_and_audited(self):
         order = self.create_fulfillment_order(
@@ -2002,6 +2027,57 @@ class BackofficeSystemManagementTests(APITestCase):
         self.assertTrue(AdminAuditLog.objects.filter(
             action="system.member.update", target_id=str(member_id)
         ).exists())
+
+    def test_non_platform_role_cannot_receive_global_operations_permission(self):
+        city_organization = Organization.objects.create(
+            name="测试城市运营中心",
+            code="system-management-city",
+            organization_type=Organization.Type.CITY_AGENT,
+            city_codes=["130400"],
+        )
+
+        response = self.client.post(
+            reverse("backoffice-roles"),
+            {
+                "organization": city_organization.id,
+                "name": "违规全局运营角色",
+                "code": "invalid-global-operator",
+                "permissions": ["operations.manage"],
+                "data_scope": AdminRole.DataScope.CITY,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("permissions", response.data)
+
+    def test_non_platform_member_cannot_receive_legacy_global_role(self):
+        city_organization = Organization.objects.create(
+            name="旧角色城市运营中心",
+            code="legacy-role-city",
+            organization_type=Organization.Type.CITY_AGENT,
+            city_codes=["130400"],
+        )
+        legacy_global_role = AdminRole.objects.create(
+            organization=None,
+            name="旧版全局角色",
+            code="legacy-global-role",
+            permissions=["organization.manage", "operations.manage"],
+            data_scope=AdminRole.DataScope.ALL,
+        )
+
+        response = self.client.post(
+            reverse("backoffice-members"),
+            {
+                "phone": self.target_user.phone,
+                "organization": city_organization.id,
+                "role": legacy_global_role.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("role", response.data)
 
     def test_system_role_self_protection_and_permission_validation(self):
         system_role_update = self.client.patch(

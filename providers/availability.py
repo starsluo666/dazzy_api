@@ -25,6 +25,7 @@ def _blocking_orders(provider, range_start, range_end):
             ProviderOrder.Status.DEPARTED,
             ProviderOrder.Status.IN_SERVICE,
             ProviderOrder.Status.PENDING_CONFIRMATION,
+            ProviderOrder.Status.AFTER_SALES,
         )
     )
     return list(

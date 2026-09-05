@@ -1,6 +1,7 @@
 from datetime import date, time, timedelta
 
 from django.contrib.gis.db.models.functions import Distance
+from django.db import transaction
 from django.db.models import Count, Min, Q, Sum
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
@@ -598,8 +599,10 @@ class CurrentProviderScheduleView(APIView):
 class CurrentProviderSchedulePeriodView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def delete(self, request, period_id):
         provider = current_approved_provider(request)
+        provider = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
         source, raw_id = period_id.split("-", 1) if "-" in period_id else ("", "")
         model = (
             ProviderWeeklyAvailability
@@ -617,8 +620,10 @@ class CurrentProviderSchedulePeriodView(APIView):
 class CurrentProviderScheduleDayView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def put(self, request, day):
         provider = current_approved_provider(request)
+        provider = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
         try:
             day = date.fromisoformat(day)
         except ValueError:

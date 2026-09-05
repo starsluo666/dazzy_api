@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -9,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import UserAddress
-from .serializers import UserAddressSerializer
+from .serializers import CoordinatesQuerySerializer, UserAddressSerializer
 from .tencent import tencent_map
 
 
@@ -33,9 +31,14 @@ class ReverseGeocodeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        longitude = Decimal(request.query_params["longitude"])
-        latitude = Decimal(request.query_params["latitude"])
-        return Response({"data": tencent_map.reverse_geocode(longitude, latitude)})
+        query = CoordinatesQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        return Response({
+            "data": tencent_map.reverse_geocode(
+                query.validated_data["longitude"],
+                query.validated_data["latitude"],
+            )
+        })
 
 
 class UserAddressListCreateView(APIView):

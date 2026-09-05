@@ -50,6 +50,8 @@ class SmsCodeView(APIView):
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_register"
 
     @transaction.atomic
     def post(self, request):

@@ -21,6 +21,10 @@ def _failure_key(phone: str, purpose: str) -> str:
     return f"auth:failures:{purpose}:{phone}"
 
 
+def _code_attempt_key(phone: str, purpose: str) -> str:
+    return f"auth:sms-code-attempts:{purpose}:{phone}"
+
+
 @dataclass(frozen=True)
 class SmsCodeResult:
     expires_in: int
@@ -36,6 +40,7 @@ def send_sms_code(*, phone: str, purpose: str) -> SmsCodeResult:
 
     code = settings.SMS_DEVELOPMENT_CODE if settings.DEBUG else f"{secrets.randbelow(1_000_000):06d}"
     cache.set(_code_key(phone, purpose), code, settings.SMS_CODE_TTL_SECONDS)
+    cache.delete(_code_attempt_key(phone, purpose))
     cache.set(_cooldown_key(phone, purpose), True, settings.SMS_CODE_RESEND_SECONDS)
 
     # TODO: 非 DEBUG 环境在此调用短信供应商；验证码绝不能写入日志或响应。
@@ -48,9 +53,24 @@ def send_sms_code(*, phone: str, purpose: str) -> SmsCodeResult:
 
 def verify_sms_code(*, phone: str, purpose: str, code: str) -> None:
     cached_code = cache.get(_code_key(phone, purpose))
-    if not cached_code or not secrets.compare_digest(str(cached_code), code):
+    if not cached_code:
+        raise ValidationError({"code": "验证码错误或已过期。"})
+    if not secrets.compare_digest(str(cached_code), code):
+        attempt_key = _code_attempt_key(phone, purpose)
+        if cache.add(attempt_key, 1, settings.SMS_CODE_TTL_SECONDS):
+            attempts = 1
+        else:
+            try:
+                attempts = cache.incr(attempt_key)
+            except ValueError:
+                attempts = 1
+                cache.set(attempt_key, attempts, settings.SMS_CODE_TTL_SECONDS)
+        if attempts >= settings.SMS_CODE_MAX_ATTEMPTS:
+            cache.delete(_code_key(phone, purpose))
+            raise ValidationError({"code": "验证码尝试次数过多，请重新获取。"})
         raise ValidationError({"code": "验证码错误或已过期。"})
     cache.delete(_code_key(phone, purpose))
+    cache.delete(_code_attempt_key(phone, purpose))
 
 
 def ensure_auth_attempt_allowed(*, phone: str, purpose: str) -> None:

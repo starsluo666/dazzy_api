@@ -116,7 +116,21 @@ CELERY_BEAT_SCHEDULE = {
 }
 
 AUTH_USER_MODEL = "accounts.User"
-AUTH_PASSWORD_VALIDATORS = []
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 8},
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+    },
+]
 LANGUAGE_CODE = "zh-hans"
 TIME_ZONE = "Asia/Shanghai"
 USE_I18N = True
@@ -153,11 +167,13 @@ SIMPLE_JWT = {
 }
 SMS_CODE_TTL_SECONDS = int(os.getenv("SMS_CODE_TTL_SECONDS", "300"))
 SMS_CODE_RESEND_SECONDS = int(os.getenv("SMS_CODE_RESEND_SECONDS", "60"))
+SMS_CODE_MAX_ATTEMPTS = int(os.getenv("SMS_CODE_MAX_ATTEMPTS", "5"))
 SMS_DEVELOPMENT_CODE = os.getenv("SMS_DEVELOPMENT_CODE", "123456")
 AUTH_FAILURE_LIMIT = int(os.getenv("AUTH_FAILURE_LIMIT", "5"))
 AUTH_LOCK_SECONDS = int(os.getenv("AUTH_LOCK_SECONDS", "900"))
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "auth_sms_send": os.getenv("AUTH_SMS_SEND_RATE", "10/min"),
+    "auth_register": os.getenv("AUTH_REGISTER_RATE", "5/min"),
     "auth_login": os.getenv("AUTH_LOGIN_RATE", "30/min"),
     "auth_password_reset": os.getenv("AUTH_PASSWORD_RESET_RATE", "10/min"),
 }

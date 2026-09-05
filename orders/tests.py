@@ -368,6 +368,13 @@ class ProviderOrderApiTests(TestCase):
         )
         order.refresh_from_db()
         self.assertEqual(order.status, ProviderOrder.Status.AFTER_SALES)
+        conflicting_order = self.client.post(
+            "/api/v1/provider-orders/",
+            self.payload(),
+            content_type="application/json",
+        )
+        self.assertEqual(conflicting_order.status_code, 400)
+        self.assertIn("该时间段刚刚被预约", str(conflicting_order.json()))
         self.assertTrue(
             UserNotification.objects.filter(
                 recipient=self.customer,

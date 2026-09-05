@@ -4,6 +4,21 @@ from rest_framework import serializers
 from .models import UserAddress
 
 
+class CoordinatesQuerySerializer(serializers.Serializer):
+    longitude = serializers.DecimalField(max_digits=10, decimal_places=7)
+    latitude = serializers.DecimalField(max_digits=10, decimal_places=7)
+
+    def validate_longitude(self, value):
+        if not -180 <= value <= 180:
+            raise serializers.ValidationError("经度必须在 -180 到 180 之间。")
+        return value
+
+    def validate_latitude(self, value):
+        if not -90 <= value <= 90:
+            raise serializers.ValidationError("纬度必须在 -90 到 90 之间。")
+        return value
+
+
 class UserAddressSerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(max_length=30)
     contact_gender = serializers.ChoiceField(choices=UserAddress.ContactGender.choices)

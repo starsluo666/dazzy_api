@@ -1,8 +1,10 @@
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
 from .models import User
+from .services import send_sms_code, verify_sms_code
 
 
 class UserModelTests(TestCase):
@@ -142,3 +144,35 @@ class AuthenticationApiTests(APITestCase):
         )
         self.assertEqual(locked.status_code, 400)
         self.assertIn("尝试次数过多", str(locked.data))
+
+    @override_settings(SMS_CODE_MAX_ATTEMPTS=3)
+    def test_sms_code_is_invalidated_after_maximum_failed_attempts(self):
+        send_sms_code(phone=self.phone, purpose="register")
+
+        for _ in range(2):
+            with self.assertRaisesMessage(ValidationError, "验证码错误或已过期"):
+                verify_sms_code(phone=self.phone, purpose="register", code="000000")
+        with self.assertRaisesMessage(ValidationError, "验证码尝试次数过多"):
+            verify_sms_code(phone=self.phone, purpose="register", code="000000")
+        with self.assertRaisesMessage(ValidationError, "验证码错误或已过期"):
+            verify_sms_code(phone=self.phone, purpose="register", code="123456")
+
+    def test_register_endpoint_is_rate_limited_by_ip(self):
+        for index in range(5):
+            response = self.client.post(
+                "/api/v1/auth/register/",
+                {
+                    "phone": f"138000001{index:02d}",
+                    "code": "000000",
+                    "password": self.password,
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 400)
+
+        limited = self.client.post(
+            "/api/v1/auth/register/",
+            {"phone": "13800000199", "code": "000000", "password": self.password},
+            format="json",
+        )
+        self.assertEqual(limited.status_code, 429)
