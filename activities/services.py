@@ -291,6 +291,41 @@ def expire_pending_participation_orders(*, activity=None, now=None) -> int:
     return expired
 
 
+@transaction.atomic
+def expire_activity_participation_payment(*, order_no: str, now=None) -> dict:
+    now = now or timezone.now()
+    order = (
+        ActivityParticipationPaymentOrder.objects.select_for_update()
+        .select_related("participation")
+        .filter(order_no=order_no)
+        .first()
+    )
+    if not order:
+        raise NotFound("活动报名支付单不存在。")
+    if order.status != ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT:
+        return {"state": "inactive", "payment_order_no": order.order_no}
+    if order.expires_at > now:
+        return {
+            "state": "not_due",
+            "payment_order_no": order.order_no,
+            "deadline": order.expires_at,
+        }
+    _close_pending_payment_order(order, now=now)
+    participation = order.participation
+    if participation.status == ActivityParticipation.Status.PENDING_PAYMENT:
+        participation.status = ActivityParticipation.Status.EXPIRED
+        participation.payment_expires_at = None
+        participation.save(
+            update_fields=("status", "payment_expires_at", "updated_at")
+        )
+    return {
+        "state": "expired",
+        "payment_order_no": order.order_no,
+        "activity_id": participation.activity_id,
+        "participation_id": participation.pk,
+    }
+
+
 def _validate_participation_eligibility(activity, user, now):
     if activity.organizer_id == user.pk:
         raise PermissionDenied("组织者无需重复报名自己的活动。")
@@ -337,6 +372,9 @@ def get_or_create_participation_order(*, activity_id: int, user, channel: str):
             if order.channel != channel:
                 order.channel = channel
                 order.save(update_fields=("channel", "updated_at"))
+            from taskcenter.services import register_activity_participation_payment_expiry
+
+            register_activity_participation_payment_expiry(order)
             return participation, order, False
 
     if _occupied_count(activity, now=now) >= activity.capacity:
@@ -393,6 +431,9 @@ def get_or_create_participation_order(*, activity_id: int, user, channel: str):
         channel=channel,
         expires_at=expires_at,
     )
+    from taskcenter.services import register_activity_participation_payment_expiry
+
+    register_activity_participation_payment_expiry(order)
     return participation, order, True
 
 
@@ -435,6 +476,9 @@ def simulate_participation_payment(*, activity_id: int, user):
     order.gateway_trade_no = result.gateway_trade_no
     order.paid_at = now
     order.save(update_fields=("status", "gateway_trade_no", "paid_at", "updated_at"))
+    from taskcenter.services import cancel_activity_participation_payment_expiry
+
+    cancel_activity_participation_payment_expiry(order.order_no, "报名支付成功")
     participation.status = ActivityParticipation.Status.ACTIVE
     participation.joined_at = now
     participation.payment_expires_at = None
@@ -999,6 +1043,9 @@ def ensure_activity_settlement(*, activity_id: int, now=None):
                 "retained_participant_principal_amount", "settlement_amount",
                 "platform_service_fee_amount", "calculation_snapshot", "updated_at",
             ))
+            from taskcenter.services import register_activity_settlement
+
+            register_activity_settlement(settlement)
         return settlement, False
     confirmation_started_at = activity.ends_at
     rules = platform_operation_rules()
@@ -1025,6 +1072,9 @@ def ensure_activity_settlement(*, activity_id: int, now=None):
         dispute_reason=("存在待处理活动退款/售后" if open_after_sales else ""),
         **amounts,
     )
+    from taskcenter.services import register_activity_settlement
+
+    register_activity_settlement(settlement)
     return settlement, True
 
 
@@ -1080,6 +1130,9 @@ def release_activity_settlement_after_sales(*, activity, now=None):
         "retained_participant_principal_amount", "settlement_amount",
         "platform_service_fee_amount", "calculation_snapshot", "updated_at",
     ))
+    from taskcenter.services import register_activity_settlement
+
+    register_activity_settlement(settlement)
     return settlement, True
 
 

@@ -1,10 +1,21 @@
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
+from django.contrib.gis.geos import Point
 from django.test import TestCase
 from django.utils import timezone
 
 from accounts.models import User
+from activities.models import (
+    Activity,
+    ActivityCategory,
+    ActivityParticipation,
+    ActivityParticipationPaymentOrder,
+    ActivityPublishOrder,
+    ActivitySettlement,
+)
+from activities.services import get_or_create_participation_order
 from backoffice.models import AdminAuditLog
 from notifications.models import UserNotification
 from orders.models import (
@@ -21,6 +32,8 @@ from .services import (
     register_provider_acceptance_timeout,
     register_provider_order_confirmation_timeout,
     register_provider_order_payment_expiry,
+    register_activity_lifecycle_tasks,
+    synchronize_activity_tasks,
     synchronize_provider_order_tasks,
 )
 from .tasks import process_due_scheduled_tasks, synchronize_scheduled_tasks
@@ -269,7 +282,7 @@ class TaskCenterTests(TestCase):
     def test_periodic_processing_and_compensation_are_separate(self):
         with (
             patch("taskcenter.tasks.process_due_tasks", return_value={"claimed": 0}) as process,
-            patch("taskcenter.tasks.synchronize_provider_order_tasks") as synchronize,
+            patch("taskcenter.tasks.synchronize_business_tasks") as synchronize,
         ):
             self.assertEqual(process_due_scheduled_tasks(), {"claimed": 0})
             process.assert_called_once_with(limit=100)
@@ -278,21 +291,13 @@ class TaskCenterTests(TestCase):
         with (
             patch("taskcenter.tasks.process_due_tasks") as process,
             patch(
-                "taskcenter.tasks.synchronize_provider_order_tasks",
-                return_value={
-                    "payment_created": 0,
-                    "acceptance_created": 0,
-                    "confirmation_created": 0,
-                },
+                "taskcenter.tasks.synchronize_business_tasks",
+                return_value={"provider_orders": {}, "activities": {}},
             ) as synchronize,
         ):
             self.assertEqual(
                 synchronize_scheduled_tasks(),
-                {
-                    "payment_created": 0,
-                    "acceptance_created": 0,
-                    "confirmation_created": 0,
-                },
+                {"provider_orders": {}, "activities": {}},
             )
             synchronize.assert_called_once_with()
             process.assert_not_called()
@@ -332,3 +337,182 @@ class TaskCenterTests(TestCase):
                 target_id=str(task.public_id),
             ).exists()
         )
+
+
+class ActivityTaskCenterTests(TestCase):
+    def setUp(self):
+        self.organizer = User.objects.create_user(
+            phone="18800002001",
+            password="test",
+            nickname="任务测试发起人",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.participant = User.objects.create_user(
+            phone="18800002002",
+            password="test",
+            nickname="任务测试参与人",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.category = ActivityCategory.objects.create(
+            name="活动任务测试",
+            slug="activity-task-test",
+        )
+
+    def make_activity(self, **overrides):
+        starts_at = timezone.now() + timedelta(days=2)
+        values = {
+            "organizer": self.organizer,
+            "category": self.category,
+            "title": "活动任务中心测试局",
+            "starts_at": starts_at,
+            "ends_at": starts_at + timedelta(hours=2),
+            "formation_deadline": starts_at - timedelta(hours=12),
+            "meeting_place_name": "任务测试场馆",
+            "meeting_address": "邯郸市任务测试地址",
+            "city_code": "130400",
+            "city_name": "邯郸市",
+            "source_longitude": Decimal("114.4921000"),
+            "source_latitude": Decimal("36.6123000"),
+            "meeting_point": Point(114.485900, 36.610800, srid=4326),
+            "capacity": 6,
+            "min_participants": 2,
+            "description": "活动任务中心测试",
+            "participation_rules": "准时到场",
+            "aa_principal_amount": 4800,
+            "refund_template_version": "standard-v1",
+            "refund_rule_snapshot": {"version": "standard-v1"},
+            "status": Activity.Status.RECRUITING,
+        }
+        values.update(overrides)
+        return Activity.objects.create(**values)
+
+    def add_paid_participant(self, activity, *, now):
+        participation = ActivityParticipation.objects.create(
+            activity=activity,
+            user=self.participant,
+            status=ActivityParticipation.Status.ACTIVE,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            refund_rule_snapshot={"version": "standard-v1"},
+            joined_at=now - timedelta(days=1),
+        )
+        ActivityParticipationPaymentOrder.objects.create(
+            participation=participation,
+            payer=self.participant,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            channel=ActivityParticipationPaymentOrder.Channel.MOCK_WECHAT,
+            status=ActivityParticipationPaymentOrder.Status.PAID,
+            expires_at=now - timedelta(hours=20),
+            paid_at=now - timedelta(hours=21),
+        )
+        return participation
+
+    def test_participation_payment_expiry_runs_through_task_center(self):
+        activity = self.make_activity()
+        participation, payment, _ = get_or_create_participation_order(
+            activity_id=activity.pk,
+            user=self.participant,
+            channel=ActivityParticipationPaymentOrder.Channel.MOCK_WECHAT,
+        )
+        task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+            business_key=payment.order_no,
+        )
+
+        result = process_due_tasks(now=payment.expires_at)
+
+        payment.refresh_from_db()
+        participation.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(payment.status, ActivityParticipationPaymentOrder.Status.CLOSED)
+        self.assertEqual(participation.status, ActivityParticipation.Status.EXPIRED)
+        self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
+        self.assertEqual(task.result["state"], "expired")
+
+    def test_activity_lifecycle_and_settlement_run_through_task_center(self):
+        now = timezone.now()
+        activity = self.make_activity(
+            status=Activity.Status.FORMED,
+            starts_at=now - timedelta(hours=3),
+            ends_at=now - timedelta(hours=1),
+            formation_deadline=now - timedelta(hours=4),
+        )
+        ActivityPublishOrder.objects.create(
+            order_no="TASK-ACTIVITY-PUBLISH",
+            activity=activity,
+            payer=self.organizer,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            status=ActivityPublishOrder.Status.PAID,
+            paid_at=now - timedelta(days=1),
+        )
+        self.add_paid_participant(activity, now=now)
+        register_activity_lifecycle_tasks(activity)
+
+        lifecycle = process_due_tasks(now=now)
+
+        activity.refresh_from_db()
+        settlement = ActivitySettlement.objects.get(activity=activity)
+        settlement_task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.ACTIVITY_SETTLEMENT,
+            business_key=str(activity.pk),
+        )
+        self.assertEqual(lifecycle["succeeded"], 3)
+        self.assertEqual(activity.status, Activity.Status.COMPLETED)
+        self.assertEqual(settlement.status, ActivitySettlement.Status.CONFIRMING)
+        self.assertEqual(settlement_task.status, ScheduledTask.Status.PENDING)
+        self.assertEqual(settlement_task.available_at, settlement.confirmation_deadline)
+
+        confirming = process_due_tasks(now=settlement.confirmation_deadline)
+        settlement.refresh_from_db()
+        settlement_task.refresh_from_db()
+        self.assertEqual(confirming["rescheduled"], 1)
+        self.assertEqual(settlement.status, ActivitySettlement.Status.RISK_FROZEN)
+        self.assertEqual(settlement_task.available_at, settlement.freeze_until)
+
+        settled = process_due_tasks(now=settlement.freeze_until)
+        settlement.refresh_from_db()
+        settlement_task.refresh_from_db()
+        self.assertEqual(settled["succeeded"], 1)
+        self.assertEqual(settlement.status, ActivitySettlement.Status.SETTLED)
+        self.assertEqual(settlement_task.status, ScheduledTask.Status.SUCCEEDED)
+
+    def test_activity_task_synchronization_backfills_missing_tasks(self):
+        activity = self.make_activity()
+        participation = ActivityParticipation.objects.create(
+            activity=activity,
+            user=self.participant,
+            status=ActivityParticipation.Status.PENDING_PAYMENT,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            payment_expires_at=timezone.now() + timedelta(minutes=30),
+        )
+        ActivityParticipationPaymentOrder.objects.create(
+            order_no="TASK-ACTIVITY-PENDING",
+            participation=participation,
+            payer=self.participant,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            channel=ActivityParticipationPaymentOrder.Channel.MOCK_WECHAT,
+            expires_at=participation.payment_expires_at,
+        )
+
+        first = synchronize_activity_tasks()
+        second = synchronize_activity_tasks()
+
+        self.assertEqual(first["payment_created"], 1)
+        self.assertEqual(first["formation_created"], 1)
+        self.assertEqual(first["start_created"], 1)
+        self.assertEqual(first["completion_created"], 1)
+        self.assertEqual(sum(second.values()), 0)

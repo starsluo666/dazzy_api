@@ -2,7 +2,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import F, OuterRef, Q, Subquery
+from django.db.models import CharField, Exists, F, OuterRef, Q, Subquery
+from django.db.models.functions import Cast
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -12,6 +13,13 @@ from .models import ScheduledTask
 TASK_LEASE_TIMEOUT = timedelta(minutes=5)
 TASK_RETRY_BASE_DELAY = timedelta(minutes=1)
 TASK_SYNC_BATCH_SIZE = 500
+ACTIVITY_TASK_TYPES = (
+    ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+    ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE,
+    ScheduledTask.Type.ACTIVITY_START,
+    ScheduledTask.Type.ACTIVITY_COMPLETION,
+    ScheduledTask.Type.ACTIVITY_SETTLEMENT,
+)
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,84 @@ def register_provider_order_settlement(settlement):
     )
 
 
+def register_activity_participation_payment_expiry(order):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+        business_type="activity_participation",
+        business_key=order.order_no,
+        scheduled_at=order.expires_at,
+        payload={
+            "payment_order_no": order.order_no,
+            "participation_id": order.participation_id,
+            "activity_id": order.participation.activity_id,
+            "activity_title": order.participation.activity.title,
+        },
+    )
+
+
+def _register_activity_task(*, activity, task_type, scheduled_at):
+    return _register_task(
+        task_type=task_type,
+        business_type="activity",
+        business_key=str(activity.pk),
+        scheduled_at=scheduled_at,
+        payload={"activity_id": activity.pk, "activity_title": activity.title},
+    )
+
+
+def register_activity_formation_deadline(activity):
+    return _register_activity_task(
+        activity=activity,
+        task_type=ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE,
+        scheduled_at=activity.formation_deadline,
+    )
+
+
+def register_activity_start(activity):
+    return _register_activity_task(
+        activity=activity,
+        task_type=ScheduledTask.Type.ACTIVITY_START,
+        scheduled_at=activity.starts_at,
+    )
+
+
+def register_activity_completion(activity):
+    return _register_activity_task(
+        activity=activity,
+        task_type=ScheduledTask.Type.ACTIVITY_COMPLETION,
+        scheduled_at=activity.ends_at,
+    )
+
+
+def register_activity_lifecycle_tasks(activity):
+    formation = register_activity_formation_deadline(activity)
+    start = register_activity_start(activity)
+    completion = register_activity_completion(activity)
+    return {"formation": formation, "start": start, "completion": completion}
+
+
+def activity_settlement_deadline(settlement):
+    if settlement.status == settlement.Status.CONFIRMING:
+        return settlement.confirmation_deadline
+    if settlement.status == settlement.Status.RISK_FROZEN:
+        return settlement.freeze_until
+    return max(settlement.confirmation_deadline, timezone.now())
+
+
+def register_activity_settlement(settlement):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_SETTLEMENT,
+        business_type="activity",
+        business_key=str(settlement.activity_id),
+        scheduled_at=activity_settlement_deadline(settlement),
+        payload={
+            "activity_id": settlement.activity_id,
+            "activity_title": settlement.activity.title,
+            "settlement_no": settlement.settlement_no,
+        },
+    )
+
+
 def cancel_business_task(*, task_type, business_type, business_key, reason):
     now = timezone.now()
     return ScheduledTask.objects.filter(
@@ -144,6 +230,15 @@ def cancel_provider_order_settlement(order_no: str, reason: str):
     return cancel_business_task(
         task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
         business_type="provider_order",
+        business_key=order_no,
+        reason=reason,
+    )
+
+
+def cancel_activity_participation_payment_expiry(order_no: str, reason: str):
+    return cancel_business_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+        business_type="activity_participation",
         business_key=order_no,
         reason=reason,
     )
@@ -380,6 +475,141 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
     }
 
 
+def _activities_missing_task(queryset, *, task_type):
+    existing_task = ScheduledTask.objects.filter(
+        task_type=task_type,
+        business_type="activity",
+        business_key=Cast(OuterRef("pk"), output_field=CharField()),
+    )
+    return queryset.annotate(
+        _has_scheduled_task=Exists(existing_task)
+    ).filter(_has_scheduled_task=False)
+
+
+def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
+    from activities.models import (
+        Activity,
+        ActivityParticipationPaymentOrder,
+        ActivitySettlement,
+    )
+    from activities.services import ensure_activity_settlement
+
+    batch_size = max(1, min(int(batch_size), 5000))
+    payment_created = 0
+    payment_existing = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+        business_type="activity_participation",
+        business_key=OuterRef("order_no"),
+    )
+    pending_payments = (
+        ActivityParticipationPaymentOrder.objects.filter(
+            status=ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT,
+        )
+        .annotate(_has_scheduled_task=Exists(payment_existing))
+        .filter(_has_scheduled_task=False)
+        .select_related("participation__activity")
+        .order_by("id")[:batch_size]
+    )
+    for payment in pending_payments:
+        _, created = register_activity_participation_payment_expiry(payment)
+        payment_created += int(created)
+
+    formation_created = 0
+    formation_activities = (
+        _activities_missing_task(
+            Activity.objects.filter(
+                status__in=(Activity.Status.RECRUITING, Activity.Status.FORMED),
+            ),
+            task_type=ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE,
+        )
+        .only("id", "title", "formation_deadline")
+        .order_by("id")[:batch_size]
+    )
+    for activity in formation_activities:
+        _, created = register_activity_formation_deadline(activity)
+        formation_created += int(created)
+
+    active_statuses = (
+        Activity.Status.RECRUITING,
+        Activity.Status.FORMED,
+        Activity.Status.IN_PROGRESS,
+    )
+    start_created = 0
+    start_activities = (
+        _activities_missing_task(
+            Activity.objects.filter(status__in=active_statuses),
+            task_type=ScheduledTask.Type.ACTIVITY_START,
+        )
+        .only("id", "title", "starts_at")
+        .order_by("id")[:batch_size]
+    )
+    for activity in start_activities:
+        _, created = register_activity_start(activity)
+        start_created += int(created)
+
+    completion_created = 0
+    completion_activities = (
+        _activities_missing_task(
+            Activity.objects.filter(status__in=active_statuses),
+            task_type=ScheduledTask.Type.ACTIVITY_COMPLETION,
+        )
+        .only("id", "title", "ends_at")
+        .order_by("id")[:batch_size]
+    )
+    for activity in completion_activities:
+        _, created = register_activity_completion(activity)
+        completion_created += int(created)
+
+    settlement_created = 0
+    completed_without_settlement = (
+        Activity.objects.filter(
+            status=Activity.Status.COMPLETED,
+            settlement__isnull=True,
+        )
+        .only("id")
+        .order_by("id")[:batch_size]
+    )
+    for activity in completed_without_settlement:
+        try:
+            _, created = ensure_activity_settlement(activity_id=activity.pk)
+            settlement_created += int(created)
+        except ValidationError:
+            continue
+
+    settlement_task_created = 0
+    settlement_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_SETTLEMENT,
+        business_type="activity",
+        business_key=Cast(OuterRef("activity_id"), output_field=CharField()),
+    )
+    settlements = (
+        ActivitySettlement.objects.exclude(status=ActivitySettlement.Status.SETTLED)
+        .annotate(_has_scheduled_task=Exists(settlement_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("activity")
+        .order_by("id")[:batch_size]
+    )
+    for settlement in settlements:
+        _, created = register_activity_settlement(settlement)
+        settlement_task_created += int(created)
+
+    return {
+        "payment_created": payment_created,
+        "formation_created": formation_created,
+        "start_created": start_created,
+        "completion_created": completion_created,
+        "settlement_created": settlement_created,
+        "settlement_task_created": settlement_task_created,
+    }
+
+
+def synchronize_business_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
+    return {
+        "provider_orders": synchronize_provider_order_tasks(batch_size=batch_size),
+        "activities": synchronize_activity_tasks(batch_size=batch_size),
+    }
+
+
 def _execute_provider_order_payment_expiry(task, now):
     from orders.services import expire_provider_order_payment
 
@@ -459,6 +689,208 @@ def _execute_provider_order_settlement(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _activity_result(activity, state):
+    return {
+        "state": state,
+        "activity_id": activity.pk,
+        "activity_status": activity.status,
+    }
+
+
+def _execute_activity_participation_payment_expiry(task, now):
+    from activities.services import expire_activity_participation_payment
+
+    outcome = expire_activity_participation_payment(
+        order_no=task.business_key,
+        now=now,
+    )
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "expired":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result={**outcome, "source": "task_worker"},
+        )
+    return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
+
+
+def _resolve_activity_formation(*, activity_id, now):
+    from activities.models import Activity
+    from activities.services import fail_unformed_activity
+
+    activity = Activity.objects.filter(pk=activity_id).first()
+    if activity and (
+        activity.status == Activity.Status.RECRUITING
+        and activity.formation_deadline <= now
+    ):
+        activity, _ = fail_unformed_activity(activity_id=activity_id, now=now)
+    return activity
+
+
+def _execute_activity_formation_deadline(task, now):
+    from activities.models import Activity
+    from activities.services import fail_unformed_activity
+
+    activity_id = int(task.business_key)
+    activity = Activity.objects.filter(pk=activity_id).first()
+    if not activity:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "activity_id": activity_id},
+        )
+    if (
+        activity.status == Activity.Status.RECRUITING
+        and activity.formation_deadline > now
+    ):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={
+                **_activity_result(activity, "not_due"),
+                "deadline": activity.formation_deadline.isoformat(),
+            },
+            available_at=activity.formation_deadline,
+        )
+    activity, changed = fail_unformed_activity(activity_id=activity_id, now=now)
+    if activity.status in (Activity.Status.FORMED, Activity.Status.FAILED_TO_FORM):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result=_activity_result(
+                activity,
+                "formed" if activity.status == Activity.Status.FORMED else "failed_to_form",
+            ) | {"changed": changed},
+        )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.CANCELLED,
+        result=_activity_result(activity, "inactive"),
+    )
+
+
+def _execute_activity_start(task, now):
+    from activities.models import Activity
+    from activities.services import start_formed_activity
+
+    activity_id = int(task.business_key)
+    activity = _resolve_activity_formation(activity_id=activity_id, now=now)
+    if not activity:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "activity_id": activity_id},
+        )
+    if activity.status == Activity.Status.FORMED and activity.starts_at > now:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={
+                **_activity_result(activity, "not_due"),
+                "deadline": activity.starts_at.isoformat(),
+            },
+            available_at=activity.starts_at,
+        )
+    activity, changed = start_formed_activity(activity_id=activity_id, now=now)
+    if activity.status in (Activity.Status.IN_PROGRESS, Activity.Status.COMPLETED):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result=_activity_result(activity, "started") | {"changed": changed},
+        )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.CANCELLED,
+        result=_activity_result(activity, "inactive"),
+    )
+
+
+def _execute_activity_completion(task, now):
+    from activities.models import Activity
+    from activities.services import (
+        complete_started_activity,
+        ensure_activity_settlement,
+        start_formed_activity,
+    )
+
+    activity_id = int(task.business_key)
+    activity = _resolve_activity_formation(activity_id=activity_id, now=now)
+    if not activity:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "activity_id": activity_id},
+        )
+    if activity.status == Activity.Status.FORMED and activity.starts_at <= now:
+        activity, _ = start_formed_activity(activity_id=activity_id, now=now)
+    if activity.status == Activity.Status.IN_PROGRESS and activity.ends_at > now:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={
+                **_activity_result(activity, "not_due"),
+                "deadline": activity.ends_at.isoformat(),
+            },
+            available_at=activity.ends_at,
+        )
+    activity, changed = complete_started_activity(activity_id=activity_id, now=now)
+    if activity.status == Activity.Status.COMPLETED:
+        settlement, settlement_created = ensure_activity_settlement(
+            activity_id=activity_id,
+            now=now,
+        )
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result=_activity_result(activity, "completed") | {
+                "changed": changed,
+                "settlement_no": settlement.settlement_no,
+                "settlement_created": settlement_created,
+            },
+        )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.CANCELLED,
+        result=_activity_result(activity, "inactive"),
+    )
+
+
+def _execute_activity_settlement(task, now):
+    from activities.models import ActivitySettlement
+    from activities.services import advance_activity_settlement
+
+    settlement = (
+        ActivitySettlement.objects.filter(activity_id=int(task.business_key))
+        .select_related("activity")
+        .first()
+    )
+    if not settlement:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "activity_id": int(task.business_key)},
+        )
+    settlement, changed = advance_activity_settlement(
+        settlement_id=settlement.pk,
+        now=now,
+    )
+    result = {
+        "state": settlement.status,
+        "activity_id": settlement.activity_id,
+        "settlement_no": settlement.settlement_no,
+        "changed": changed,
+    }
+    if settlement.status == ActivitySettlement.Status.SETTLED:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result=result,
+        )
+    if settlement.status == ActivitySettlement.Status.DISPUTE_FROZEN:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result=result,
+            available_at=now + timedelta(minutes=5),
+        )
+    deadline = activity_settlement_deadline(settlement)
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.PENDING,
+        result={**result, "deadline": deadline.isoformat()},
+        available_at=deadline,
+    )
+
+
 TASK_HANDLERS = {
     ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY: (_execute_provider_order_payment_expiry),
     ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT: (_execute_provider_acceptance_timeout),
@@ -466,6 +898,13 @@ TASK_HANDLERS = {
         _execute_provider_order_confirmation_timeout
     ),
     ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT: _execute_provider_order_settlement,
+    ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY: (
+        _execute_activity_participation_payment_expiry
+    ),
+    ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE: _execute_activity_formation_deadline,
+    ScheduledTask.Type.ACTIVITY_START: _execute_activity_start,
+    ScheduledTask.Type.ACTIVITY_COMPLETION: _execute_activity_completion,
+    ScheduledTask.Type.ACTIVITY_SETTLEMENT: _execute_activity_settlement,
 }
 
 

@@ -16,9 +16,12 @@ uv run --env-file .env celery -A config worker --loglevel=info
 uv run --env-file .env celery -A config beat --loglevel=info
 ```
 
-Beat 每 10 秒派发一次到期任务处理，每 3 分钟分页补建一次遗漏任务；也可以用
-`python manage.py process_scheduled_tasks` 手动补建并处理一批。兼容命令
-`python manage.py expire_provider_orders` 只处理达人订单支付超时任务。
+Beat 每 10 秒派发一次到期任务处理，每 3 分钟分页补建一次遗漏任务；达人订单的
+支付、接单、确认和结算任务，以及活动的报名支付、成局、开始、结束和结算任务均
+进入同一任务中心。也可以用 `python manage.py process_scheduled_tasks` 手动补建并处理
+一批。兼容命令 `python manage.py expire_provider_orders` 只处理达人订单支付超时任务，
+`python manage.py process_activity_timeouts` 保留为活动任务的应急直接扫描命令，生产
+环境不再单独周期调度这两个兼容命令。
 
 生产环境必须把 API、Worker、Beat 作为独立进程托管并配置自动重启。Beat 同一套
 调度只能运行 1 个实例，Worker 可以运行多个实例；任务真实状态保存在 PostgreSQL，

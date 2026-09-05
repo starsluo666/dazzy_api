@@ -2,8 +2,8 @@ from datetime import datetime, time, timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q, Sum
-from django.db.models.functions import TruncDate
+from django.db.models import CharField, Count, Prefetch, Q, Sum
+from django.db.models.functions import Cast, TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -2295,9 +2295,26 @@ def scoped_scheduled_tasks(access):
     if access.all_data:
         return queryset
     visible_order_nos = scoped_provider_orders(access).values("order_no")
+    visible_activities = scoped_activities(access)
+    visible_activity_ids = visible_activities.annotate(
+        task_business_key=Cast("id", output_field=CharField())
+    ).values("task_business_key")
+    visible_participation_order_nos = ActivityParticipationPaymentOrder.objects.filter(
+        participation__activity__in=visible_activities,
+    ).values("order_no")
     return queryset.filter(
-        business_type="provider_order",
-        business_key__in=visible_order_nos,
+        Q(
+            business_type="provider_order",
+            business_key__in=visible_order_nos,
+        )
+        | Q(
+            business_type="activity",
+            business_key__in=visible_activity_ids,
+        )
+        | Q(
+            business_type="activity_participation",
+            business_key__in=visible_participation_order_nos,
+        )
     )
 
 

@@ -22,6 +22,17 @@ class ScheduledTask(models.Model):
             "provider_order_settlement",
             "达人订单资金结算",
         )
+        ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY = (
+            "activity_participation_payment_expiry",
+            "活动报名支付超时",
+        )
+        ACTIVITY_FORMATION_DEADLINE = (
+            "activity_formation_deadline",
+            "活动成局截止",
+        )
+        ACTIVITY_START = "activity_start", "活动开始"
+        ACTIVITY_COMPLETION = "activity_completion", "活动结束"
+        ACTIVITY_SETTLEMENT = "activity_settlement", "活动资金结算"
 
     class Status(models.TextChoices):
         PENDING = "pending", "待执行"

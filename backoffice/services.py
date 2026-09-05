@@ -120,6 +120,10 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
             "published_at", "updated_at",
         )
     )
+    if decision == "approve":
+        from taskcenter.services import register_activity_lifecycle_tasks
+
+        register_activity_lifecycle_tasks(activity)
     if decision == "reject":
         refund_publish_order(
             activity=activity,
