@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from backoffice.models import ProviderOrderAfterSalesCase
 from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
@@ -28,6 +29,8 @@ from taskcenter.services import (
 from .models import ProviderOrder, ProviderOrderPaymentOrder, ProviderOrderReview
 from .payment_gateway import get_provider_order_payment_gateway
 from .serializers import (
+    ProviderOrderAfterSalesInputSerializer,
+    ProviderOrderAfterSalesSerializer,
     ProviderOrderInputSerializer,
     ProviderOrderArrivalEvidenceInputSerializer,
     ProviderOrderManageQuerySerializer,
@@ -41,6 +44,7 @@ from .serializers import (
 )
 from .services import (
     apply_provider_order_payment_success,
+    create_customer_provider_order_after_sales_case,
     create_provider_order_payment_order,
     ensure_provider_order_settlement,
     ensure_slot_available,
@@ -78,7 +82,9 @@ class ProviderOrderListCreateView(APIView):
         orders = customer_orders.select_related(
             "provider__user", "service__category", "arrival_photo", "review__customer",
             "payment_order", "settlement",
-        ).prefetch_related("review__images", "refund_orders")[:50]
+        ).prefetch_related(
+            "review__images", "refund_orders", "after_sales_cases"
+        )[:50]
         return Response({"data": {"items": ProviderOrderSerializer(orders, many=True).data}})
 
     @transaction.atomic
@@ -139,13 +145,56 @@ class ProviderOrderDetailView(APIView):
             ProviderOrder.objects.select_related(
                 "provider__user", "service__category", "arrival_photo", "review__customer",
                 "payment_order", "settlement",
-            ).prefetch_related("review__images", "refund_orders"),
+            ).prefetch_related("review__images", "refund_orders", "after_sales_cases"),
             order_no=order_no,
             customer=request.user,
         )
 
     def get(self, request, order_no):
         return Response({"data": ProviderOrderSerializer(self.get_object(request, order_no)).data})
+
+
+class ProviderOrderAfterSalesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_order(self, request, order_no):
+        return get_object_or_404(
+            ProviderOrder.objects.only("id", "order_no"),
+            order_no=order_no,
+            customer=request.user,
+        )
+
+    def get(self, request, order_no):
+        order = self.get_order(request, order_no)
+        cases = ProviderOrderAfterSalesCase.objects.filter(order=order).select_related(
+            "order"
+        ).prefetch_related("order__refund_orders")
+        return Response(
+            {"data": {"items": ProviderOrderAfterSalesSerializer(cases, many=True).data}}
+        )
+
+    def post(self, request, order_no):
+        self.get_order(request, order_no)
+        serializer = ProviderOrderAfterSalesInputSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        evidence_assets = serializer.validated_data.get("evidence_asset_ids", [])
+        case, created = create_customer_provider_order_after_sales_case(
+            order_no=order_no,
+            customer=request.user,
+            case_type=serializer.validated_data["case_type"],
+            requested_amount=serializer.validated_data["requested_amount"],
+            reason=serializer.validated_data["reason"],
+            evidence_object_keys=[asset.object_key for asset in evidence_assets],
+        )
+        case = ProviderOrderAfterSalesCase.objects.select_related("order").prefetch_related(
+            "order__refund_orders"
+        ).get(pk=case.pk)
+        return Response(
+            {"data": ProviderOrderAfterSalesSerializer(case).data},
+            status=201 if created else 200,
+        )
 
 
 class ProviderOrderCancelView(ProviderOrderDetailView):
@@ -217,7 +266,7 @@ class CurrentProviderOrderListView(APIView):
         ).select_related(
             "customer", "provider__user", "service__category", "arrival_photo",
             "payment_order", "settlement",
-        ).prefetch_related("refund_orders")
+        ).prefetch_related("refund_orders", "after_sales_cases")
         if order_status := query.validated_data.get("status"):
             orders = orders.filter(status=order_status)
         return Response(
@@ -237,7 +286,7 @@ class CurrentProviderOrderDetailView(APIView):
             queryset.select_related(
                 "customer", "provider__user", "service__category", "arrival_photo",
                 "payment_order", "settlement",
-            ).prefetch_related("refund_orders"),
+            ).prefetch_related("refund_orders", "after_sales_cases"),
             provider=provider,
             paid_at__isnull=False,
             order_no=order_no,
@@ -483,7 +532,7 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
         order = ProviderOrder.objects.select_related(
             "provider__user", "service__category", "arrival_photo", "payment_order",
             "settlement",
-        ).prefetch_related("review__images", "refund_orders").get(pk=order.pk)
+        ).prefetch_related("review__images", "refund_orders", "after_sales_cases").get(pk=order.pk)
         return Response({"data": ProviderOrderSerializer(order).data})
 
 

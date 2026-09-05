@@ -252,6 +252,7 @@ class ProviderOrderAfterSalesCase(models.Model):
         "核准退款金额（分）", null=True, blank=True
     )
     reason = models.CharField("申请原因", max_length=1000)
+    evidence_object_keys = models.JSONField("凭证对象键", default=list, blank=True)
     result_note = models.CharField("审核结论", max_length=1000, blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

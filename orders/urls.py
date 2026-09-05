@@ -10,6 +10,7 @@ from .views import (
     CurrentProviderOrderRejectView,
     CurrentProviderOrderStartView,
     CurrentUserProviderReviewListView,
+    ProviderOrderAfterSalesView,
     ProviderOrderCancelView,
     ProviderOrderConfirmCompletionView,
     ProviderOrderDetailView,
@@ -49,6 +50,10 @@ urlpatterns = [
     path("provider-orders/preview/", ProviderOrderPreviewView.as_view()),
     path("provider-orders/", ProviderOrderListCreateView.as_view()),
     path("provider-orders/<str:order_no>/", ProviderOrderDetailView.as_view()),
+    path(
+        "provider-orders/<str:order_no>/after-sales/",
+        ProviderOrderAfterSalesView.as_view(),
+    ),
     path("provider-orders/<str:order_no>/cancel/", ProviderOrderCancelView.as_view()),
     path(
         "provider-orders/<str:order_no>/confirm-completion/",

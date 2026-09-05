@@ -1114,6 +1114,7 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
         source="reviewed_by.nickname", allow_null=True
     )
     refund_order = serializers.SerializerMethodField()
+    evidence_urls = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrderAfterSalesCase
@@ -1122,7 +1123,7 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
             "status_label", "order_no", "order_status", "order_status_label",
             "order_payable_amount", "customer_name", "provider_name", "service_name",
             "service_city_code", "service_city_name", "requested_amount",
-            "approved_amount", "reason", "result_note", "creator_name",
+            "approved_amount", "reason", "evidence_urls", "result_note", "creator_name",
             "organization_name", "reviewed_by_name", "reviewed_at", "created_at",
             "updated_at", "refund_order",
         )
@@ -1137,6 +1138,12 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
             None,
         )
         return ProviderOrderRefundOrderSerializer(refund).data if refund else None
+
+    def get_evidence_urls(self, obj):
+        return [
+            build_media_url(object_key, private=True)
+            for object_key in obj.evidence_object_keys
+        ]
 
 
 class ProviderOrderPaymentOrderSerializer(serializers.ModelSerializer):

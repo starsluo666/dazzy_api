@@ -2,6 +2,8 @@ from datetime import timedelta
 
 from rest_framework import serializers
 
+from backoffice.models import ProviderOrderAfterSalesCase
+from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 from locations.tencent import tencent_map
 from locations.models import UserAddress
@@ -165,6 +167,68 @@ class ProviderOrderSettlementSummarySerializer(serializers.ModelSerializer):
         )
 
 
+class ProviderOrderAfterSalesInputSerializer(serializers.Serializer):
+    case_type = serializers.ChoiceField(
+        choices=(
+            ProviderOrderAfterSalesCase.CaseType.REFUND,
+            ProviderOrderAfterSalesCase.CaseType.SERVICE_DISPUTE,
+            ProviderOrderAfterSalesCase.CaseType.OTHER,
+        )
+    )
+    requested_amount = serializers.IntegerField(
+        min_value=1, error_messages={"min_value": "申请退款金额必须大于 0。"}
+    )
+    reason = serializers.CharField(min_length=5, max_length=1000, trim_whitespace=True)
+    evidence_asset_ids = serializers.PrimaryKeyRelatedField(
+        many=True,
+        required=False,
+        allow_empty=True,
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.SUPPORT_ATTACHMENT,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+    )
+
+    def validate_evidence_asset_ids(self, value):
+        request = self.context.get("request")
+        if len(value) > 3:
+            raise serializers.ValidationError("证明材料最多上传3张。")
+        if not request or any(asset.owner_id != request.user.pk for asset in value):
+            raise serializers.ValidationError("证明材料不存在或无权使用。")
+        return value
+
+class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    case_type_label = serializers.CharField(source="get_case_type_display")
+    evidence_urls = serializers.SerializerMethodField()
+    refund_order = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProviderOrderAfterSalesCase
+        fields = (
+            "case_no", "case_type", "case_type_label", "status", "status_label",
+            "requested_amount", "approved_amount", "reason", "evidence_urls",
+            "result_note", "reviewed_at", "refund_order", "created_at", "updated_at",
+        )
+
+    def get_evidence_urls(self, obj):
+        return [
+            build_media_url(object_key, private=True)
+            for object_key in obj.evidence_object_keys
+        ]
+
+    def get_refund_order(self, obj):
+        refund = next(
+            (
+                item
+                for item in obj.order.refund_orders.all()
+                if item.source_reference == obj.case_no
+            ),
+            None,
+        )
+        return ProviderOrderRefundSummarySerializer(refund).data if refund else None
+
+
 class ProviderOrderSerializer(serializers.ModelSerializer):
     provider_public_id = serializers.UUIDField(source="provider.user.public_id")
     provider_name = serializers.CharField(source="provider_name_snapshot")
@@ -178,6 +242,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     payment_order = ProviderOrderPaymentSummarySerializer(read_only=True, allow_null=True)
     refund_orders = ProviderOrderRefundSummarySerializer(many=True, read_only=True)
     settlement = ProviderOrderSettlementSummarySerializer(read_only=True, allow_null=True)
+    after_sales = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrder
@@ -194,7 +259,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
             "service_started_at", "completion_submitted_at", "confirmation_expires_at",
             "customer_confirmed_at", "auto_confirmed_at", "review", "payment_order",
-            "refund_orders", "settlement",
+            "refund_orders", "settlement", "after_sales",
         )
 
     def get_provider_avatar_url(self, obj):
@@ -208,6 +273,36 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
         if not obj.arrival_photo_id:
             return None
         return build_media_url(obj.arrival_photo.object_key, private=True)
+
+    def get_after_sales(self, obj):
+        prefetched = getattr(obj, "_prefetched_objects_cache", {}).get("after_sales_cases")
+        if prefetched is None:
+            case = obj.after_sales_cases.order_by("-created_at", "-id").first()
+        else:
+            case = prefetched[0] if prefetched else None
+        if not case:
+            return None
+        refund = next(
+            (item for item in obj.refund_orders.all() if item.source_reference == case.case_no),
+            None,
+        )
+        return {
+            "case_no": case.case_no,
+            "case_type": case.case_type,
+            "case_type_label": case.get_case_type_display(),
+            "status": case.status,
+            "status_label": case.get_status_display(),
+            "requested_amount": case.requested_amount,
+            "approved_amount": case.approved_amount,
+            "result_note": case.result_note,
+            "created_at": case.created_at,
+            "updated_at": case.updated_at,
+            "refund_no": refund.refund_no if refund else None,
+            "refund_status": refund.status if refund else None,
+            "refund_status_label": refund.get_status_display() if refund else None,
+            "refund_amount": refund.refund_amount if refund else None,
+            "refunded_at": refund.refunded_at if refund else None,
+        }
 
 
 class ProviderOrderArrivalEvidenceInputSerializer(serializers.Serializer):

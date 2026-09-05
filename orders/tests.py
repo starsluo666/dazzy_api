@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
-from backoffice.models import PlatformOperationSetting
+from backoffice.models import PlatformOperationSetting, ProviderOrderAfterSalesCase
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from providers.models import (
@@ -320,6 +320,80 @@ class ProviderOrderApiTests(TestCase):
             ).status,
             ScheduledTask.Status.CANCELLED,
         )
+
+    @patch(
+        "orders.serializers.build_media_url",
+        return_value="https://media.test/after-sales.webp",
+    )
+    def test_customer_can_submit_and_read_provider_order_after_sales(self, _build_url):
+        order = self.create_paid_accepted_order()
+        self.client.force_login(self.customer)
+        evidence = MediaAsset.objects.create(
+            owner=self.customer,
+            scope=MediaAsset.Scope.PRIVATE,
+            category=MediaAsset.Category.SUPPORT_ATTACHMENT,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="private/support-attachments/order-after-sales.webp",
+        )
+        endpoint = f"/api/v1/provider-orders/{order.order_no}/after-sales/"
+
+        excessive = self.client.post(
+            endpoint,
+            {
+                "case_type": ProviderOrderAfterSalesCase.CaseType.REFUND,
+                "requested_amount": order.payable_amount + 1,
+                "reason": "服务内容与预约约定不一致，申请退款。",
+                "evidence_asset_ids": [str(evidence.id)],
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(excessive.status_code, 400)
+
+        created = self.client.post(
+            endpoint,
+            {
+                "case_type": ProviderOrderAfterSalesCase.CaseType.REFUND,
+                "requested_amount": order.payable_amount,
+                "reason": "服务内容与预约约定不一致，申请退款。",
+                "evidence_asset_ids": [str(evidence.id)],
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 201)
+        case_no = created.json()["data"]["case_no"]
+        self.assertEqual(created.json()["data"]["status"], "pending")
+        self.assertEqual(
+            created.json()["data"]["evidence_urls"],
+            ["https://media.test/after-sales.webp"],
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.AFTER_SALES)
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.customer,
+                event_type=UserNotification.EventType.ORDER_AFTER_SALES_STARTED,
+                target_id=order.order_no,
+            ).exists()
+        )
+
+        repeated = self.client.post(
+            endpoint,
+            {
+                "case_type": ProviderOrderAfterSalesCase.CaseType.OTHER,
+                "requested_amount": order.payable_amount,
+                "reason": "重复点击提交不应创建新的售后申请。",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json()["data"]["case_no"], case_no)
+        self.assertEqual(ProviderOrderAfterSalesCase.objects.filter(order=order).count(), 1)
+
+        cases = self.client.get(endpoint)
+        detail = self.client.get(f"/api/v1/provider-orders/{order.order_no}/")
+        self.assertEqual(cases.status_code, 200)
+        self.assertEqual(cases.json()["data"]["items"][0]["case_no"], case_no)
+        self.assertEqual(detail.json()["data"]["after_sales"]["case_no"], case_no)
 
     def test_expire_command_closes_timed_out_order(self):
         create = self.client.post(

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Avg, Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -146,6 +146,88 @@ def _refund_allocation(order: ProviderOrder, amount: int) -> dict[str, int]:
     if remaining:
         raise ValidationError({"approved_amount": "退款金额无法按订单费用构成分配。"})
     return allocation
+
+
+@transaction.atomic
+def create_customer_provider_order_after_sales_case(
+    *, order_no: str, customer, case_type: str, requested_amount: int,
+    reason: str, evidence_object_keys=None,
+):
+    from backoffice.models import ProviderOrderAfterSalesCase
+    from taskcenter.services import (
+        cancel_provider_order_confirmation_timeout,
+        cancel_provider_order_settlement,
+    )
+
+    order = ProviderOrder.objects.select_for_update().filter(
+        order_no=order_no, customer=customer
+    ).first()
+    if not order:
+        raise ValidationError("订单不存在或无权操作。")
+    if not order.paid_at:
+        raise ValidationError("未支付订单不能申请退款或售后。")
+    if order.status == ProviderOrder.Status.REFUNDED:
+        raise ValidationError("该订单已经全额退款。")
+
+    open_statuses = (
+        ProviderOrderAfterSalesCase.Status.PENDING,
+        ProviderOrderAfterSalesCase.Status.PROCESSING,
+        ProviderOrderAfterSalesCase.Status.APPROVED,
+    )
+    existing = order.after_sales_cases.filter(status__in=open_statuses).first()
+    if existing:
+        return existing, False
+
+    settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
+    if settlement and settlement.status == ProviderOrderSettlement.Status.SETTLED:
+        raise ValidationError("该订单资金已经结算，请联系平台客服处理。")
+
+    reserved_amount = order.refund_orders.aggregate(total=Sum("refund_amount"))["total"] or 0
+    refundable_amount = max(order.payable_amount - reserved_amount, 0)
+    if requested_amount <= 0:
+        raise ValidationError({"requested_amount": "退款申请金额必须大于 0。"})
+    if requested_amount > refundable_amount:
+        raise ValidationError(
+            {"requested_amount": f"申请金额不能超过当前可退金额 {refundable_amount} 分。"}
+        )
+
+    original_status = order.status
+    try:
+        with transaction.atomic():
+            case = ProviderOrderAfterSalesCase.objects.create(
+                order=order,
+                creator=customer,
+                case_type=case_type,
+                original_order_status=original_status,
+                requested_amount=requested_amount,
+                reason=reason.strip(),
+                evidence_object_keys=evidence_object_keys or [],
+            )
+    except IntegrityError as error:
+        existing = order.after_sales_cases.filter(status__in=open_statuses).first()
+        if existing:
+            return existing, False
+        raise ValidationError("该订单已有未结束的退款或售后单。") from error
+
+    order.status = ProviderOrder.Status.AFTER_SALES
+    order.save(update_fields=("status", "updated_at"))
+    if settlement and settlement.status == ProviderOrderSettlement.Status.RISK_FROZEN:
+        settlement.status = ProviderOrderSettlement.Status.DISPUTE_FROZEN
+        settlement.dispute_reason = f"存在待处理退款售后：{case.case_no}"
+        settlement.save(update_fields=("status", "dispute_reason", "updated_at"))
+        cancel_provider_order_settlement(order.order_no, "after_sales_processing")
+    if original_status == ProviderOrder.Status.PENDING_CONFIRMATION:
+        cancel_provider_order_confirmation_timeout(
+            order.order_no, "after_sales_processing"
+        )
+    create_order_notification(
+        order=order,
+        event_type=UserNotification.EventType.ORDER_AFTER_SALES_STARTED,
+        title="售后申请已提交",
+        content="平台客服会尽快处理，结果将通过通知中心告知你。",
+        dedupe_suffix=case.case_no,
+    )
+    return case, True
 
 
 @transaction.atomic
