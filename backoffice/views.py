@@ -184,6 +184,45 @@ def scoped_organizations(access):
     return queryset
 
 
+def _record_refund_retry_audit(
+    *, request, access, action, target_type, target_id, before, after
+):
+    AdminAuditLog.objects.create(
+        actor=request.user,
+        organization=access.member.organization if access.member else None,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        before=before,
+        after=after,
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+
+
+def _provider_refund_retry_failed_response(
+    *, request, access, refund, action, before, exception
+):
+    refund.refresh_from_db()
+    if refund.status != ProviderOrderRefundOrder.Status.FAILED:
+        raise exception
+    _record_refund_retry_audit(
+        request=request,
+        access=access,
+        action=action,
+        target_type="provider_order_refund",
+        target_id=refund.refund_no,
+        before=before,
+        after={
+            "status": refund.status,
+            "failure_reason": refund.failure_reason,
+        },
+    )
+    raise ValidationError(
+        {"refund": f"退款渠道处理失败：{refund.failure_reason or '请稍后重试。'}"}
+    ) from exception
+
+
 def scoped_admin_roles(access):
     queryset = AdminRole.objects.select_related("organization")
     if not access.all_data:
@@ -1248,22 +1287,99 @@ class ProviderOrderRefundRetryView(APIView):
         if not provider_order_refund_can_retry(refund):
             raise ValidationError("当前退款单不需要重试。")
 
-        process_provider_order_refund(refund.refund_no)
-        AdminAuditLog.objects.create(
-            actor=request.user,
-            organization=access.member.organization if access.member else None,
-            action="order.finance.refund.retry",
-            target_type="provider_order_refund",
-            target_id=refund.refund_no,
-            before={"status": refund.status},
-            after={"status": ProviderOrderRefundOrder.Status.SUCCEEDED},
-            request_id=request.headers.get("X-Request-ID", ""),
-            ip_address=client_ip(request),
-        )
+        before = {"status": refund.status, "failure_reason": refund.failure_reason}
+        try:
+            process_provider_order_refund(refund.refund_no)
+        except Exception as exc:
+            _provider_refund_retry_failed_response(
+                request=request,
+                access=access,
+                refund=refund,
+                action="order.finance.refund.retry",
+                before=before,
+                exception=exc,
+            )
         refund = ProviderOrderRefundOrder.objects.select_related(
             "order__provider", "payment_order", "beneficiary", "operator"
         ).get(pk=refund.pk)
+        _record_refund_retry_audit(
+            request=request,
+            access=access,
+            action="order.finance.refund.retry",
+            target_type="provider_order_refund",
+            target_id=refund.refund_no,
+            before=before,
+            after={
+                "status": refund.status,
+                "failure_reason": refund.failure_reason,
+            },
+        )
         return Response({"data": ProviderOrderRefundOrderSerializer(refund).data})
+
+
+class ActivityParticipationRefundRetryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, refund_no):
+        access = resolve_admin_access(request.user)
+        access.require("activity_after_sales.manage")
+        queryset = ActivityParticipationRefundOrder.objects.select_related("activity")
+        if not access.all_data:
+            queryset = queryset.filter(activity__city_code__in=access.city_codes)
+        refund = get_object_or_404(queryset, refund_no=refund_no)
+        from activities.services import (
+            activity_participation_refund_can_retry,
+            process_activity_participation_refund,
+        )
+
+        if not activity_participation_refund_can_retry(refund):
+            raise ValidationError("当前活动退款单不需要重试。")
+
+        before = {"status": refund.status, "failure_reason": refund.failure_reason}
+        try:
+            process_activity_participation_refund(refund.refund_no)
+        except Exception as exc:
+            refund.refresh_from_db()
+            if refund.status != ActivityParticipationRefundOrder.Status.FAILED:
+                raise
+            _record_refund_retry_audit(
+                request=request,
+                access=access,
+                action="activity.finance.refund.retry",
+                target_type="activity_participation_refund",
+                target_id=refund.refund_no,
+                before=before,
+                after={
+                    "status": refund.status,
+                    "failure_reason": refund.failure_reason,
+                },
+            )
+            raise ValidationError(
+                {
+                    "refund": (
+                        "退款渠道处理失败："
+                        f"{refund.failure_reason or '请稍后重试。'}"
+                    )
+                }
+            ) from exc
+        refund = ActivityParticipationRefundOrder.objects.select_related(
+            "activity", "beneficiary", "payment_order", "operator"
+        ).get(pk=refund.pk)
+        _record_refund_retry_audit(
+            request=request,
+            access=access,
+            action="activity.finance.refund.retry",
+            target_type="activity_participation_refund",
+            target_id=refund.refund_no,
+            before=before,
+            after={
+                "status": refund.status,
+                "failure_reason": refund.failure_reason,
+            },
+        )
+        return Response(
+            {"data": AdminActivityParticipationRefundSerializer(refund).data}
+        )
 
 
 class AdminActivityAfterSalesActionView(APIView):
@@ -1919,7 +2035,34 @@ class ProviderOrderAfterSalesActionView(APIView):
             ).first()
             if not refund:
                 raise ValidationError("售后退款单不存在，请联系技术人员排查。")
-            process_provider_order_refund(refund.refund_no)
+            before = {
+                "status": refund.status,
+                "failure_reason": refund.failure_reason,
+            }
+            try:
+                process_provider_order_refund(refund.refund_no)
+            except Exception as exc:
+                _provider_refund_retry_failed_response(
+                    request=request,
+                    access=access,
+                    refund=refund,
+                    action="order.after_sales.refund.retry.result",
+                    before=before,
+                    exception=exc,
+                )
+            refund.refresh_from_db()
+            _record_refund_retry_audit(
+                request=request,
+                access=access,
+                action="order.after_sales.refund.retry.result",
+                target_type="provider_order_refund",
+                target_id=refund.refund_no,
+                before=before,
+                after={
+                    "status": refund.status,
+                    "failure_reason": refund.failure_reason,
+                },
+            )
         case = get_object_or_404(provider_order_after_sales_queryset(access), pk=case.pk)
         return Response({"data": ProviderOrderAfterSalesCaseSerializer(case).data})
 

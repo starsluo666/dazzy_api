@@ -406,6 +406,44 @@ class TaskCenterTests(TestCase):
             ).exists()
         )
 
+    def test_provider_refund_notification_failure_does_not_rollback_refund(self):
+        order = self.make_order(
+            order_no="DZYTASKREFUNDNOTIFYFAIL",
+            status=ProviderOrder.Status.AFTER_SALES,
+            payment_deadline=timezone.now() - timedelta(hours=1),
+        )
+        refund, _ = create_provider_order_refund(
+            order_no=order.order_no,
+            amount=order.payable_amount,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference="notification-failure-test",
+            idempotency_key="provider-refund-notification-failure",
+            reason="验证通知失败不回滚退款",
+        )
+
+        with patch(
+            "orders.services.create_order_notification",
+            side_effect=RuntimeError("通知存储暂时不可用"),
+        ), self.captureOnCommitCallbacks(execute=True):
+            result = process_due_tasks(
+                task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND]
+            )
+
+        refund.refresh_from_db()
+        order.refresh_from_db()
+        order.payment_order.refresh_from_db()
+        task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+            business_key=refund.refund_no,
+        )
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
+        self.assertEqual(order.status, ProviderOrder.Status.REFUNDED)
+        self.assertEqual(
+            order.payment_order.status, ProviderOrderPaymentOrder.Status.REFUNDED
+        )
+        self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
+
 
 class ActivityTaskCenterTests(TestCase):
     def setUp(self):
@@ -550,6 +588,43 @@ class ActivityTaskCenterTests(TestCase):
         payment.refresh_from_db()
         self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED)
         self.assertEqual(payment.status, ActivityParticipationPaymentOrder.Status.REFUNDED)
+
+    def test_activity_refund_notification_failure_does_not_rollback_refund(self):
+        activity = self.make_activity()
+        participation = self.add_paid_participant(activity, now=timezone.now())
+        payment = participation.payment_orders.get()
+        refund, _ = create_activity_participation_refund(
+            participation=participation,
+            payment_order=payment,
+            refund_type=ActivityParticipationRefundOrder.RefundType.AFTER_SALES,
+            idempotency_key="activity-refund-notification-failure",
+            principal_refund_amount=payment.aa_principal_amount,
+            service_fee_refund_amount=payment.platform_service_fee_amount,
+            reason="验证通知失败不回滚退款",
+        )
+
+        with patch(
+            "activities.services.create_activity_notification",
+            side_effect=RuntimeError("通知存储暂时不可用"),
+        ), self.captureOnCommitCallbacks(execute=True):
+            result = process_due_tasks(
+                task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
+            )
+
+        refund.refresh_from_db()
+        payment.refresh_from_db()
+        task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+            business_key=refund.refund_no,
+        )
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(
+            refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED
+        )
+        self.assertEqual(
+            payment.status, ActivityParticipationPaymentOrder.Status.REFUNDED
+        )
+        self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
 
     def test_activity_lifecycle_and_settlement_run_through_task_center(self):
         now = timezone.now()

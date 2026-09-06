@@ -9,7 +9,11 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
-from backoffice.models import PlatformOperationSetting, ProviderOrderAfterSalesCase
+from backoffice.models import (
+    PlatformOperationSetting,
+    ProviderOrderAfterSalesCase,
+    ProviderOrderingSetting,
+)
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from providers.models import (
@@ -904,3 +908,19 @@ class ProviderOrderApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("不在线", str(response.json()))
+
+    def test_order_creation_accepts_stale_location_when_auto_expiry_is_disabled(self):
+        ProviderLiveLocation.objects.filter(pk=self.live_location.pk).update(
+            received_at=timezone.now() - timedelta(days=7)
+        )
+        setting = ProviderOrderingSetting.current()
+        setting.location_timeout_minutes = 0
+        setting.save(update_fields=("location_timeout_minutes", "updated_at"))
+
+        response = self.client.post(
+            "/api/v1/provider-orders/preview/",
+            self.payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)

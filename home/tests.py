@@ -122,6 +122,31 @@ class HomeDiscoveryTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    @patch("home.views.build_home_card_assets", return_value={})
+    def test_home_keeps_offline_providers_with_last_known_distance(self, _build_assets):
+        ProviderLiveLocation.objects.update(
+            received_at=timezone.now() - timedelta(minutes=31)
+        )
+
+        response = self.client.get(
+            "/api/v1/home/",
+            {
+                "city_code": "130400",
+                "longitude": "114.5240070",
+                "latitude": "36.6074460",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        providers = response.json()["data"]["recommended_providers"]
+        self.assertEqual(len(providers), 4)
+        self.assertTrue(all(not provider["is_online"] for provider in providers))
+        self.assertTrue(all(provider["distance_km"] is not None for provider in providers))
+        self.assertTrue(
+            all(provider["availability_status"] == "unavailable" for provider in providers)
+        )
+        self.assertTrue(all(provider["earliest_available_at"] is None for provider in providers))
+
     @patch("home.views.build_home_card_assets", side_effect=RuntimeError("COS unavailable"))
     def test_home_keeps_other_sections_when_assets_fail(self, _build_assets):
         response = self.client.get("/api/v1/home/", {"city_code": "130400"})

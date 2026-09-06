@@ -2,7 +2,7 @@ from datetime import date, time, timedelta
 
 from django.contrib.gis.db.models.functions import Distance
 from django.db import transaction
-from django.db.models import Count, Min, Q, Sum
+from django.db.models import BooleanField, Case, Count, F, Min, Q, Sum, Value, When
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -75,7 +75,13 @@ class ProviderListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
 
-        queryset = public_providers().filter(online_provider_query()).annotate(
+        online_query = online_provider_query()
+        queryset = public_providers().filter(admin_order_restricted=False).annotate(
+            is_currently_online=Case(
+                When(online_query, then=Value(True)),
+                default=Value(False),
+                output_field=BooleanField(),
+            ),
             starting_price_amount=Min(
                 "services__price_amount",
                 filter=Q(services__is_active=True, services__category__is_active=True),
@@ -96,13 +102,24 @@ class ProviderListView(APIView):
 
         ordering = params["ordering"]
         if ordering == "distance":
-            queryset = queryset.order_by("distance", "-rating", "id")
+            queryset = queryset.order_by(
+                "-is_currently_online", F("distance").asc(nulls_last=True), "-rating", "id"
+            )
         elif ordering == "rating":
-            queryset = queryset.order_by("-rating", "-service_count", "id")
+            queryset = queryset.order_by(
+                "-is_currently_online", "-rating", "-service_count", "id"
+            )
         elif ordering == "price":
-            queryset = queryset.order_by("starting_price_amount", "-rating", "id")
+            queryset = queryset.order_by(
+                "-is_currently_online",
+                F("starting_price_amount").asc(nulls_last=True),
+                "-rating",
+                "id",
+            )
         else:
-            queryset = queryset.order_by("-rating", "-service_count", "id")
+            queryset = queryset.order_by(
+                "-is_currently_online", "-rating", "-service_count", "id"
+            )
 
         queryset = queryset.distinct()
         page = params["page"]

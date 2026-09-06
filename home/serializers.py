@@ -28,9 +28,16 @@ class HomeProviderSerializer(ProviderListItemSerializer):
         )
 
     def get_availability_status(self, obj) -> str:
-        return "available" if self.context["earliest_by_provider"].get(obj.pk) else "unavailable"
+        return (
+            "available"
+            if getattr(obj, "is_currently_online", False)
+            and self.context["earliest_by_provider"].get(obj.pk)
+            else "unavailable"
+        )
 
     def get_earliest_available_at(self, obj):
+        if not getattr(obj, "is_currently_online", False):
+            return None
         slot = self.context["earliest_by_provider"].get(obj.pk)
         return slot["starts_at"] if slot else None
 

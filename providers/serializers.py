@@ -298,7 +298,8 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
         return obj.user.verification_status == obj.user.VerificationStatus.VERIFIED
 
     def get_is_online(self, obj) -> bool:
-        return provider_is_online(obj)
+        annotated = getattr(obj, "is_currently_online", None)
+        return annotated if annotated is not None else provider_is_online(obj)
 
     def get_distance_km(self, obj) -> float | None:
         distance = getattr(obj, "distance", None)

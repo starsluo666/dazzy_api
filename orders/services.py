@@ -596,15 +596,18 @@ def process_provider_order_refund(refund_no: str, *, now=None):
                 settlement.dispute_reason = ""
                 settlement.save()
                 reopen_provider_order_settlement(settlement)
-        create_order_notification(
-            order=order,
-            event_type=UserNotification.EventType.ORDER_REFUND_COMPLETED,
-            title="订单退款成功",
-            content=(
-                f"退款 ¥{refund.refund_amount // 100}."
-                f"{refund.refund_amount % 100:02d} 已按原支付路径退回。"
+        transaction.on_commit(
+            lambda: create_order_notification(
+                order=order,
+                event_type=UserNotification.EventType.ORDER_REFUND_COMPLETED,
+                title="订单退款成功",
+                content=(
+                    f"退款 ¥{refund.refund_amount // 100}."
+                    f"{refund.refund_amount % 100:02d} 已按原支付路径退回。"
+                ),
+                dedupe_suffix=refund.refund_no,
             ),
-            dedupe_suffix=refund.refund_no,
+            robust=True,
         )
         mark_provider_order_refund_succeeded(refund.refund_no)
         return refund, True

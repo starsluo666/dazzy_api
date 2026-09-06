@@ -6,6 +6,7 @@ from .views import (
     AdminActivityCategoryDetailView,
     AdminActivityCategoryListView,
     AdminActivityAfterSalesActionView,
+    ActivityParticipationRefundRetryView,
     AdminActivityFinanceListView,
     AdminActivitySettlementActionView,
     AdminActivityListView,
@@ -111,6 +112,11 @@ urlpatterns = [
         "activity-after-sales/<str:case_no>/action/",
         AdminActivityAfterSalesActionView.as_view(),
         name="backoffice-activity-after-sales-action",
+    ),
+    path(
+        "activity-refunds/<str:refund_no>/retry/",
+        ActivityParticipationRefundRetryView.as_view(),
+        name="backoffice-activity-refund-retry",
     ),
     path(
         "activity-settlements/<str:settlement_no>/action/",

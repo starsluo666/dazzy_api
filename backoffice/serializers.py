@@ -1541,8 +1541,8 @@ class ProviderOrderingSettingSerializer(serializers.ModelSerializer):
         return value
 
     def validate_location_timeout_minutes(self, value):
-        if not 10 <= value <= 120:
-            raise serializers.ValidationError("定位失效时间必须在 10–120 分钟之间。")
+        if value != 0 and not 10 <= value <= 120:
+            raise serializers.ValidationError("定位失效时间必须为 0，或在 10–120 分钟之间。")
         return value
 
     def validate_max_location_accuracy_m(self, value):

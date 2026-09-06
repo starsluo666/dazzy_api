@@ -1,12 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
+from threading import Barrier
 from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
 from django.core.exceptions import ValidationError
-from django.test import TestCase, override_settings
+from django.db import close_old_connections, connection
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
 from accounts.models import User
 from backoffice.models import PlatformOperationSetting
@@ -26,7 +30,11 @@ from .models import (
     ActivitySettlement,
 )
 from .payment_gateway import PaymentResult
-from .services import calculate_publish_service_fee, process_activity_timeouts
+from .services import (
+    calculate_publish_service_fee,
+    create_activity_participation_refund,
+    process_activity_timeouts,
+)
 
 
 class ActivityModelTests(TestCase):
@@ -488,9 +496,10 @@ class ActivityModelTests(TestCase):
         self.assertEqual(ActivityParticipationRefundOrder.objects.count(), 1)
         refund = ActivityParticipationRefundOrder.objects.get()
         self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.PENDING)
-        processed = process_due_tasks(
-            task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            processed = process_due_tasks(
+                task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
+            )
         self.assertEqual(processed["succeeded"], 1)
         refund.refresh_from_db()
         self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED)
@@ -509,6 +518,110 @@ class ActivityModelTests(TestCase):
             ).count(),
             1,
         )
+
+    @override_settings(DEBUG=True)
+    def test_zero_amount_cancellation_is_completed_locally_without_gateway_task(self):
+        starts_at = timezone.now() + timedelta(hours=1)
+        activity = self.build_activity(
+            status=Activity.Status.RECRUITING,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=2),
+            formation_deadline=timezone.now() + timedelta(minutes=20),
+        )
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800000041",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.client.force_login(participant)
+        self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+        self.client.post(
+            f"/api/v1/activities/{activity.pk}/participation/simulate-payment/"
+        )
+
+        with patch(
+            "activities.payment_gateway.MockActivityPaymentGateway.refund"
+        ) as gateway_refund:
+            response = self.client.delete(
+                f"/api/v1/activities/{activity.pk}/participation/"
+            )
+            processed = process_due_tasks(
+                task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
+            )
+
+        self.assertEqual(response.status_code, 200)
+        refund = ActivityParticipationRefundOrder.objects.get()
+        self.assertEqual(refund.refund_amount, 0)
+        self.assertEqual(
+            refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED
+        )
+        self.assertIsNotNone(refund.refunded_at)
+        self.assertEqual(refund.retained_principal_amount, 4800)
+        self.assertEqual(refund.retained_service_fee_amount, 480)
+        self.assertEqual(
+            refund.retained_principal_destination,
+            ActivityParticipationRefundOrder.PrincipalDestination.ORGANIZER,
+        )
+        self.assertEqual(processed["claimed"], 0)
+        self.assertFalse(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+                business_key=refund.refund_no,
+            ).exists()
+        )
+        gateway_refund.assert_not_called()
+
+    def test_failed_refund_keeps_paid_amount_reserved(self):
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant_user = User.objects.create_user(
+            phone="13800000042", password="test"
+        )
+        participation = ActivityParticipation.objects.create(
+            activity=activity,
+            user=participant_user,
+            status=ActivityParticipation.Status.CANCELLED,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+        )
+        payment = ActivityParticipationPaymentOrder.objects.create(
+            participation=participation,
+            payer=participant_user,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            status=ActivityParticipationPaymentOrder.Status.PAID,
+            expires_at=timezone.now() + timedelta(minutes=30),
+            paid_at=timezone.now(),
+        )
+        refund, _ = create_activity_participation_refund(
+            participation=participation,
+            payment_order=payment,
+            refund_type=ActivityParticipationRefundOrder.RefundType.AFTER_SALES,
+            idempotency_key="failed-refund-reservation-a",
+            principal_refund_amount=4800,
+            service_fee_refund_amount=480,
+            reason="首次退款进入失败状态",
+        )
+        refund.status = ActivityParticipationRefundOrder.Status.FAILED
+        refund.failure_reason = "模拟渠道失败"
+        refund.save(update_fields=("status", "failure_reason", "updated_at"))
+
+        with self.assertRaises(DRFValidationError):
+            create_activity_participation_refund(
+                participation=participation,
+                payment_order=payment,
+                refund_type=ActivityParticipationRefundOrder.RefundType.AFTER_SALES,
+                idempotency_key="failed-refund-reservation-b",
+                principal_refund_amount=4800,
+                service_fee_refund_amount=480,
+                reason="不应创建的第二张全额退款",
+            )
+
+        self.assertEqual(ActivityParticipationRefundOrder.objects.count(), 1)
 
     @override_settings(DEBUG=True)
     def test_activity_after_sales_is_idempotent_and_links_paid_participation(self):
@@ -934,3 +1047,102 @@ class ActivityModelTests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.json()["data"]["case_no"], second.json()["data"]["case_no"])
         self.assertEqual(private.status_code, 404)
+
+
+class ActivityRefundConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        organizer = User.objects.create_user(phone="13800000901", password="test")
+        participant_user = User.objects.create_user(
+            phone="13800000902", password="test"
+        )
+        category = ActivityCategory.objects.create(
+            name="并发退款测试", slug="concurrent-refund"
+        )
+        starts_at = timezone.now() + timedelta(days=3)
+        activity = Activity.objects.create(
+            organizer=organizer,
+            category=category,
+            title="活动退款并发测试",
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=2),
+            formation_deadline=starts_at - timedelta(hours=12),
+            meeting_place_name="并发测试场地",
+            meeting_address="邯郸市测试地址",
+            city_code="130400",
+            city_name="邯郸市",
+            source_longitude=Decimal("114.4921000"),
+            source_latitude=Decimal("36.6123000"),
+            meeting_point=Point(114.4859, 36.6118, srid=4326),
+            capacity=8,
+            min_participants=4,
+            description="并发退款测试活动",
+            participation_rules="测试规则",
+            aa_principal_amount=4800,
+            refund_template_version="standard-v1",
+            refund_rule_snapshot={"version": "standard-v1"},
+            status=Activity.Status.RECRUITING,
+        )
+        self.participation = ActivityParticipation.objects.create(
+            activity=activity,
+            user=participant_user,
+            status=ActivityParticipation.Status.ACTIVE,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            joined_at=timezone.now(),
+        )
+        self.payment = ActivityParticipationPaymentOrder.objects.create(
+            participation=self.participation,
+            payer=participant_user,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            status=ActivityParticipationPaymentOrder.Status.PAID,
+            expires_at=timezone.now() + timedelta(minutes=30),
+            paid_at=timezone.now(),
+        )
+
+    def test_concurrent_full_refunds_reserve_paid_amount_once(self):
+        barrier = Barrier(2)
+
+        def create_refund(idempotency_key):
+            close_old_connections()
+            try:
+                participation = ActivityParticipation.objects.get(
+                    pk=self.participation.pk
+                )
+                payment = ActivityParticipationPaymentOrder.objects.get(
+                    pk=self.payment.pk
+                )
+                barrier.wait(timeout=5)
+                create_activity_participation_refund(
+                    participation=participation,
+                    payment_order=payment,
+                    refund_type=(
+                        ActivityParticipationRefundOrder.RefundType.AFTER_SALES
+                    ),
+                    idempotency_key=idempotency_key,
+                    principal_refund_amount=4800,
+                    service_fee_refund_amount=480,
+                    reason="并发创建全额退款",
+                )
+                return "created"
+            except DRFValidationError:
+                return "rejected"
+            finally:
+                connection.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(
+                executor.map(
+                    create_refund,
+                    ("concurrent-refund-a", "concurrent-refund-b"),
+                )
+            )
+
+        self.assertCountEqual(outcomes, ("created", "rejected"))
+        self.assertEqual(ActivityParticipationRefundOrder.objects.count(), 1)
+        self.assertEqual(
+            ActivityParticipationRefundOrder.objects.get().refund_amount, 5280
+        )

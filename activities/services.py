@@ -565,10 +565,13 @@ def simulate_participation_payment(*, activity_id: int, user):
     return participation, order, True
 
 
-def _refunded_totals(payment_order):
-    totals = payment_order.refund_orders.filter(
-        status=ActivityParticipationRefundOrder.Status.SUCCEEDED
-    ).aggregate(
+def _refund_totals(payment_order, *, succeeded_only=False):
+    refunds = payment_order.refund_orders.all()
+    if succeeded_only:
+        refunds = refunds.filter(
+            status=ActivityParticipationRefundOrder.Status.SUCCEEDED
+        )
+    totals = refunds.aggregate(
         principal=Sum("principal_refund_amount"),
         service_fee=Sum("service_fee_refund_amount"),
         total=Sum("refund_amount"),
@@ -578,6 +581,16 @@ def _refunded_totals(payment_order):
         totals["service_fee"] or 0,
         totals["total"] or 0,
     )
+
+
+def _reserved_refund_totals(payment_order):
+    # Pending, processing and failed refunds remain executable/retryable, so they
+    # reserve paid components until the refund is explicitly abandoned.
+    return _refund_totals(payment_order)
+
+
+def _succeeded_refund_totals(payment_order):
+    return _refund_totals(payment_order, succeeded_only=True)
 
 
 def _round_percent(amount: int, percent: int) -> int:
@@ -651,7 +664,11 @@ def create_activity_participation_refund(
         ):
             raise ValidationError("退款幂等键对应的业务参数不一致。")
         return existing, False
-    refunded_principal, refunded_service_fee, _ = _refunded_totals(payment_order)
+    if principal_refund_amount < 0 or service_fee_refund_amount < 0:
+        raise ValidationError("退款金额不能小于0。")
+    refunded_principal, refunded_service_fee, _ = _reserved_refund_totals(
+        payment_order
+    )
     if principal_refund_amount > payment_order.aa_principal_amount - refunded_principal:
         raise ValidationError("AA本金退款金额超过可退金额。")
     if (
@@ -661,6 +678,7 @@ def create_activity_participation_refund(
         raise ValidationError("平台服务费退款金额超过可退金额。")
     try:
         with transaction.atomic():
+            refund_amount = principal_refund_amount + service_fee_refund_amount
             refund = ActivityParticipationRefundOrder.objects.create(
                 idempotency_key=idempotency_key,
                 activity=participation.activity,
@@ -670,12 +688,18 @@ def create_activity_participation_refund(
                 refund_type=refund_type,
                 principal_refund_amount=principal_refund_amount,
                 service_fee_refund_amount=service_fee_refund_amount,
-                refund_amount=principal_refund_amount + service_fee_refund_amount,
+                refund_amount=refund_amount,
                 retained_principal_amount=retained_principal_amount,
                 retained_service_fee_amount=retained_service_fee_amount,
                 retained_principal_destination=retained_principal_destination,
                 reason=reason,
                 operator=operator,
+                status=(
+                    ActivityParticipationRefundOrder.Status.SUCCEEDED
+                    if refund_amount == 0
+                    else ActivityParticipationRefundOrder.Status.PENDING
+                ),
+                refunded_at=timezone.now() if refund_amount == 0 else None,
             )
     except IntegrityError as exc:
         existing = ActivityParticipationRefundOrder.objects.filter(
@@ -690,9 +714,10 @@ def create_activity_participation_refund(
             ):
                 return existing, False
         raise ValidationError("退款请求发生并发冲突，请稍后重试。") from exc
-    from taskcenter.services import register_activity_participation_refund
+    if refund.refund_amount > 0:
+        from taskcenter.services import register_activity_participation_refund
 
-    register_activity_participation_refund(refund)
+        register_activity_participation_refund(refund)
     return refund, True
 
 
@@ -771,7 +796,7 @@ def process_activity_participation_refund(refund_no: str, *, now=None):
                 "updated_at",
             )
         )
-        _, _, refunded_total = _refunded_totals(payment_order)
+        _, _, refunded_total = _succeeded_refund_totals(payment_order)
         if refunded_total >= payment_order.payable_amount:
             payment_order.status = ActivityParticipationPaymentOrder.Status.REFUNDED
         elif refunded_total:
@@ -779,16 +804,20 @@ def process_activity_participation_refund(refund_no: str, *, now=None):
                 ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED
             )
         payment_order.save(update_fields=("status", "updated_at"))
-        create_activity_notification(
-            activity=refund.activity,
-            recipient=refund.participation.user,
-            event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
-            title="活动退款已完成",
-            content=(
-                f"退款 ¥{refund.refund_amount // 100}.{refund.refund_amount % 100:02d} "
-                "已提交原支付渠道，请留意到账。"
+        transaction.on_commit(
+            lambda: create_activity_notification(
+                activity=refund.activity,
+                recipient=refund.participation.user,
+                event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
+                title="活动退款已完成",
+                content=(
+                    f"退款 ¥{refund.refund_amount // 100}."
+                    f"{refund.refund_amount % 100:02d} "
+                    "已提交原支付渠道，请留意到账。"
+                ),
+                dedupe_suffix=refund.refund_no,
             ),
-            dedupe_suffix=refund.refund_no,
+            robust=True,
         )
         from taskcenter.services import mark_activity_participation_refund_succeeded
 
@@ -885,9 +914,22 @@ def create_activity_after_sales_case(
     if not participation:
         raise NotFound("未找到该活动的报名记录。")
     existing = participation.after_sales_cases.filter(
-        status__in=(
-            ActivityAfterSalesCase.Status.PENDING,
-            ActivityAfterSalesCase.Status.PROCESSING,
+        Q(
+            status__in=(
+                ActivityAfterSalesCase.Status.PENDING,
+                ActivityAfterSalesCase.Status.PROCESSING,
+            )
+        )
+        | (
+            Q(status=ActivityAfterSalesCase.Status.APPROVED)
+            & (
+                Q(refund_order__isnull=True)
+                | ~Q(
+                    refund_order__status=(
+                        ActivityParticipationRefundOrder.Status.SUCCEEDED
+                    )
+                )
+            )
         )
     ).first()
     if existing:
@@ -900,7 +942,9 @@ def create_activity_after_sales_case(
     payment_order = _latest_refundable_payment_order(participation)
     if not payment_order:
         raise ValidationError("当前报名没有可申请退款的支付金额。")
-    refunded_principal, refunded_service_fee, _ = _refunded_totals(payment_order)
+    refunded_principal, refunded_service_fee, _ = _reserved_refund_totals(
+        payment_order
+    )
     requested_principal = payment_order.aa_principal_amount - refunded_principal
     requested_service_fee = (
         payment_order.platform_service_fee_amount - refunded_service_fee
@@ -958,7 +1002,9 @@ def refund_all_activity_participations(
                 _close_pending_payment_order(pending_order, now=now)
         else:
             payment_order = refundable_orders[participation.pk]
-            refunded_principal, refunded_service_fee, _ = _refunded_totals(payment_order)
+            refunded_principal, refunded_service_fee, _ = _reserved_refund_totals(
+                payment_order
+            )
             refund, _ = create_activity_participation_refund(
                 participation=participation,
                 payment_order=payment_order,

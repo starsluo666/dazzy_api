@@ -1,7 +1,7 @@
 import logging
 
 from django.contrib.gis.db.models.functions import Distance
-from django.db.models import Min, Q
+from django.db.models import BooleanField, Case, Min, Q, Value, When
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
@@ -27,7 +27,13 @@ def _service_duration(service: ProviderService) -> int:
 
 
 def _recommended_providers(params, point, request):
-    queryset = public_providers().filter(online_provider_query()).annotate(
+    online_query = online_provider_query()
+    queryset = public_providers().filter(admin_order_restricted=False).annotate(
+        is_currently_online=Case(
+            When(online_query, then=Value(True)),
+            default=Value(False),
+            output_field=BooleanField(),
+        ),
         starting_price_amount=Min(
             "services__price_amount",
             filter=Q(services__is_active=True, services__category__is_active=True),
@@ -40,10 +46,14 @@ def _recommended_providers(params, point, request):
             distance=Distance("live_location__position", point)
         )
     providers = list(
-        queryset.order_by("-rating", "-service_count", "id").distinct()[:4]
+        queryset.order_by(
+            "-is_currently_online", "-rating", "-service_count", "id"
+        ).distinct()[:4]
     )
     earliest_by_provider = {}
     for provider in providers:
+        if not provider.is_currently_online:
+            continue
         service = next(iter(provider.services.all()), None)
         if not service:
             continue

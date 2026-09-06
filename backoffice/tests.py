@@ -32,7 +32,10 @@ from orders.models import (
     ProviderOrderRefundOrder,
     ProviderOrderReview,
 )
-from orders.services import create_provider_order_payment_order
+from orders.services import (
+    create_provider_order_payment_order,
+    create_provider_order_refund,
+)
 from providers.models import (
     ProviderLiveLocation,
     ProviderProfile,
@@ -41,7 +44,11 @@ from providers.models import (
     ServiceCategory,
 )
 from taskcenter.models import ScheduledTask
-from taskcenter.services import process_due_tasks, register_provider_order_confirmation_timeout
+from taskcenter.services import (
+    process_due_tasks,
+    register_activity_participation_refund,
+    register_provider_order_confirmation_timeout,
+)
 
 from .models import (
     AdminAuditLog,
@@ -676,6 +683,22 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(audit.before["location_timeout_minutes"], 30)
         self.assertEqual(audit.after["location_timeout_minutes"], 45)
 
+        no_expiry_response = self.client.patch(
+            detail_url,
+            {"location_timeout_minutes": 0},
+            format="json",
+        )
+        self.assertEqual(no_expiry_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(ProviderOrderingSetting.current().location_timeout_minutes, 0)
+
+        invalid_timeout_response = self.client.patch(
+            detail_url,
+            {"location_timeout_minutes": 5},
+            format="json",
+        )
+        self.assertEqual(invalid_timeout_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(ProviderOrderingSetting.current().location_timeout_minutes, 0)
+
         invalid_response = self.client.patch(
             detail_url,
             {"max_location_accuracy_m": 201},
@@ -979,7 +1002,10 @@ class BackofficeProviderReviewTests(APITestCase):
             idempotency_key=f"provider-after-sales:{case_no}"
         )
         self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.PENDING)
-        processed = process_due_tasks(task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND])
+        with self.captureOnCommitCallbacks(execute=True):
+            processed = process_due_tasks(
+                task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND]
+            )
         self.assertEqual(processed["succeeded"], 1)
         refund.refresh_from_db()
         self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
@@ -1124,6 +1150,51 @@ class BackofficeProviderReviewTests(APITestCase):
             AdminAuditLog.objects.filter(
                 action="order.finance.refund.retry", target_id=refund.refund_no
             ).exists()
+        )
+
+    def test_provider_refund_retry_returns_business_error_and_audits_failure(self):
+        order = self.create_fulfillment_order(
+            order_no="ADMIN-REFUND-RETRY-FAILURE",
+            provider=self.handan,
+        )
+        refund, _ = create_provider_order_refund(
+            order_no=order.order_no,
+            amount=16800,
+            source_type=ProviderOrderRefundOrder.SourceType.ADMIN,
+            source_reference="manual-retry-failure-test",
+            idempotency_key="manual-retry-failure-test",
+            reason="测试人工退款重试失败响应",
+            operator=self.admin_user,
+        )
+        refund.status = ProviderOrderRefundOrder.Status.FAILED
+        refund.failure_reason = "首次渠道超时"
+        refund.save(update_fields=("status", "failure_reason", "updated_at"))
+
+        with patch(
+            "orders.payment_gateway.MockProviderOrderPaymentGateway.refund",
+            side_effect=RuntimeError("渠道仍然不可用"),
+        ):
+            response = self.client.post(
+                reverse(
+                    "backoffice-provider-order-refund-retry",
+                    args=(refund.refund_no,),
+                ),
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("渠道仍然不可用", str(response.data))
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.FAILED)
+        audit = AdminAuditLog.objects.get(
+            action="order.finance.refund.retry", target_id=refund.refund_no
+        )
+        self.assertEqual(
+            audit.after["status"], ProviderOrderRefundOrder.Status.FAILED
+        )
+        self.assertNotEqual(
+            audit.after["status"], ProviderOrderRefundOrder.Status.SUCCEEDED
         )
 
     def test_after_sales_pauses_and_reopens_confirmation_timeout(self):
@@ -1576,6 +1647,94 @@ class BackofficeActivityManagementTests(APITestCase):
 
     def setUp(self):
         self.client.force_authenticate(self.admin_user)
+
+    def create_failed_activity_refund(self):
+        participation = ActivityParticipation.objects.get(
+            activity=self.handan_activity,
+            user=self.participant,
+        )
+        payment = participation.payment_orders.get()
+        refund = ActivityParticipationRefundOrder.objects.create(
+            idempotency_key=f"admin-activity-retry-{participation.pk}",
+            activity=self.handan_activity,
+            participation=participation,
+            payment_order=payment,
+            beneficiary=self.participant,
+            refund_type=ActivityParticipationRefundOrder.RefundType.AFTER_SALES,
+            principal_refund_amount=4800,
+            service_fee_refund_amount=480,
+            refund_amount=5280,
+            reason="测试活动退款人工恢复",
+            status=ActivityParticipationRefundOrder.Status.FAILED,
+            failure_reason="渠道连续失败",
+        )
+        task, _ = register_activity_participation_refund(refund)
+        task.status = ScheduledTask.Status.FAILED
+        task.attempt_count = task.max_attempts
+        task.finished_at = timezone.now()
+        task.last_error = "RuntimeError: 渠道连续失败"
+        task.save(
+            update_fields=(
+                "status", "attempt_count", "finished_at", "last_error", "updated_at",
+            )
+        )
+        return refund, task
+
+    def test_failed_activity_refund_can_be_retried_from_finance(self):
+        refund, task = self.create_failed_activity_refund()
+
+        response = self.client.post(
+            reverse("backoffice-activity-refund-retry", args=(refund.refund_no,)),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"]["status"],
+            ActivityParticipationRefundOrder.Status.SUCCEEDED,
+        )
+        refund.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(
+            refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED
+        )
+        self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
+        audit = AdminAuditLog.objects.get(
+            action="activity.finance.refund.retry", target_id=refund.refund_no
+        )
+        self.assertEqual(
+            audit.after["status"],
+            ActivityParticipationRefundOrder.Status.SUCCEEDED,
+        )
+
+    def test_activity_refund_retry_failure_returns_400_and_real_audit_status(self):
+        refund, task = self.create_failed_activity_refund()
+
+        with patch(
+            "activities.payment_gateway.MockActivityPaymentGateway.refund",
+            side_effect=RuntimeError("活动退款渠道仍然超时"),
+        ):
+            response = self.client.post(
+                reverse(
+                    "backoffice-activity-refund-retry", args=(refund.refund_no,)
+                ),
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("活动退款渠道仍然超时", str(response.data))
+        refund.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.FAILED)
+        self.assertEqual(task.status, ScheduledTask.Status.FAILED)
+        audit = AdminAuditLog.objects.get(
+            action="activity.finance.refund.retry", target_id=refund.refund_no
+        )
+        self.assertEqual(
+            audit.after["status"], ActivityParticipationRefundOrder.Status.FAILED
+        )
 
     def test_activity_list_is_city_scoped_and_has_financial_summary(self):
         response = self.client.get(reverse("backoffice-activities"))

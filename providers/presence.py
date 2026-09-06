@@ -17,9 +17,10 @@ def operation_rules():
     from backoffice.models import ProviderOrderingSetting
     try:
         setting = ProviderOrderingSetting.current()
+        timeout_minutes = setting.location_timeout_minutes
         return {
-            "timeout": timedelta(minutes=setting.location_timeout_minutes),
-            "timeout_minutes": setting.location_timeout_minutes,
+            "timeout": timedelta(minutes=timeout_minutes) if timeout_minutes else None,
+            "timeout_minutes": timeout_minutes,
             "report_interval_seconds": setting.location_report_interval_seconds,
             "max_accuracy_m": Decimal(setting.max_location_accuracy_m),
             "acceptance_timeout_minutes": setting.acceptance_timeout_minutes,
@@ -29,20 +30,25 @@ def operation_rules():
 
 
 def online_cutoff(now=None):
-    return (now or timezone.now()) - operation_rules()["timeout"]
+    timeout = operation_rules()["timeout"]
+    return (now or timezone.now()) - timeout if timeout is not None else None
 
 
 def online_provider_query(now=None) -> Q:
-    return Q(
+    rules = operation_rules()
+    query = Q(
         status=ProviderProfile.Status.APPROVED,
         is_accepting_orders=True,
         admin_order_restricted=False,
         user__is_active=True,
         user__account_status="active",
         live_location__session_id__isnull=False,
-        live_location__received_at__gte=online_cutoff(now),
-        live_location__accuracy_m__lte=operation_rules()["max_accuracy_m"],
+        live_location__accuracy_m__lte=rules["max_accuracy_m"],
     )
+    cutoff = (now or timezone.now()) - rules["timeout"] if rules["timeout"] is not None else None
+    if cutoff is not None:
+        query &= Q(live_location__received_at__gte=cutoff)
+    return query
 
 
 def get_provider_live_location(provider: ProviderProfile) -> ProviderLiveLocation | None:
@@ -62,13 +68,16 @@ def provider_is_online(provider: ProviderProfile, now=None) -> bool:
     ):
         return False
     location = get_provider_live_location(provider)
+    rules = operation_rules()
+    cutoff = (now or timezone.now()) - rules["timeout"] if rules["timeout"] is not None else None
     return bool(
         location
         and location.session_id
-        and location.accuracy_m <= operation_rules()["max_accuracy_m"]
-        and location.received_at >= online_cutoff(now)
+        and location.accuracy_m <= rules["max_accuracy_m"]
+        and (cutoff is None or location.received_at >= cutoff)
     )
 
 
 def location_expires_at(location: ProviderLiveLocation | None):
-    return location.received_at + operation_rules()["timeout"] if location and location.session_id else None
+    timeout = operation_rules()["timeout"]
+    return location.received_at + timeout if location and location.session_id and timeout else None

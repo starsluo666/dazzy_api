@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
+from backoffice.models import ProviderOrderingSetting
 from mediafiles.models import MediaAsset
 from orders.models import ProviderOrder, ProviderOrderReview, ProviderOrderSettlement
 
@@ -98,8 +99,25 @@ class ProviderModelTests(TestCase):
         ProviderLiveLocation.objects.filter(provider=provider).update(
             received_at=timezone.now() - timedelta(minutes=31)
         )
-        stale_response = self.client.get("/api/v1/providers/")
-        self.assertEqual(stale_response.json()["data"]["pagination"]["total"], 0)
+        stale_response = self.client.get(
+            "/api/v1/providers/",
+            {
+                "city_code": "110100",
+                "longitude": "116.4039810",
+                "latitude": "39.9150010",
+                "ordering": "distance",
+            },
+        )
+        stale_item = stale_response.json()["data"]["items"][0]
+        self.assertEqual(stale_response.json()["data"]["pagination"]["total"], 1)
+        self.assertFalse(stale_item["is_online"])
+        self.assertIsNotNone(stale_item["distance_km"])
+
+        setting = ProviderOrderingSetting.current()
+        setting.location_timeout_minutes = 0
+        setting.save(update_fields=("location_timeout_minutes", "updated_at"))
+        no_expiry_response = self.client.get("/api/v1/providers/")
+        self.assertTrue(no_expiry_response.json()["data"]["items"][0]["is_online"])
 
     def test_provider_detail_returns_public_profile_and_active_services(self):
         user = User.objects.create_user(
