@@ -1,15 +1,19 @@
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
 from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from accounts.models import User
 from backoffice.models import PlatformOperationSetting
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
+from taskcenter.models import ScheduledTask
+from taskcenter.services import process_due_tasks
 
 from .models import (
     Activity,
@@ -21,6 +25,7 @@ from .models import (
     ActivityPublishOrder,
     ActivitySettlement,
 )
+from .payment_gateway import PaymentResult
 from .services import calculate_publish_service_fee, process_activity_timeouts
 
 
@@ -414,6 +419,44 @@ class ActivityModelTests(TestCase):
         )
 
     @override_settings(DEBUG=True)
+    def test_participation_payment_rejects_gateway_amount_mismatch(self):
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800000040",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.client.force_login(participant)
+        self.client.post(f"/api/v1/activities/{activity.pk}/participation/")
+
+        with patch(
+            "activities.payment_gateway.MockActivityPaymentGateway.confirm_payment",
+            return_value=PaymentResult(
+                gateway_trade_no="MISMATCHED-ACTIVITY-AMOUNT",
+                paid_amount=1,
+                signature_verified=True,
+            ),
+        ):
+            response = self.client.post(
+                f"/api/v1/activities/{activity.pk}/participation/simulate-payment/"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        participation = ActivityParticipation.objects.get(
+            activity=activity,
+            user=participant,
+        )
+        self.assertEqual(
+            participation.status,
+            ActivityParticipation.Status.PENDING_PAYMENT,
+        )
+        self.assertEqual(
+            participation.payment_orders.get().status,
+            ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT,
+        )
+
+    @override_settings(DEBUG=True)
     def test_participant_cancellation_creates_rule_based_refund_idempotently(self):
         starts_at = timezone.now() + timedelta(hours=4)
         activity = self.build_activity(
@@ -444,6 +487,13 @@ class ActivityModelTests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(ActivityParticipationRefundOrder.objects.count(), 1)
         refund = ActivityParticipationRefundOrder.objects.get()
+        self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.PENDING)
+        processed = process_due_tasks(
+            task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
+        )
+        self.assertEqual(processed["succeeded"], 1)
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED)
         self.assertEqual(refund.principal_refund_amount, 3360)
         self.assertEqual(refund.service_fee_refund_amount, 0)
         self.assertEqual(refund.retained_principal_amount, 1440)
@@ -516,6 +566,7 @@ class ActivityModelTests(TestCase):
             payable_amount=5280,
             pricing_snapshot={"platform_service_fee_rate": "0.10"},
             status=ActivityPublishOrder.Status.PAID,
+            expires_at=timezone.now() - timedelta(days=1),
             paid_at=timezone.now() - timedelta(days=1),
         )
 
@@ -560,6 +611,7 @@ class ActivityModelTests(TestCase):
             payable_amount=5280,
             pricing_snapshot={"platform_service_fee_rate": "0.10"},
             status=ActivityPublishOrder.Status.PAID,
+            expires_at=now - timedelta(days=1),
             paid_at=now - timedelta(days=1),
         )
         participant = User.objects.create_user(phone="13800000038", password="test")
@@ -652,6 +704,7 @@ class ActivityModelTests(TestCase):
             payable_amount=5280,
             pricing_snapshot={"platform_service_fee_rate": "0.10"},
             status=ActivityPublishOrder.Status.PAID,
+            expires_at=timezone.now() - timedelta(days=1),
             paid_at=timezone.now() - timedelta(days=1),
         )
         participant = User.objects.create_user(
@@ -724,11 +777,16 @@ class ActivityModelTests(TestCase):
             f"/api/v1/activities/{activity.pk}/publish-order/"
         )
         first_order_no = payment_order.json()["data"]["order_no"]
+        same_order = self.client.post(f"/api/v1/activities/{activity.pk}/publish-order/")
+        self.assertEqual(same_order.json()["data"]["order_no"], first_order_no)
         ActivityPublishOrder.objects.filter(order_no=first_order_no).update(
             status=ActivityPublishOrder.Status.CANCELLED
         )
         retry_order = self.client.post(f"/api/v1/activities/{activity.pk}/publish-order/")
         paid = self.client.post(
+            f"/api/v1/activities/{activity.pk}/publish-order/simulate-payment/"
+        )
+        paid_again = self.client.post(
             f"/api/v1/activities/{activity.pk}/publish-order/simulate-payment/"
         )
         activity.refresh_from_db()
@@ -742,6 +800,10 @@ class ActivityModelTests(TestCase):
         self.assertNotEqual(retry_order.json()["data"]["order_no"], first_order_no)
         self.assertEqual(ActivityPublishOrder.objects.filter(activity=activity).count(), 2)
         self.assertEqual(paid.status_code, 200)
+        self.assertEqual(paid_again.status_code, 200)
+        self.assertEqual(
+            paid_again.json()["data"]["order_no"], retry_order.json()["data"]["order_no"]
+        )
         self.assertEqual(order.status, ActivityPublishOrder.Status.PAID)
         self.assertEqual(activity.status, Activity.Status.PENDING_REVIEW)
         self.assertTrue(
@@ -751,6 +813,41 @@ class ActivityModelTests(TestCase):
                 target_id=str(activity.pk),
             ).exists()
         )
+
+    @override_settings(DEBUG=True)
+    def test_activity_publish_payment_expires_through_task_center(self):
+        self.organizer.verification_status = User.VerificationStatus.VERIFIED
+        self.organizer.save(update_fields=("verification_status",))
+        self.client.force_login(self.organizer)
+        created = self.client.post(
+            "/api/v1/activities/",
+            self.activity_create_payload(),
+            content_type="application/json",
+        )
+        activity = Activity.objects.get(pk=created.json()["data"]["id"])
+        response = self.client.post(
+            f"/api/v1/activities/{activity.pk}/publish-order/"
+        )
+        order = ActivityPublishOrder.objects.get(
+            order_no=response.json()["data"]["order_no"]
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            parse_datetime(response.json()["data"]["expires_at"]),
+            order.expires_at,
+        )
+        processed = process_due_tasks(
+            task_types=[ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY],
+            now=order.expires_at,
+        )
+
+        self.assertEqual(processed["succeeded"], 1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ActivityPublishOrder.Status.CANCELLED)
+        self.assertIsNotNone(order.closed_at)
+        activity.refresh_from_db()
+        self.assertEqual(activity.status, Activity.Status.DRAFT)
 
     def test_activity_create_enforces_verification_and_start_window(self):
         self.client.force_login(self.organizer)

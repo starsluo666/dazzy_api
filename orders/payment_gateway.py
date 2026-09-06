@@ -6,6 +6,8 @@ from typing import Protocol
 @dataclass(frozen=True)
 class PaymentResult:
     gateway_trade_no: str
+    paid_amount: int
+    signature_verified: bool
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,11 @@ class MockProviderOrderPaymentGateway:
 
     def confirm_payment(self, *, payment_no: str, amount: int) -> PaymentResult:
         digest = sha256(f"payment:{payment_no}:{amount}".encode()).hexdigest()[:24]
-        return PaymentResult(gateway_trade_no=f"MOCKPAY{digest.upper()}")
+        return PaymentResult(
+            gateway_trade_no=f"MOCKPAY{digest.upper()}",
+            paid_amount=amount,
+            signature_verified=True,
+        )
 
     def refund(self, *, refund_no: str, amount: int) -> RefundResult:
         digest = sha256(f"refund:{refund_no}:{amount}".encode()).hexdigest()[:24]

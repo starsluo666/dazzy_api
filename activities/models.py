@@ -319,7 +319,7 @@ class ActivityParticipationRefundOrder(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "待退款"
         PROCESSING = "processing", "退款处理中"
-        SUCCEEDED = "succeeded", "模拟退款成功"
+        SUCCEEDED = "succeeded", "退款成功"
         FAILED = "failed", "退款失败"
 
     class PrincipalDestination(models.TextChoices):
@@ -385,6 +385,7 @@ class ActivityParticipationRefundOrder(models.Model):
     )
     requested_at = models.DateTimeField("申请时间", auto_now_add=True)
     refunded_at = models.DateTimeField("退款完成时间", null=True, blank=True)
+    failure_reason = models.CharField("失败原因", max_length=1000, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -539,14 +540,29 @@ class ActivityPublishOrder(models.Model):
     status = models.CharField(
         "状态", max_length=20, choices=Status, default=Status.PENDING_PAYMENT
     )
+    expires_at = models.DateTimeField("支付失效时间")
     paid_at = models.DateTimeField("支付时间", null=True, blank=True)
+    closed_at = models.DateTimeField("关闭时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "activity_publish_order"
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=("payer", "status", "-created_at"))]
+        indexes = [
+            models.Index(fields=("payer", "status", "-created_at")),
+            models.Index(
+                fields=("status", "expires_at"),
+                name="activity_pub_status_exp_idx",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("activity", "payer"),
+                condition=Q(status="pending_payment"),
+                name="uniq_pending_activity_publish_payment",
+            )
+        ]
         verbose_name = "活动发布支付单"
         verbose_name_plural = verbose_name
 

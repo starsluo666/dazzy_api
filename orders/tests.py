@@ -23,6 +23,7 @@ from locations.tencent import RouteResult
 from locations.models import UserAddress
 from taskcenter.models import ScheduledTask
 
+from .payment_gateway import PaymentResult
 from .models import (
     ProviderOrder,
     ProviderOrderPaymentOrder,
@@ -232,6 +233,55 @@ class ProviderOrderApiTests(TestCase):
                 business_key=order_no,
             ).exists()
         )
+
+    def test_payment_rejects_gateway_amount_mismatch(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        with patch(
+            "orders.payment_gateway.MockProviderOrderPaymentGateway.confirm_payment",
+            return_value=PaymentResult(
+                gateway_trade_no="MISMATCHED-AMOUNT",
+                paid_amount=1,
+                signature_verified=True,
+            ),
+        ):
+            response = self.client.post(
+                f"/api/v1/provider-orders/{order_no}/simulate-payment/"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        order = ProviderOrder.objects.get(order_no=order_no)
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertIsNone(order.paid_at)
+        self.assertEqual(
+            order.payment_order.status,
+            ProviderOrderPaymentOrder.Status.PENDING_PAYMENT,
+        )
+
+    def test_payment_rejects_unverified_gateway_result(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        order = ProviderOrder.objects.get(order_no=order_no)
+        with patch(
+            "orders.payment_gateway.MockProviderOrderPaymentGateway.confirm_payment",
+            return_value=PaymentResult(
+                gateway_trade_no="UNVERIFIED-RESULT",
+                paid_amount=order.payable_amount,
+                signature_verified=False,
+            ),
+        ):
+            response = self.client.post(
+                f"/api/v1/provider-orders/{order_no}/simulate-payment/"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertIsNone(order.paid_at)
 
     def test_create_uses_configured_payment_timeout(self):
         PlatformOperationSetting.objects.create(provider_order_payment_timeout_minutes=25)

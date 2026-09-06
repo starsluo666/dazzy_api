@@ -14,7 +14,9 @@ TASK_LEASE_TIMEOUT = timedelta(minutes=5)
 TASK_RETRY_BASE_DELAY = timedelta(minutes=1)
 TASK_SYNC_BATCH_SIZE = 500
 ACTIVITY_TASK_TYPES = (
+    ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
     ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+    ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
     ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE,
     ScheduledTask.Type.ACTIVITY_START,
     ScheduledTask.Type.ACTIVITY_COMPLETION,
@@ -108,6 +110,33 @@ def register_provider_order_settlement(settlement):
     )
 
 
+def register_provider_order_refund(refund):
+    return _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+        business_type="provider_order_refund",
+        business_key=refund.refund_no,
+        scheduled_at=timezone.now(),
+        payload={
+            "refund_no": refund.refund_no,
+            "order_no": refund.order.order_no,
+        },
+    )
+
+
+def register_activity_publish_payment_expiry(order):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
+        business_type="activity_publish_payment",
+        business_key=order.order_no,
+        scheduled_at=order.expires_at,
+        payload={
+            "publish_order_no": order.order_no,
+            "activity_id": order.activity_id,
+            "activity_title": order.activity.title,
+        },
+    )
+
+
 def register_activity_participation_payment_expiry(order):
     return _register_task(
         task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
@@ -119,6 +148,22 @@ def register_activity_participation_payment_expiry(order):
             "participation_id": order.participation_id,
             "activity_id": order.participation.activity_id,
             "activity_title": order.participation.activity.title,
+        },
+    )
+
+
+def register_activity_participation_refund(refund):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+        business_type="activity_participation_refund",
+        business_key=refund.refund_no,
+        scheduled_at=timezone.now(),
+        payload={
+            "refund_no": refund.refund_no,
+            "payment_order_no": refund.payment_order.order_no,
+            "participation_id": refund.participation_id,
+            "activity_id": refund.activity_id,
+            "activity_title": refund.activity.title,
         },
     )
 
@@ -244,6 +289,15 @@ def cancel_activity_participation_payment_expiry(order_no: str, reason: str):
     )
 
 
+def cancel_activity_publish_payment_expiry(order_no: str, reason: str):
+    return cancel_business_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
+        business_type="activity_publish_payment",
+        business_key=order_no,
+        reason=reason,
+    )
+
+
 def reopen_provider_order_settlement(settlement):
     scheduled_at = max(settlement.freeze_until, timezone.now())
     dedupe_key = task_dedupe_key(
@@ -353,6 +407,48 @@ def mark_provider_acceptance_expired(order_no: str, *, source: str):
     )
 
 
+def mark_activity_publish_payment_expired(order_no: str, *, source: str):
+    return mark_business_task_succeeded(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
+        business_type="activity_publish_payment",
+        business_key=order_no,
+        result={"order_no": order_no, "action": "cancelled", "source": source},
+    )
+
+
+def _mark_refund_task_succeeded(*, task_type, business_type, refund_no):
+    now = timezone.now()
+    return ScheduledTask.objects.filter(
+        dedupe_key=task_dedupe_key(task_type, business_type, refund_no),
+        status__in=(
+            ScheduledTask.Status.PENDING,
+            ScheduledTask.Status.FAILED,
+        ),
+    ).update(
+        status=ScheduledTask.Status.SUCCEEDED,
+        finished_at=now,
+        last_error="",
+        result={"refund_no": refund_no, "state": "succeeded"},
+        updated_at=now,
+    )
+
+
+def mark_provider_order_refund_succeeded(refund_no: str):
+    return _mark_refund_task_succeeded(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+        business_type="provider_order_refund",
+        refund_no=refund_no,
+    )
+
+
+def mark_activity_participation_refund_succeeded(refund_no: str):
+    return _mark_refund_task_succeeded(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+        business_type="activity_participation_refund",
+        refund_no=refund_no,
+    )
+
+
 def _requiring_task_synchronization(queryset, *, task_type, deadline_field):
     existing_task = ScheduledTask.objects.filter(
         task_type=task_type,
@@ -377,6 +473,7 @@ def _requiring_task_synchronization(queryset, *, task_type, deadline_field):
 def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     from backoffice.operation_settings import platform_operation_rules
     from orders.models import ProviderOrder
+    from orders.models import ProviderOrderRefundOrder
     from orders.models import ProviderOrderSettlement
     from orders.services import ensure_provider_order_settlement
     from providers.presence import operation_rules
@@ -466,12 +563,35 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
         if not task_exists:
             reopen_provider_order_settlement(settlement)
             settlement_task_created += 1
+    refund_task_created = 0
+    refund_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+        business_type="provider_order_refund",
+        business_key=OuterRef("refund_no"),
+    )
+    refunds = (
+        ProviderOrderRefundOrder.objects.filter(
+            status__in=(
+                ProviderOrderRefundOrder.Status.PENDING,
+                ProviderOrderRefundOrder.Status.PROCESSING,
+                ProviderOrderRefundOrder.Status.FAILED,
+            )
+        )
+        .annotate(_has_scheduled_task=Exists(refund_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("order")
+        .order_by("id")[:batch_size]
+    )
+    for refund in refunds:
+        _, created = register_provider_order_refund(refund)
+        refund_task_created += int(created)
     return {
         "payment_created": payment_created,
         "acceptance_created": acceptance_created,
         "confirmation_created": confirmation_created,
         "settlement_created": settlement_created,
         "settlement_task_created": settlement_task_created,
+        "refund_task_created": refund_task_created,
     }
 
 
@@ -490,12 +610,33 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     from activities.models import (
         Activity,
         ActivityParticipationPaymentOrder,
+        ActivityParticipationRefundOrder,
+        ActivityPublishOrder,
         ActivitySettlement,
     )
     from activities.services import ensure_activity_settlement
 
     batch_size = max(1, min(int(batch_size), 5000))
     payment_created = 0
+    publish_payment_created = 0
+    publish_payment_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
+        business_type="activity_publish_payment",
+        business_key=OuterRef("order_no"),
+    )
+    pending_publish_payments = (
+        ActivityPublishOrder.objects.filter(
+            status=ActivityPublishOrder.Status.PENDING_PAYMENT,
+        )
+        .annotate(_has_scheduled_task=Exists(publish_payment_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("activity")
+        .order_by("id")[:batch_size]
+    )
+    for payment in pending_publish_payments:
+        _, created = register_activity_publish_payment_expiry(payment)
+        publish_payment_created += int(created)
+
     payment_existing = ScheduledTask.objects.filter(
         task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
         business_type="activity_participation",
@@ -513,6 +654,29 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     for payment in pending_payments:
         _, created = register_activity_participation_payment_expiry(payment)
         payment_created += int(created)
+
+    refund_task_created = 0
+    refund_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+        business_type="activity_participation_refund",
+        business_key=OuterRef("refund_no"),
+    )
+    refunds = (
+        ActivityParticipationRefundOrder.objects.filter(
+            status__in=(
+                ActivityParticipationRefundOrder.Status.PENDING,
+                ActivityParticipationRefundOrder.Status.PROCESSING,
+                ActivityParticipationRefundOrder.Status.FAILED,
+            )
+        )
+        .annotate(_has_scheduled_task=Exists(refund_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("activity", "participation", "payment_order")
+        .order_by("id")[:batch_size]
+    )
+    for refund in refunds:
+        _, created = register_activity_participation_refund(refund)
+        refund_task_created += int(created)
 
     formation_created = 0
     formation_activities = (
@@ -594,7 +758,9 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
         settlement_task_created += int(created)
 
     return {
+        "publish_payment_created": publish_payment_created,
         "payment_created": payment_created,
+        "refund_task_created": refund_task_created,
         "formation_created": formation_created,
         "start_created": start_created,
         "completion_created": completion_created,
@@ -689,12 +855,53 @@ def _execute_provider_order_settlement(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _execute_provider_order_refund(task, now):
+    from orders.models import ProviderOrderRefundOrder
+    from orders.services import process_provider_order_refund
+
+    refund = ProviderOrderRefundOrder.objects.filter(refund_no=task.business_key).first()
+    if not refund:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "refund_no": task.business_key},
+        )
+    refund, changed = process_provider_order_refund(task.business_key, now=now)
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.SUCCEEDED,
+        result={
+            "state": refund.status,
+            "refund_no": refund.refund_no,
+            "order_no": refund.order.order_no,
+            "changed": changed,
+        },
+    )
+
+
 def _activity_result(activity, state):
     return {
         "state": state,
         "activity_id": activity.pk,
         "activity_status": activity.status,
     }
+
+
+def _execute_activity_publish_payment_expiry(task, now):
+    from activities.services import expire_activity_publish_payment
+
+    outcome = expire_activity_publish_payment(order_no=task.business_key, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "expired":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result={**outcome, "source": "task_worker"},
+        )
+    return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
 def _execute_activity_participation_payment_expiry(task, now):
@@ -717,6 +924,33 @@ def _execute_activity_participation_payment_expiry(task, now):
             result={**outcome, "source": "task_worker"},
         )
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
+
+
+def _execute_activity_participation_refund(task, now):
+    from activities.models import ActivityParticipationRefundOrder
+    from activities.services import process_activity_participation_refund
+
+    refund = ActivityParticipationRefundOrder.objects.filter(
+        refund_no=task.business_key
+    ).first()
+    if not refund:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "refund_no": task.business_key},
+        )
+    refund, changed = process_activity_participation_refund(
+        task.business_key, now=now
+    )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.SUCCEEDED,
+        result={
+            "state": refund.status,
+            "refund_no": refund.refund_no,
+            "payment_order_no": refund.payment_order.order_no,
+            "activity_id": refund.activity_id,
+            "changed": changed,
+        },
+    )
 
 
 def _resolve_activity_formation(*, activity_id, now):
@@ -898,8 +1132,15 @@ TASK_HANDLERS = {
         _execute_provider_order_confirmation_timeout
     ),
     ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT: _execute_provider_order_settlement,
+    ScheduledTask.Type.PROVIDER_ORDER_REFUND: _execute_provider_order_refund,
+    ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY: (
+        _execute_activity_publish_payment_expiry
+    ),
     ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY: (
         _execute_activity_participation_payment_expiry
+    ),
+    ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND: (
+        _execute_activity_participation_refund
     ),
     ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE: _execute_activity_formation_deadline,
     ScheduledTask.Type.ACTIVITY_START: _execute_activity_start,

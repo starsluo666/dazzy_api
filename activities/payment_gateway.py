@@ -1,11 +1,13 @@
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Protocol
-from uuid import uuid4
 
 
 @dataclass(frozen=True)
 class PaymentResult:
     gateway_trade_no: str
+    paid_amount: int
+    signature_verified: bool
 
 
 @dataclass(frozen=True)
@@ -23,10 +25,17 @@ class MockActivityPaymentGateway:
     """Development gateway with the same result boundary as a real payment provider."""
 
     def confirm_payment(self, *, order_no: str, amount: int) -> PaymentResult:
-        return PaymentResult(gateway_trade_no=f"MOCKPAY{uuid4().hex[:24].upper()}")
+        digest = sha256(f"payment:{order_no}:{amount}".encode()).hexdigest()[:24]
+        return PaymentResult(
+            gateway_trade_no=f"MOCKPAY{digest.upper()}",
+            paid_amount=amount,
+            signature_verified=True,
+        )
 
     def refund(self, *, refund_no: str, amount: int) -> RefundResult:
-        return RefundResult(gateway_refund_no=f"MOCKREF{uuid4().hex[:24].upper()}")
+        # Formal adapters must provide the same refund-no idempotency guarantee.
+        digest = sha256(f"refund:{refund_no}:{amount}".encode()).hexdigest()[:24]
+        return RefundResult(gateway_refund_no=f"MOCKREF{digest.upper()}")
 
 
 def get_activity_payment_gateway(channel: str) -> ActivityPaymentGateway:

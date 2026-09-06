@@ -12,18 +12,23 @@ from activities.models import (
     ActivityCategory,
     ActivityParticipation,
     ActivityParticipationPaymentOrder,
+    ActivityParticipationRefundOrder,
     ActivityPublishOrder,
     ActivitySettlement,
 )
-from activities.services import get_or_create_participation_order
+from activities.services import (
+    create_activity_participation_refund,
+    get_or_create_participation_order,
+)
 from backoffice.models import AdminAuditLog
 from notifications.models import UserNotification
 from orders.models import (
     ProviderOrder,
     ProviderOrderPaymentOrder,
+    ProviderOrderRefundOrder,
     ProviderOrderSettlement,
 )
-from orders.services import create_provider_order_payment_order
+from orders.services import create_provider_order_payment_order, create_provider_order_refund
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 
 from .models import ScheduledTask
@@ -132,6 +137,36 @@ class TaskCenterTests(TestCase):
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "cancelled")
         self.assertEqual(process_due_tasks(now=now)["claimed"], 0)
+
+    def test_stale_provider_refund_processing_is_recovered_idempotently(self):
+        order = self.make_order(
+            order_no="DZYTASKREFUND001",
+            status=ProviderOrder.Status.AFTER_SALES,
+            payment_deadline=timezone.now() - timedelta(hours=1),
+        )
+        refund, _ = create_provider_order_refund(
+            order_no=order.order_no,
+            amount=order.payable_amount,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference="task-recovery",
+            idempotency_key="task-recovery-provider-refund",
+            reason="测试退款恢复",
+        )
+        stale_at = timezone.now() - timedelta(minutes=6)
+        ProviderOrderRefundOrder.objects.filter(pk=refund.pk).update(
+            status=ProviderOrderRefundOrder.Status.PROCESSING,
+            updated_at=stale_at,
+        )
+
+        result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND],
+            now=timezone.now(),
+        )
+
+        self.assertEqual(result["succeeded"], 1)
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
+        self.assertTrue(refund.gateway_refund_no.startswith("MOCKREF"))
 
     def test_acceptance_timeout_moves_order_to_support(self):
         now = timezone.now()
@@ -277,6 +312,39 @@ class TaskCenterTests(TestCase):
                 task_type=ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY
             ).count(),
             3,
+        )
+
+    def test_compensation_backfills_missing_provider_refund_task(self):
+        order = self.make_order(
+            order_no="DZYTASKREFUNDSYNC001",
+            status=ProviderOrder.Status.AFTER_SALES,
+            payment_deadline=timezone.now() - timedelta(hours=1),
+        )
+        refund = ProviderOrderRefundOrder.objects.create(
+            idempotency_key="task-sync-provider-refund",
+            order=order,
+            payment_order=order.payment_order,
+            beneficiary=self.customer,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference="task-sync",
+            service_fee_refund_amount=1000,
+            transport_fee_refund_amount=0,
+            other_fee_refund_amount=0,
+            refund_amount=1000,
+            allocation_snapshot={"version": "test"},
+            reason="测试补建退款任务",
+        )
+
+        first = synchronize_provider_order_tasks()
+        second = synchronize_provider_order_tasks()
+
+        self.assertEqual(first["refund_task_created"], 1)
+        self.assertEqual(second["refund_task_created"], 0)
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+                business_key=refund.refund_no,
+            ).exists()
         )
 
     def test_periodic_processing_and_compensation_are_separate(self):
@@ -435,6 +503,54 @@ class ActivityTaskCenterTests(TestCase):
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["state"], "expired")
 
+    def test_activity_refund_failure_is_recorded_and_retried(self):
+        now = timezone.now()
+        activity = self.make_activity()
+        participation = self.add_paid_participant(activity, now=now)
+        payment = participation.payment_orders.get()
+        refund, created = create_activity_participation_refund(
+            participation=participation,
+            payment_order=payment,
+            refund_type=(
+                ActivityParticipationRefundOrder.RefundType.PARTICIPANT_CANCELLATION
+            ),
+            idempotency_key="task-activity-refund",
+            principal_refund_amount=payment.aa_principal_amount,
+            service_fee_refund_amount=payment.platform_service_fee_amount,
+            reason="测试活动退款失败恢复",
+        )
+        self.assertTrue(created)
+        self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.PENDING)
+
+        with patch(
+            "activities.payment_gateway.MockActivityPaymentGateway.refund",
+            side_effect=RuntimeError("模拟活动退款渠道超时"),
+        ):
+            first = process_due_tasks(
+                task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND],
+                now=timezone.now(),
+            )
+        self.assertEqual(first["retried"], 1)
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.FAILED)
+        self.assertIn("渠道超时", refund.failure_reason)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ActivityParticipationPaymentOrder.Status.PAID)
+
+        task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+            business_key=refund.refund_no,
+        )
+        second = process_due_tasks(
+            task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND],
+            now=task.available_at,
+        )
+        self.assertEqual(second["succeeded"], 1)
+        refund.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(refund.status, ActivityParticipationRefundOrder.Status.SUCCEEDED)
+        self.assertEqual(payment.status, ActivityParticipationPaymentOrder.Status.REFUNDED)
+
     def test_activity_lifecycle_and_settlement_run_through_task_center(self):
         now = timezone.now()
         activity = self.make_activity(
@@ -452,6 +568,7 @@ class ActivityTaskCenterTests(TestCase):
             payable_amount=5280,
             pricing_snapshot={"platform_service_fee_rate": "0.10"},
             status=ActivityPublishOrder.Status.PAID,
+            expires_at=now - timedelta(days=1),
             paid_at=now - timedelta(days=1),
         )
         self.add_paid_participant(activity, now=now)
@@ -516,3 +633,52 @@ class ActivityTaskCenterTests(TestCase):
         self.assertEqual(first["start_created"], 1)
         self.assertEqual(first["completion_created"], 1)
         self.assertEqual(sum(second.values()), 0)
+
+    def test_activity_task_sync_backfills_publish_expiry_and_refund_tasks(self):
+        now = timezone.now()
+        activity = self.make_activity()
+        publish_order = ActivityPublishOrder.objects.create(
+            order_no="TASK-ACTIVITY-PUBLISH-PENDING",
+            activity=activity,
+            payer=self.organizer,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            expires_at=now + timedelta(minutes=30),
+        )
+        participation = self.add_paid_participant(activity, now=now)
+        payment = participation.payment_orders.get()
+        refund = ActivityParticipationRefundOrder.objects.create(
+            idempotency_key="task-sync-activity-refund",
+            activity=activity,
+            participation=participation,
+            payment_order=payment,
+            beneficiary=self.participant,
+            refund_type=(
+                ActivityParticipationRefundOrder.RefundType.PARTICIPANT_CANCELLATION
+            ),
+            principal_refund_amount=4800,
+            service_fee_refund_amount=480,
+            refund_amount=5280,
+            reason="测试补建活动退款任务",
+        )
+
+        first = synchronize_activity_tasks()
+        second = synchronize_activity_tasks()
+
+        self.assertEqual(first["publish_payment_created"], 1)
+        self.assertEqual(first["refund_task_created"], 1)
+        self.assertEqual(sum(second.values()), 0)
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
+                business_key=publish_order.order_no,
+            ).exists()
+        )
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+                business_key=refund.refund_no,
+            ).exists()
+        )

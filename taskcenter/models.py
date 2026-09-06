@@ -22,9 +22,18 @@ class ScheduledTask(models.Model):
             "provider_order_settlement",
             "达人订单资金结算",
         )
+        PROVIDER_ORDER_REFUND = "provider_order_refund", "达人订单退款"
+        ACTIVITY_PUBLISH_PAYMENT_EXPIRY = (
+            "activity_publish_payment_expiry",
+            "活动发布支付超时",
+        )
         ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY = (
             "activity_participation_payment_expiry",
             "活动报名支付超时",
+        )
+        ACTIVITY_PARTICIPATION_REFUND = (
+            "activity_participation_refund",
+            "活动报名退款",
         )
         ACTIVITY_FORMATION_DEADLINE = (
             "activity_formation_deadline",

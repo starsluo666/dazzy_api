@@ -1,6 +1,7 @@
 from datetime import timedelta
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -167,15 +168,23 @@ def get_or_create_publish_order(*, activity_id: int, user):
         raise NotFound("活动草稿不存在。")
     if activity.status != Activity.Status.DRAFT:
         raise ValidationError("当前活动不需要重复支付发布费用。")
-    existing = ActivityPublishOrder.objects.filter(
+    now = timezone.now()
+    existing = ActivityPublishOrder.objects.select_for_update().filter(
         activity=activity,
         payer=user,
         status=ActivityPublishOrder.Status.PENDING_PAYMENT,
     ).first()
-    if existing:
+    if existing and existing.expires_at > now:
         return existing
+    if existing:
+        existing.status = ActivityPublishOrder.Status.CANCELLED
+        existing.closed_at = now
+        existing.save(update_fields=("status", "closed_at", "updated_at"))
+        from taskcenter.services import mark_activity_publish_payment_expired
+
+        mark_activity_publish_payment_expired(existing.order_no, source="checkout_guard")
     service_fee = calculate_publish_service_fee(activity.aa_principal_amount)
-    return ActivityPublishOrder.objects.create(
+    order = ActivityPublishOrder.objects.create(
         activity=activity,
         order_no=_publish_order_no(),
         payer=user,
@@ -183,7 +192,35 @@ def get_or_create_publish_order(*, activity_id: int, user):
         platform_service_fee_amount=service_fee,
         payable_amount=activity.aa_principal_amount + service_fee,
         pricing_snapshot={"platform_service_fee_rate": "0.10", "rounding": "half_up"},
+        expires_at=now
+        + timedelta(minutes=platform_operation_rules()["activity_payment_timeout_minutes"]),
     )
+    from taskcenter.services import register_activity_publish_payment_expiry
+
+    register_activity_publish_payment_expiry(order)
+    return order
+
+
+@transaction.atomic
+def expire_activity_publish_payment(*, order_no: str, now=None) -> dict:
+    now = now or timezone.now()
+    order = ActivityPublishOrder.objects.select_for_update().filter(
+        order_no=order_no
+    ).first()
+    if not order:
+        return {"state": "missing", "order_no": order_no}
+    if order.status != ActivityPublishOrder.Status.PENDING_PAYMENT:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "payment_status": order.status,
+        }
+    if order.expires_at > now:
+        return {"state": "not_due", "order_no": order_no, "deadline": order.expires_at}
+    order.status = ActivityPublishOrder.Status.CANCELLED
+    order.closed_at = now
+    order.save(update_fields=("status", "closed_at", "updated_at"))
+    return {"state": "expired", "order_no": order_no}
 
 
 @transaction.atomic
@@ -191,6 +228,16 @@ def simulate_publish_payment(*, activity_id: int, user):
     activity = Activity.objects.select_for_update().filter(pk=activity_id, organizer=user).first()
     if not activity:
         raise NotFound("活动草稿不存在。")
+    paid_order = ActivityPublishOrder.objects.select_for_update().filter(
+        activity=activity,
+        payer=user,
+        status=ActivityPublishOrder.Status.PAID,
+    ).order_by("-created_at", "-id").first()
+    if paid_order:
+        if activity.status == Activity.Status.DRAFT:
+            activity.status = Activity.Status.PENDING_REVIEW
+            activity.save(update_fields=("status", "updated_at"))
+        return paid_order
     order = ActivityPublishOrder.objects.select_for_update().filter(
         activity=activity,
         payer=user,
@@ -198,9 +245,21 @@ def simulate_publish_payment(*, activity_id: int, user):
     ).first()
     if not order:
         raise ValidationError("发布支付单不在待支付状态。")
+    now = timezone.now()
+    if order.expires_at <= now:
+        order.status = ActivityPublishOrder.Status.CANCELLED
+        order.closed_at = now
+        order.save(update_fields=("status", "closed_at", "updated_at"))
+        from taskcenter.services import mark_activity_publish_payment_expired
+
+        mark_activity_publish_payment_expired(order.order_no, source="payment_guard")
+        raise ValidationError("发布支付已超时，请重新创建支付单。")
     order.status = ActivityPublishOrder.Status.PAID
-    order.paid_at = timezone.now()
+    order.paid_at = now
     order.save(update_fields=("status", "paid_at", "updated_at"))
+    from taskcenter.services import cancel_activity_publish_payment_expiry
+
+    cancel_activity_publish_payment_expiry(order.order_no, "发布支付成功")
     activity.status = Activity.Status.PENDING_REVIEW
     activity.save(update_fields=("status", "updated_at"))
     create_activity_notification(
@@ -468,6 +527,10 @@ def simulate_participation_payment(*, activity_id: int, user):
     result = get_activity_payment_gateway(order.channel).confirm_payment(
         order_no=order.order_no, amount=order.payable_amount
     )
+    if not result.signature_verified:
+        raise ValidationError("支付结果签名校验未通过，已拒绝入账。")
+    if result.paid_amount != order.payable_amount:
+        raise ValidationError("支付回调金额与报名应付金额不一致，已拒绝入账。")
     order.status = ActivityParticipationPaymentOrder.Status.PAID
     order.gateway_trade_no = result.gateway_trade_no
     order.paid_at = now
@@ -558,7 +621,8 @@ def calculate_participant_cancellation_refund(*, participation, now=None):
     }
 
 
-def create_and_process_participation_refund(
+@transaction.atomic
+def create_activity_participation_refund(
     *,
     participation,
     payment_order,
@@ -572,10 +636,20 @@ def create_and_process_participation_refund(
     reason,
     operator=None,
 ):
+    payment_order = ActivityParticipationPaymentOrder.objects.select_for_update().get(
+        pk=payment_order.pk
+    )
     existing = ActivityParticipationRefundOrder.objects.filter(
         idempotency_key=idempotency_key
     ).first()
     if existing:
+        expected_amount = principal_refund_amount + service_fee_refund_amount
+        if (
+            existing.participation_id != participation.pk
+            or existing.payment_order_id != payment_order.pk
+            or existing.refund_amount != expected_amount
+        ):
+            raise ValidationError("退款幂等键对应的业务参数不一致。")
         return existing, False
     refunded_principal, refunded_service_fee, _ = _refunded_totals(payment_order)
     if principal_refund_amount > payment_order.aa_principal_amount - refunded_principal:
@@ -585,50 +659,146 @@ def create_and_process_participation_refund(
         > payment_order.platform_service_fee_amount - refunded_service_fee
     ):
         raise ValidationError("平台服务费退款金额超过可退金额。")
-    refund = ActivityParticipationRefundOrder.objects.create(
-        idempotency_key=idempotency_key,
-        activity=participation.activity,
-        participation=participation,
-        payment_order=payment_order,
-        beneficiary=participation.user,
-        refund_type=refund_type,
-        principal_refund_amount=principal_refund_amount,
-        service_fee_refund_amount=service_fee_refund_amount,
-        refund_amount=principal_refund_amount + service_fee_refund_amount,
-        retained_principal_amount=retained_principal_amount,
-        retained_service_fee_amount=retained_service_fee_amount,
-        retained_principal_destination=retained_principal_destination,
-        status=ActivityParticipationRefundOrder.Status.PROCESSING,
-        reason=reason,
-        operator=operator,
-    )
-    result = get_activity_payment_gateway(payment_order.channel).refund(
-        refund_no=refund.refund_no, amount=refund.refund_amount
-    )
-    refund.status = ActivityParticipationRefundOrder.Status.SUCCEEDED
-    refund.gateway_refund_no = result.gateway_refund_no
-    refund.refunded_at = timezone.now()
-    refund.save(
-        update_fields=("status", "gateway_refund_no", "refunded_at", "updated_at")
-    )
-    _, _, refunded_total = _refunded_totals(payment_order)
-    if refunded_total >= payment_order.payable_amount:
-        payment_order.status = ActivityParticipationPaymentOrder.Status.REFUNDED
-    elif refunded_total:
-        payment_order.status = ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED
-    payment_order.save(update_fields=("status", "updated_at"))
-    create_activity_notification(
-        activity=participation.activity,
-        recipient=participation.user,
-        event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
-        title="活动退款已完成",
-        content=(
-            f"退款 ¥{refund.refund_amount // 100}.{refund.refund_amount % 100:02d} "
-            "已提交原支付渠道，请留意到账。"
-        ),
-        dedupe_suffix=refund.refund_no,
-    )
+    try:
+        with transaction.atomic():
+            refund = ActivityParticipationRefundOrder.objects.create(
+                idempotency_key=idempotency_key,
+                activity=participation.activity,
+                participation=participation,
+                payment_order=payment_order,
+                beneficiary=participation.user,
+                refund_type=refund_type,
+                principal_refund_amount=principal_refund_amount,
+                service_fee_refund_amount=service_fee_refund_amount,
+                refund_amount=principal_refund_amount + service_fee_refund_amount,
+                retained_principal_amount=retained_principal_amount,
+                retained_service_fee_amount=retained_service_fee_amount,
+                retained_principal_destination=retained_principal_destination,
+                reason=reason,
+                operator=operator,
+            )
+    except IntegrityError as exc:
+        existing = ActivityParticipationRefundOrder.objects.filter(
+            idempotency_key=idempotency_key
+        ).first()
+        if existing:
+            expected_amount = principal_refund_amount + service_fee_refund_amount
+            if (
+                existing.participation_id == participation.pk
+                and existing.payment_order_id == payment_order.pk
+                and existing.refund_amount == expected_amount
+            ):
+                return existing, False
+        raise ValidationError("退款请求发生并发冲突，请稍后重试。") from exc
+    from taskcenter.services import register_activity_participation_refund
+
+    register_activity_participation_refund(refund)
     return refund, True
+
+
+def activity_participation_refund_can_retry(refund, *, now=None) -> bool:
+    now = now or timezone.now()
+    if refund.status in (
+        ActivityParticipationRefundOrder.Status.PENDING,
+        ActivityParticipationRefundOrder.Status.FAILED,
+    ):
+        return True
+    return (
+        refund.status == ActivityParticipationRefundOrder.Status.PROCESSING
+        and refund.updated_at
+        <= now - timedelta(seconds=settings.PAYMENT_REFUND_PROCESSING_TIMEOUT_SECONDS)
+    )
+
+
+def process_activity_participation_refund(refund_no: str, *, now=None):
+    now = now or timezone.now()
+    with transaction.atomic():
+        refund = (
+            ActivityParticipationRefundOrder.objects.select_for_update()
+            .select_related("payment_order")
+            .get(refund_no=refund_no)
+        )
+        if refund.status == ActivityParticipationRefundOrder.Status.SUCCEEDED:
+            return refund, False
+        if not activity_participation_refund_can_retry(refund, now=now):
+            raise ValidationError("退款正在处理中，请勿重复提交。")
+        refund.status = ActivityParticipationRefundOrder.Status.PROCESSING
+        refund.failure_reason = ""
+        refund.save(update_fields=("status", "failure_reason", "updated_at"))
+        channel = refund.payment_order.channel
+        amount = refund.refund_amount
+
+    try:
+        result = get_activity_payment_gateway(channel).refund(
+            refund_no=refund_no, amount=amount
+        )
+    except Exception as exc:
+        ActivityParticipationRefundOrder.objects.filter(
+            refund_no=refund_no,
+            status=ActivityParticipationRefundOrder.Status.PROCESSING,
+        ).update(
+            status=ActivityParticipationRefundOrder.Status.FAILED,
+            failure_reason=str(exc)[:1000],
+            updated_at=timezone.now(),
+        )
+        raise
+
+    with transaction.atomic():
+        refund_ref = ActivityParticipationRefundOrder.objects.only(
+            "payment_order_id"
+        ).get(refund_no=refund_no)
+        payment_order = ActivityParticipationPaymentOrder.objects.select_for_update().get(
+            pk=refund_ref.payment_order_id
+        )
+        refund = (
+            ActivityParticipationRefundOrder.objects.select_for_update()
+            .select_related("activity", "participation__user", "payment_order")
+            .get(refund_no=refund_no)
+        )
+        if refund.status == ActivityParticipationRefundOrder.Status.SUCCEEDED:
+            return refund, False
+        completed_at = timezone.now()
+        refund.status = ActivityParticipationRefundOrder.Status.SUCCEEDED
+        refund.gateway_refund_no = result.gateway_refund_no
+        refund.refunded_at = completed_at
+        refund.failure_reason = ""
+        refund.save(
+            update_fields=(
+                "status",
+                "gateway_refund_no",
+                "refunded_at",
+                "failure_reason",
+                "updated_at",
+            )
+        )
+        _, _, refunded_total = _refunded_totals(payment_order)
+        if refunded_total >= payment_order.payable_amount:
+            payment_order.status = ActivityParticipationPaymentOrder.Status.REFUNDED
+        elif refunded_total:
+            payment_order.status = (
+                ActivityParticipationPaymentOrder.Status.PARTIALLY_REFUNDED
+            )
+        payment_order.save(update_fields=("status", "updated_at"))
+        create_activity_notification(
+            activity=refund.activity,
+            recipient=refund.participation.user,
+            event_type=UserNotification.EventType.ACTIVITY_REFUND_COMPLETED,
+            title="活动退款已完成",
+            content=(
+                f"退款 ¥{refund.refund_amount // 100}.{refund.refund_amount % 100:02d} "
+                "已提交原支付渠道，请留意到账。"
+            ),
+            dedupe_suffix=refund.refund_no,
+        )
+        from taskcenter.services import mark_activity_participation_refund_succeeded
+
+        mark_activity_participation_refund_succeeded(refund.refund_no)
+        if refund.refund_type == ActivityParticipationRefundOrder.RefundType.AFTER_SALES:
+            release_activity_settlement_after_sales(
+                activity=refund.activity,
+                now=completed_at,
+            )
+        return refund, True
 
 
 def _latest_refundable_payment_order(participation):
@@ -685,7 +855,7 @@ def cancel_activity_participation(activity_id: int, user, reason: str = "用户�
     amounts = calculate_participant_cancellation_refund(
         participation=participation, now=now
     )
-    refund, _ = create_and_process_participation_refund(
+    refund, _ = create_activity_participation_refund(
         participation=participation,
         payment_order=payment_order,
         refund_type=ActivityParticipationRefundOrder.RefundType.PARTICIPANT_CANCELLATION,
@@ -789,7 +959,7 @@ def refund_all_activity_participations(
         else:
             payment_order = refundable_orders[participation.pk]
             refunded_principal, refunded_service_fee, _ = _refunded_totals(payment_order)
-            refund, _ = create_and_process_participation_refund(
+            refund, _ = create_activity_participation_refund(
                 participation=participation,
                 payment_order=payment_order,
                 refund_type=refund_type,
@@ -1009,11 +1179,27 @@ def _apply_settlement_calculation(settlement, amounts):
 
 def _has_open_activity_after_sales(activity) -> bool:
     return ActivityAfterSalesCase.objects.filter(
-        participation__activity=activity,
-        status__in=(
-            ActivityAfterSalesCase.Status.PENDING,
-            ActivityAfterSalesCase.Status.PROCESSING,
-        ),
+        Q(
+            participation__activity=activity,
+            status__in=(
+                ActivityAfterSalesCase.Status.PENDING,
+                ActivityAfterSalesCase.Status.PROCESSING,
+            ),
+        )
+        | (
+            Q(
+                participation__activity=activity,
+                status=ActivityAfterSalesCase.Status.APPROVED,
+            )
+            & (
+                Q(refund_order__isnull=True)
+                | ~Q(
+                    refund_order__status=(
+                        ActivityParticipationRefundOrder.Status.SUCCEEDED
+                    )
+                )
+            )
+        )
     ).exists()
 
 

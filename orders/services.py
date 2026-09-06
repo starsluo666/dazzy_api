@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Avg, Q, Sum
 from django.utils import timezone
@@ -45,7 +46,14 @@ def create_provider_order_payment_order(order: ProviderOrder):
 
 @transaction.atomic
 def apply_provider_order_payment_success(
-    *, order_no: str, customer_id: int, channel: str, gateway_trade_no: str, now=None
+    *,
+    order_no: str,
+    customer_id: int,
+    channel: str,
+    gateway_trade_no: str,
+    paid_amount: int,
+    signature_verified: bool,
+    now=None,
 ):
     from providers.presence import operation_rules
     from taskcenter.services import (
@@ -61,6 +69,12 @@ def apply_provider_order_payment_success(
     )
     payment, _ = create_provider_order_payment_order(order)
     payment = ProviderOrderPaymentOrder.objects.select_for_update().get(pk=payment.pk)
+    if not signature_verified:
+        raise ValidationError({"signature": "支付结果签名校验未通过，已拒绝入账。"})
+    if paid_amount != payment.payable_amount:
+        raise ValidationError(
+            {"paid_amount": "支付回调金额与订单应付金额不一致，已拒绝入账。"}
+        )
     if (
         payment.status
         in (
@@ -263,32 +277,44 @@ def create_provider_order_refund(
     if settlement and settlement.status == ProviderOrderSettlement.Status.SETTLED:
         raise ValidationError("订单资金已经结算，不能直接退款，请转异常交易处理。")
     allocation = _refund_allocation(order, amount)
-    refund = ProviderOrderRefundOrder.objects.create(
-        idempotency_key=idempotency_key,
-        order=order,
-        payment_order=payment,
-        beneficiary=order.customer,
-        source_type=source_type,
-        source_reference=source_reference,
-        service_fee_refund_amount=allocation["service"],
-        transport_fee_refund_amount=allocation["transport"],
-        other_fee_refund_amount=allocation["other"],
-        refund_amount=amount,
-        allocation_snapshot={
-            "version": "provider-refund-allocation-v1",
-            "priority": ["service", "other", "transport"],
-            "service_fee_refund_amount": allocation["service"],
-            "transport_fee_refund_amount": allocation["transport"],
-            "other_fee_refund_amount": allocation["other"],
-        },
-        reason=reason,
-        operator=operator,
-    )
+    try:
+        with transaction.atomic():
+            refund = ProviderOrderRefundOrder.objects.create(
+                idempotency_key=idempotency_key,
+                order=order,
+                payment_order=payment,
+                beneficiary=order.customer,
+                source_type=source_type,
+                source_reference=source_reference,
+                service_fee_refund_amount=allocation["service"],
+                transport_fee_refund_amount=allocation["transport"],
+                other_fee_refund_amount=allocation["other"],
+                refund_amount=amount,
+                allocation_snapshot={
+                    "version": "provider-refund-allocation-v1",
+                    "priority": ["service", "other", "transport"],
+                    "service_fee_refund_amount": allocation["service"],
+                    "transport_fee_refund_amount": allocation["transport"],
+                    "other_fee_refund_amount": allocation["other"],
+                },
+                reason=reason,
+                operator=operator,
+            )
+    except IntegrityError as exc:
+        existing = ProviderOrderRefundOrder.objects.filter(
+            idempotency_key=idempotency_key
+        ).first()
+        if existing and existing.order_id == order.id and existing.refund_amount == amount:
+            return existing, False
+        raise ValidationError("退款请求发生并发冲突，请稍后重试。") from exc
     if settlement and settlement.status == ProviderOrderSettlement.Status.RISK_FROZEN:
         settlement.status = ProviderOrderSettlement.Status.DISPUTE_FROZEN
         settlement.dispute_reason = f"退款处理中：{source_reference}"
         settlement.save(update_fields=("status", "dispute_reason", "updated_at"))
         cancel_provider_order_settlement(order.order_no, "refund_processing")
+    from taskcenter.services import register_provider_order_refund
+
+    register_provider_order_refund(refund)
     return refund, True
 
 
@@ -396,9 +422,14 @@ def ensure_provider_order_settlement(*, order_no: str, now=None):
 @transaction.atomic
 def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     now = now or timezone.now()
-    settlement = ProviderOrderSettlement.objects.select_for_update().select_related(
-        "order__provider__user", "order__service__category"
-    ).filter(order__order_no=order_no).first()
+    order = ProviderOrder.objects.select_for_update().select_related(
+        "provider__user", "service__category"
+    ).filter(order_no=order_no).first()
+    if not order:
+        return {"state": "missing", "order_no": order_no}
+    settlement = ProviderOrderSettlement.objects.select_for_update().filter(
+        order=order
+    ).first()
     if not settlement:
         return {"state": "missing", "order_no": order_no}
     if settlement.status in (
@@ -409,7 +440,7 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     from backoffice.models import ProviderOrderAfterSalesCase
 
     if ProviderOrderAfterSalesCase.objects.filter(
-        order=settlement.order,
+        order=order,
         status__in=(
             ProviderOrderAfterSalesCase.Status.PENDING,
             ProviderOrderAfterSalesCase.Status.PROCESSING,
@@ -421,7 +452,7 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
         settlement.save(update_fields=("status", "dispute_reason", "updated_at"))
         return {"state": "dispute_frozen", "order_no": order_no}
     amounts = _settlement_amounts(
-        settlement.order, settlement.platform_commission_rate
+        order, settlement.platform_commission_rate
     )
     _apply_settlement_amounts(settlement, amounts)
     if settlement.refunded_amount >= settlement.paid_amount:
@@ -458,16 +489,36 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     return {"state": "settled", "order_no": order_no}
 
 
-def process_provider_order_refund(refund_no: str):
-    from .payment_gateway import get_provider_order_payment_gateway
-    from taskcenter.services import reopen_provider_order_settlement
+def provider_order_refund_can_retry(refund, *, now=None) -> bool:
+    now = now or timezone.now()
+    if refund.status in (
+        ProviderOrderRefundOrder.Status.PENDING,
+        ProviderOrderRefundOrder.Status.FAILED,
+    ):
+        return True
+    return (
+        refund.status == ProviderOrderRefundOrder.Status.PROCESSING
+        and refund.updated_at
+        <= now - timedelta(seconds=settings.PAYMENT_REFUND_PROCESSING_TIMEOUT_SECONDS)
+    )
 
+
+def process_provider_order_refund(refund_no: str, *, now=None):
+    from .payment_gateway import get_provider_order_payment_gateway
+    from taskcenter.services import (
+        mark_provider_order_refund_succeeded,
+        reopen_provider_order_settlement,
+    )
+
+    now = now or timezone.now()
     with transaction.atomic():
         refund = ProviderOrderRefundOrder.objects.select_for_update().select_related(
             "payment_order"
         ).get(refund_no=refund_no)
         if refund.status == ProviderOrderRefundOrder.Status.SUCCEEDED:
             return refund, False
+        if not provider_order_refund_can_retry(refund, now=now):
+            raise ValidationError("退款正在处理中，请勿重复提交。")
         refund.status = ProviderOrderRefundOrder.Status.PROCESSING
         refund.failure_reason = ""
         refund.save(update_fields=("status", "failure_reason", "updated_at"))
@@ -555,6 +606,7 @@ def process_provider_order_refund(refund_no: str):
             ),
             dedupe_suffix=refund.refund_no,
         )
+        mark_provider_order_refund_succeeded(refund.refund_no)
         return refund, True
 
 

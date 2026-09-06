@@ -334,7 +334,7 @@ class AdminActivityParticipationRefundSerializer(serializers.ModelSerializer):
             "principal_refund_amount", "service_fee_refund_amount", "refund_amount",
             "retained_principal_amount", "retained_service_fee_amount",
             "retained_principal_destination", "reason", "operator_name",
-            "requested_at", "refunded_at", "created_at", "updated_at",
+            "failure_reason", "requested_at", "refunded_at", "created_at", "updated_at",
         )
 
     def get_beneficiary_phone_masked(self, obj):

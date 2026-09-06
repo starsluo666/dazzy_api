@@ -1240,12 +1240,13 @@ class ProviderOrderRefundRetryView(APIView):
                 order__provider__service_city_code__in=access.city_codes
             )
         refund = get_object_or_404(queryset, refund_no=refund_no)
-        if refund.status not in (
-            ProviderOrderRefundOrder.Status.PENDING,
-            ProviderOrderRefundOrder.Status.FAILED,
-        ):
+        from orders.services import (
+            process_provider_order_refund,
+            provider_order_refund_can_retry,
+        )
+
+        if not provider_order_refund_can_retry(refund):
             raise ValidationError("当前退款单不需要重试。")
-        from orders.services import process_provider_order_refund
 
         process_provider_order_refund(refund.refund_no)
         AdminAuditLog.objects.create(
@@ -1909,13 +1910,15 @@ class ProviderOrderAfterSalesActionView(APIView):
             result_note=serializer.validated_data.get("result_note", ""),
             action=serializer.validated_data["action"],
         )
-        if serializer.validated_data["action"] in ("approve", "retry_refund"):
+        if serializer.validated_data["action"] == "retry_refund":
             from orders.models import ProviderOrderRefundOrder
             from orders.services import process_provider_order_refund
 
-            refund = ProviderOrderRefundOrder.objects.get(
+            refund = ProviderOrderRefundOrder.objects.filter(
                 idempotency_key=f"provider-after-sales:{case.case_no}"
-            )
+            ).first()
+            if not refund:
+                raise ValidationError("售后退款单不存在，请联系技术人员排查。")
             process_provider_order_refund(refund.refund_no)
         case = get_object_or_404(provider_order_after_sales_queryset(access), pk=case.pk)
         return Response({"data": ProviderOrderAfterSalesCaseSerializer(case).data})
@@ -2308,6 +2311,9 @@ def scoped_scheduled_tasks(access):
     if access.all_data:
         return queryset
     visible_order_nos = scoped_provider_orders(access).values("order_no")
+    visible_provider_refund_nos = ProviderOrderRefundOrder.objects.filter(
+        order__in=scoped_provider_orders(access)
+    ).values("refund_no")
     visible_activities = scoped_activities(access)
     visible_activity_ids = visible_activities.annotate(
         task_business_key=Cast("id", output_field=CharField())
@@ -2315,10 +2321,20 @@ def scoped_scheduled_tasks(access):
     visible_participation_order_nos = ActivityParticipationPaymentOrder.objects.filter(
         participation__activity__in=visible_activities,
     ).values("order_no")
+    visible_publish_order_nos = ActivityPublishOrder.objects.filter(
+        activity__in=visible_activities
+    ).values("order_no")
+    visible_participation_refund_nos = ActivityParticipationRefundOrder.objects.filter(
+        activity__in=visible_activities
+    ).values("refund_no")
     return queryset.filter(
         Q(
             business_type="provider_order",
             business_key__in=visible_order_nos,
+        )
+        | Q(
+            business_type="provider_order_refund",
+            business_key__in=visible_provider_refund_nos,
         )
         | Q(
             business_type="activity",
@@ -2327,6 +2343,14 @@ def scoped_scheduled_tasks(access):
         | Q(
             business_type="activity_participation",
             business_key__in=visible_participation_order_nos,
+        )
+        | Q(
+            business_type="activity_publish_payment",
+            business_key__in=visible_publish_order_nos,
+        )
+        | Q(
+            business_type="activity_participation_refund",
+            business_key__in=visible_participation_refund_nos,
         )
     )
 

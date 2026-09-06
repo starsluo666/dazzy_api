@@ -18,7 +18,7 @@ from activities.models import (
 )
 from activities.services import (
     advance_activity_settlement,
-    create_and_process_participation_refund,
+    create_activity_participation_refund,
     release_activity_settlement_after_sales,
     refund_all_activity_participations,
     refund_publish_order,
@@ -313,7 +313,7 @@ def review_activity_after_sales_case(
         ).first()
         if not payment_order:
             raise ValidationError("售后单缺少可退款支付单。")
-        refund, _ = create_and_process_participation_refund(
+        refund, _ = create_activity_participation_refund(
             participation=case.participation,
             payment_order=payment_order,
             refund_type=ActivityParticipationRefundOrder.RefundType.AFTER_SALES,
@@ -941,10 +941,9 @@ def review_provider_order_after_sales_case(
         refund = ProviderOrderRefundOrder.objects.filter(
             idempotency_key=f"provider-after-sales:{case.case_no}"
         ).first()
-        if not refund or refund.status not in (
-            ProviderOrderRefundOrder.Status.PENDING,
-            ProviderOrderRefundOrder.Status.FAILED,
-        ):
+        from orders.services import provider_order_refund_can_retry
+
+        if not refund or not provider_order_refund_can_retry(refund):
             raise ValidationError("当前退款单不需要重试。")
         audit_action = "order.after_sales.retry_refund"
     elif action == "approve":

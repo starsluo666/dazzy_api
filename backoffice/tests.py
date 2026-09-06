@@ -41,7 +41,7 @@ from providers.models import (
     ServiceCategory,
 )
 from taskcenter.models import ScheduledTask
-from taskcenter.services import register_provider_order_confirmation_timeout
+from taskcenter.services import process_due_tasks, register_provider_order_confirmation_timeout
 
 from .models import (
     AdminAuditLog,
@@ -973,11 +973,15 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(start.status_code, status.HTTP_200_OK)
         self.assertEqual(start.data["data"]["status"], ProviderOrderAfterSalesCase.Status.PROCESSING)
         self.assertEqual(approve.status_code, status.HTTP_200_OK)
-        self.assertEqual(approve.data["data"]["status"], ProviderOrderAfterSalesCase.Status.REFUNDED)
+        self.assertEqual(approve.data["data"]["status"], ProviderOrderAfterSalesCase.Status.APPROVED)
         self.assertEqual(approve.data["data"]["approved_amount"], 12800)
         refund = ProviderOrderRefundOrder.objects.get(
             idempotency_key=f"provider-after-sales:{case_no}"
         )
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.PENDING)
+        processed = process_due_tasks(task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND])
+        self.assertEqual(processed["succeeded"], 1)
+        refund.refresh_from_db()
         self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
         self.assertEqual(refund.refund_amount, 12800)
         self.assertEqual(refund.service_fee_refund_amount, 12800)
@@ -1067,23 +1071,28 @@ class BackofficeProviderReviewTests(APITestCase):
         )
         case_no = created.data["data"]["case_no"]
 
+        approve = self.client.post(
+            reverse(
+                "backoffice-provider-order-after-sales-action",
+                args=(case_no,),
+            ),
+            {
+                "action": "approve",
+                "approved_amount": 16800,
+                "result_note": "核查后同意订单全额退款。",
+            },
+            format="json",
+        )
+        self.assertEqual(approve.status_code, status.HTTP_200_OK)
+
         with patch(
             "orders.payment_gateway.MockProviderOrderPaymentGateway.refund",
             side_effect=RuntimeError("模拟支付渠道超时"),
         ):
-            with self.assertRaises(RuntimeError):
-                self.client.post(
-                    reverse(
-                        "backoffice-provider-order-after-sales-action",
-                        args=(case_no,),
-                    ),
-                    {
-                        "action": "approve",
-                        "approved_amount": 16800,
-                        "result_note": "核查后同意订单全额退款。",
-                    },
-                    format="json",
-                )
+            processed = process_due_tasks(
+                task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND]
+            )
+        self.assertEqual(processed["retried"], 1)
 
         case = ProviderOrderAfterSalesCase.objects.get(case_no=case_no)
         refund = ProviderOrderRefundOrder.objects.get(
@@ -1560,6 +1569,7 @@ class BackofficeActivityManagementTests(APITestCase):
             payable_amount=5280,
             pricing_snapshot={"platform_service_fee_rate": "0.10"},
             status=ActivityPublishOrder.Status.PAID,
+            expires_at=timezone.now() + timedelta(minutes=30),
             paid_at=timezone.now(),
         )
         return activity
@@ -1840,6 +1850,15 @@ class BackofficeActivityManagementTests(APITestCase):
         self.assertEqual(case.refund_order.refund_amount, 5280)
         self.assertEqual(
             case.refund_order.status,
+            ActivityParticipationRefundOrder.Status.PENDING,
+        )
+        processed = process_due_tasks(
+            task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
+        )
+        self.assertEqual(processed["succeeded"], 1)
+        case.refresh_from_db()
+        self.assertEqual(
+            case.refund_order.status,
             ActivityParticipationRefundOrder.Status.SUCCEEDED,
         )
         self.assertTrue(AdminAuditLog.objects.filter(
@@ -1927,6 +1946,76 @@ class BackofficeActivityManagementTests(APITestCase):
             action="activity.settlement.release_dispute",
             target_id=settlement.settlement_no,
         ).exists())
+
+    def test_approved_after_sales_keeps_settlement_frozen_until_refund_succeeds(self):
+        now = timezone.now()
+        self.handan_activity.status = Activity.Status.COMPLETED
+        self.handan_activity.starts_at = now - timedelta(days=2, hours=3)
+        self.handan_activity.ends_at = now - timedelta(days=2)
+        self.handan_activity.formation_deadline = now - timedelta(days=3)
+        self.handan_activity.save(update_fields=(
+            "status", "starts_at", "ends_at", "formation_deadline", "updated_at",
+        ))
+        process_activity_timeouts(now=now)
+        settlement = ActivitySettlement.objects.get(activity=self.handan_activity)
+        self.assertEqual(settlement.status, ActivitySettlement.Status.RISK_FROZEN)
+        self.assertEqual(settlement.settlement_amount, 9600)
+
+        public_client = self.client_class()
+        public_client.force_authenticate(self.participant)
+        created = public_client.post(
+            reverse("activity-after-sales", args=(self.handan_activity.id,)),
+            {
+                "reason": "not_fulfilled",
+                "description": "活动未按约定履行，申请平台核实处理。",
+            },
+            format="json",
+        )
+        approved = self.client.post(
+            reverse(
+                "backoffice-activity-after-sales-action",
+                args=(created.data["data"]["case_no"],),
+            ),
+            {
+                "action": "approve",
+                "approved_principal_amount": 4800,
+                "approved_service_fee_amount": 480,
+                "result_note": "核实后同意全额退款。",
+            },
+            format="json",
+        )
+
+        self.assertEqual(approved.status_code, status.HTTP_200_OK)
+        case = ActivityAfterSalesCase.objects.get(
+            case_no=created.data["data"]["case_no"]
+        )
+        self.assertEqual(
+            case.refund_order.status,
+            ActivityParticipationRefundOrder.Status.PENDING,
+        )
+        settlement.refresh_from_db()
+        self.assertEqual(settlement.status, ActivitySettlement.Status.DISPUTE_FROZEN)
+        self.assertEqual(
+            settlement.dispute_source,
+            ActivitySettlement.DisputeSource.AFTER_SALES,
+        )
+        self.assertEqual(settlement.settlement_amount, 9600)
+
+        processed = process_due_tasks(
+            task_types=[ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND]
+        )
+
+        self.assertEqual(processed["succeeded"], 1)
+        case.refresh_from_db()
+        settlement.refresh_from_db()
+        self.assertEqual(
+            case.refund_order.status,
+            ActivityParticipationRefundOrder.Status.SUCCEEDED,
+        )
+        self.assertEqual(settlement.status, ActivitySettlement.Status.RISK_FROZEN)
+        self.assertEqual(settlement.dispute_source, "")
+        self.assertEqual(settlement.settlement_amount, 4800)
+        self.assertEqual(settlement.platform_service_fee_amount, 480)
 
 
 class BackofficeSystemManagementTests(APITestCase):

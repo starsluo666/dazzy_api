@@ -53,7 +53,8 @@ class ActivityPublishOrderSerializer(serializers.ModelSerializer):
         model = ActivityPublishOrder
         fields = (
             "order_no", "activity_id", "aa_principal_amount",
-            "platform_service_fee_amount", "payable_amount", "status", "paid_at",
+            "platform_service_fee_amount", "payable_amount", "status", "expires_at",
+            "paid_at", "closed_at",
         )
 
 
@@ -84,7 +85,7 @@ class ActivityParticipationRefundOrderSerializer(serializers.ModelSerializer):
             "principal_refund_amount", "service_fee_refund_amount", "refund_amount",
             "retained_principal_amount", "retained_service_fee_amount",
             "retained_principal_destination", "retained_principal_destination_label",
-            "reason", "requested_at", "refunded_at",
+            "reason", "failure_reason", "requested_at", "refunded_at",
         )
 
 

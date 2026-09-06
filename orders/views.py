@@ -244,6 +244,8 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
                 customer_id=request.user.pk,
                 channel=ProviderOrderPaymentOrder.Channel.MOCK_WECHAT,
                 gateway_trade_no=f"EXPIRED-{order_no}",
+                paid_amount=order.payable_amount,
+                signature_verified=True,
             )
             return Response({"error": {"status": "支付已超时，档期已释放。"}}, status=409)
         payment, _ = create_provider_order_payment_order(order)
@@ -257,6 +259,8 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
             customer_id=request.user.pk,
             channel=channel,
             gateway_trade_no=result.gateway_trade_no,
+            paid_amount=result.paid_amount,
+            signature_verified=result.signature_verified,
         )
         return Response({"data": ProviderOrderSerializer(order).data})
 
