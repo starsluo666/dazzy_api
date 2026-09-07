@@ -31,6 +31,16 @@ class RouteResult:
 class TencentMapClient:
     base_url = "https://apis.map.qq.com"
 
+    @staticmethod
+    def city_code_from_adcode(adcode: object) -> str:
+        """Normalize a district/city adcode to a prefecture-level city code."""
+        code = str(adcode or "").strip()
+        if len(code) != 6 or not code.isdigit():
+            return ""
+        if code[:2] in {"11", "12", "31", "50"}:
+            return f"{code[:2]}0100"
+        return f"{code[:4]}00"
+
     def _get(self, path: str, params: dict) -> dict:
         signed_params = {**params, "key": settings.TENCENT_MAP_WEB_SERVICE_KEY}
         # 腾讯要求参数按名称排序，并对“未 URL 编码”的 path + query + SK 计算 MD5。
@@ -62,6 +72,7 @@ class TencentMapClient:
                 "name": item.get("title", ""),
                 "address": item.get("address", ""),
                 "city_name": item.get("city", ""),
+                "city_code": self.city_code_from_adcode(item.get("adcode")),
                 "district_name": item.get("district", ""),
                 "longitude": item["location"]["lng"],
                 "latitude": item["location"]["lat"],
@@ -76,12 +87,14 @@ class TencentMapClient:
             {"location": f"{latitude},{longitude}", "get_poi": 0},
         )["result"]
         component = payload.get("address_component", {})
+        ad_info = payload.get("ad_info", {})
         return {
             "name": payload.get("formatted_addresses", {}).get("recommend")
             or payload.get("title")
             or payload.get("address"),
             "address": payload.get("address", ""),
             "city_name": component.get("city", ""),
+            "city_code": self.city_code_from_adcode(ad_info.get("adcode")),
             "district_name": component.get("district", ""),
             "longitude": payload["location"]["lng"],
             "latitude": payload["location"]["lat"],

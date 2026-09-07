@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.exceptions import ValidationError
@@ -144,6 +146,72 @@ class AuthenticationApiTests(APITestCase):
         )
         self.assertEqual(locked.status_code, 400)
         self.assertIn("尝试次数过多", str(locked.data))
+
+    def test_failures_from_one_ip_do_not_lock_phone_on_another_ip(self):
+        User.objects.create_user(phone=self.phone, password=self.password)
+        for _ in range(5):
+            response = self.client.post(
+                "/api/v1/auth/login/password/",
+                {"phone": self.phone, "password": "wrong-password"},
+                format="json",
+                REMOTE_ADDR="10.0.0.1",
+            )
+            self.assertEqual(response.status_code, 400)
+
+        allowed = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": self.phone, "password": self.password},
+            format="json",
+            REMOTE_ADDR="10.0.0.2",
+        )
+
+        self.assertEqual(allowed.status_code, 200)
+
+    @override_settings(AUTH_IP_FAILURE_LIMIT=3)
+    def test_ip_is_locked_after_failures_against_multiple_phones(self):
+        phones = [f"1380000020{index}" for index in range(4)]
+        for phone in phones:
+            User.objects.create_user(phone=phone, password=self.password)
+        for phone in phones[:3]:
+            response = self.client.post(
+                "/api/v1/auth/login/password/",
+                {"phone": phone, "password": "wrong-password"},
+                format="json",
+                REMOTE_ADDR="10.0.0.3",
+            )
+            self.assertEqual(response.status_code, 400)
+
+        locked = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": phones[3], "password": self.password},
+            format="json",
+            REMOTE_ADDR="10.0.0.3",
+        )
+
+        self.assertEqual(locked.status_code, 400)
+        self.assertIn("当前网络登录失败次数过多", str(locked.data))
+
+    @override_settings(SMS_PHONE_DAILY_LIMIT=2, SMS_CODE_RESEND_SECONDS=0)
+    def test_sms_phone_daily_limit_spans_purposes(self):
+        User.objects.create_user(phone=self.phone, password=self.password)
+
+        self.assertEqual(self.request_code("login").status_code, 200)
+        self.assertEqual(self.request_code("reset_password").status_code, 200)
+        limited = self.request_code("login")
+
+        self.assertEqual(limited.status_code, 400)
+        self.assertIn("今日获取验证码次数已达上限", str(limited.data))
+
+    @override_settings(SMS_CODE_RESEND_SECONDS=0, SMS_PHONE_DAILY_LIMIT=100)
+    @patch("config.throttles.SmsSendIpDailyThrottle.rate", "2/day", create=True)
+    def test_sms_send_ip_daily_limit_spans_phone_numbers(self):
+        for index in range(2):
+            response = self.request_code("register", f"1380000030{index}")
+            self.assertEqual(response.status_code, 200)
+
+        limited = self.request_code("register", "13800000302")
+
+        self.assertEqual(limited.status_code, 429)
 
     @override_settings(SMS_CODE_MAX_ATTEMPTS=3)
     def test_sms_code_is_invalidated_after_maximum_failed_attempts(self):

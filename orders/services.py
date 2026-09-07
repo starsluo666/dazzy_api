@@ -132,8 +132,6 @@ def _discounted_order_components(order: ProviderOrder) -> dict[str, int]:
         "transport": transport_amount,
         "other": other_amount,
     }
-
-
 def _refund_allocation(order: ProviderOrder, amount: int) -> dict[str, int]:
     # Failed refunds remain retryable, so their amount must stay reserved to avoid
     # issuing another refund against the same paid balance.
@@ -820,25 +818,3 @@ def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
         "order_no": order_no,
         "action": "auto_confirmed",
     }
-
-
-def expire_pending_orders(queryset=None) -> int:
-    from taskcenter.services import (
-        mark_provider_order_payment_expired,
-        register_provider_order_payment_expiry,
-    )
-
-    queryset = queryset if queryset is not None else ProviderOrder.objects.all()
-    now = timezone.now()
-    due_orders = list(queryset.filter(
-        status=ProviderOrder.Status.PENDING_PAYMENT,
-        payment_expires_at__lte=now,
-    ).only("order_no", "payment_expires_at"))
-    expired = 0
-    for order in due_orders:
-        register_provider_order_payment_expiry(order)
-        outcome = expire_provider_order_payment(order.order_no, now=now)
-        if outcome["state"] == "expired":
-            expired += 1
-            mark_provider_order_payment_expired(order.order_no, source="request_guard")
-    return expired

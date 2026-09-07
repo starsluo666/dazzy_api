@@ -1,6 +1,9 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.test import SimpleTestCase
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.settings import api_settings
 
 from .geospatial import gcj02_to_wgs84
 
@@ -18,3 +21,12 @@ class GeospatialTests(SimpleTestCase):
 
         self.assertEqual(point.x, -122.4194)
         self.assertEqual(point.y, 37.7749)
+
+
+class ApiSecurityDefaultsTests(SimpleTestCase):
+    def test_unauthenticated_access_is_denied_by_default(self):
+        self.assertEqual(api_settings.DEFAULT_PERMISSION_CLASSES, [IsAuthenticated])
+
+    def test_api_documentation_is_not_accessible_outside_debug(self):
+        self.assertFalse(settings.DEBUG)
+        self.assertIn(self.client.get("/api/docs/").status_code, (401, 403, 404))

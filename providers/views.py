@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.views import APIView
@@ -64,7 +64,7 @@ from .services import (
 
 class ProviderListView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     @extend_schema(
         parameters=[ProviderListQuerySerializer],
@@ -133,7 +133,7 @@ class ProviderListView(APIView):
 
 
 class ProviderDetailView(APIView):
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request, public_id):
         queryset = public_providers().filter(user__public_id=public_id)
@@ -145,7 +145,7 @@ class ProviderDetailView(APIView):
 
 class ProviderReviewListView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request, public_id):
         provider = get_object_or_404(public_providers(), user__public_id=public_id)
@@ -182,7 +182,7 @@ class ProviderReviewListView(APIView):
 
 class ProviderAvailabilityView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     @extend_schema(parameters=[ProviderAvailabilityQuerySerializer])
     def get(self, request, public_id):
@@ -218,7 +218,7 @@ class ProviderAvailabilityView(APIView):
 
 class ServiceCategoryListView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request):
         categories = ServiceCategory.objects.filter(is_active=True).order_by("sort_order", "id")

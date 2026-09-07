@@ -11,6 +11,7 @@ from mediafiles.services import build_media_url
 
 from .models import User
 from .services import (
+    auth_client_identifier,
     clear_auth_failures,
     ensure_auth_attempt_allowed,
     record_auth_failure,
@@ -86,13 +87,20 @@ class RegisterSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         phone = validated_data["phone"]
-        ensure_auth_attempt_allowed(phone=phone, purpose="register")
+        client_identifier = auth_client_identifier(self.context.get("request"))
+        ensure_auth_attempt_allowed(
+            phone=phone, purpose="register", client_identifier=client_identifier
+        )
         try:
             verify_sms_code(phone=phone, purpose="register", code=validated_data["code"])
         except serializers.ValidationError:
-            record_auth_failure(phone=phone, purpose="register")
+            record_auth_failure(
+                phone=phone, purpose="register", client_identifier=client_identifier
+            )
             raise
-        clear_auth_failures(phone=phone, purpose="register")
+        clear_auth_failures(
+            phone=phone, purpose="register", client_identifier=client_identifier
+        )
         try:
             # Keep the unique-phone IntegrityError inside a savepoint so the outer
             # RegisterView transaction remains usable for a clean 400 response.
@@ -111,15 +119,32 @@ class PasswordLoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        ensure_auth_attempt_allowed(phone=attrs["phone"], purpose="password_login")
-        user = authenticate(request=self.context.get("request"), phone=attrs["phone"], password=attrs["password"])
+        client_identifier = auth_client_identifier(self.context.get("request"))
+        ensure_auth_attempt_allowed(
+            phone=attrs["phone"],
+            purpose="password_login",
+            client_identifier=client_identifier,
+        )
+        user = authenticate(
+            request=self.context.get("request"),
+            phone=attrs["phone"],
+            password=attrs["password"],
+        )
         if not user:
-            record_auth_failure(phone=attrs["phone"], purpose="password_login")
+            record_auth_failure(
+                phone=attrs["phone"],
+                purpose="password_login",
+                client_identifier=client_identifier,
+            )
             raise serializers.ValidationError("手机号或密码错误。")
         if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
             raise serializers.ValidationError("账号当前不可用，请联系客服。")
         attrs["user"] = user
-        clear_auth_failures(phone=attrs["phone"], purpose="password_login")
+        clear_auth_failures(
+            phone=attrs["phone"],
+            purpose="password_login",
+            client_identifier=client_identifier,
+        )
         return attrs
 
 
@@ -134,13 +159,26 @@ class SmsLoginSerializer(serializers.Serializer):
             raise serializers.ValidationError({"phone": "该手机号尚未注册。"}) from exc
         if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
             raise serializers.ValidationError("账号当前不可用，请联系客服。")
-        ensure_auth_attempt_allowed(phone=attrs["phone"], purpose="sms_login")
+        client_identifier = auth_client_identifier(self.context.get("request"))
+        ensure_auth_attempt_allowed(
+            phone=attrs["phone"],
+            purpose="sms_login",
+            client_identifier=client_identifier,
+        )
         try:
             verify_sms_code(phone=attrs["phone"], purpose="login", code=attrs["code"])
         except serializers.ValidationError:
-            record_auth_failure(phone=attrs["phone"], purpose="sms_login")
+            record_auth_failure(
+                phone=attrs["phone"],
+                purpose="sms_login",
+                client_identifier=client_identifier,
+            )
             raise
-        clear_auth_failures(phone=attrs["phone"], purpose="sms_login")
+        clear_auth_failures(
+            phone=attrs["phone"],
+            purpose="sms_login",
+            client_identifier=client_identifier,
+        )
         attrs["user"] = user
         return attrs
 
@@ -159,13 +197,26 @@ class ResetPasswordSerializer(serializers.Serializer):
 
     def save(self, **kwargs):
         phone = self.validated_data["phone"]
-        ensure_auth_attempt_allowed(phone=phone, purpose="reset_password")
+        client_identifier = auth_client_identifier(self.context.get("request"))
+        ensure_auth_attempt_allowed(
+            phone=phone,
+            purpose="reset_password",
+            client_identifier=client_identifier,
+        )
         try:
             verify_sms_code(phone=phone, purpose="reset_password", code=self.validated_data["code"])
         except serializers.ValidationError:
-            record_auth_failure(phone=phone, purpose="reset_password")
+            record_auth_failure(
+                phone=phone,
+                purpose="reset_password",
+                client_identifier=client_identifier,
+            )
             raise
-        clear_auth_failures(phone=phone, purpose="reset_password")
+        clear_auth_failures(
+            phone=phone,
+            purpose="reset_password",
+            client_identifier=client_identifier,
+        )
         user = self.validated_data["user"]
         user.set_password(self.validated_data["new_password"])
         user.auth_version = F("auth_version") + 1

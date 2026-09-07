@@ -21,6 +21,15 @@ from .models import (
 from .services import build_quote, validate_booking
 
 
+def public_pricing_snapshot(snapshot: dict) -> dict:
+    """Keep customer-facing pricing rules while omitting internal revenue terms."""
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if key != "platform_commission_rate"
+    }
+
+
 class ProviderOrderInputSerializer(serializers.Serializer):
     service_id = serializers.IntegerField(min_value=1)
     starts_at = serializers.DateTimeField()
@@ -243,6 +252,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     refund_orders = ProviderOrderRefundSummarySerializer(many=True, read_only=True)
     settlement = ProviderOrderSettlementSummarySerializer(read_only=True, allow_null=True)
     after_sales = serializers.SerializerMethodField()
+    pricing_snapshot = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrder
@@ -264,6 +274,9 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
 
     def get_provider_avatar_url(self, obj):
         return build_media_url(obj.provider.user.avatar_object_key)
+
+    def get_pricing_snapshot(self, obj):
+        return public_pricing_snapshot(obj.pricing_snapshot)
 
     def get_contact_phone_masked(self, obj):
         phone = obj.contact_phone
@@ -406,5 +419,5 @@ def quote_payload(validated_data):
         "other_fee_amount": quote.other_fee_amount,
         "discount_amount": quote.discount_amount,
         "payable_amount": quote.payable_amount,
-        "pricing_snapshot": quote.snapshot,
+        "pricing_snapshot": public_pricing_snapshot(quote.snapshot),
     }

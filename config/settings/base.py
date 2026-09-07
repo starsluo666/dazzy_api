@@ -157,6 +157,8 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    "NUM_PROXIES": int(os.getenv("DRF_NUM_PROXIES", "0")),
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
@@ -165,24 +167,41 @@ SIMPLE_JWT = {
     "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,
 }
+ADMIN_REFRESH_COOKIE_NAME = os.getenv("ADMIN_REFRESH_COOKIE_NAME", "dazzy_admin_refresh")
+ADMIN_REFRESH_COOKIE_PATH = "/api/v1/admin/auth/"
+ADMIN_REFRESH_COOKIE_DOMAIN = os.getenv("ADMIN_REFRESH_COOKIE_DOMAIN", "")
+ADMIN_REFRESH_COOKIE_SECURE = False
+ADMIN_REFRESH_COOKIE_SAMESITE = "Strict"
+ADMIN_REFRESH_COOKIE_MAX_AGE = int(SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds())
 SMS_CODE_TTL_SECONDS = int(os.getenv("SMS_CODE_TTL_SECONDS", "300"))
 SMS_CODE_RESEND_SECONDS = int(os.getenv("SMS_CODE_RESEND_SECONDS", "60"))
 SMS_CODE_MAX_ATTEMPTS = int(os.getenv("SMS_CODE_MAX_ATTEMPTS", "5"))
+SMS_PHONE_DAILY_LIMIT = int(os.getenv("SMS_PHONE_DAILY_LIMIT", "10"))
 SMS_DEVELOPMENT_CODE = os.getenv("SMS_DEVELOPMENT_CODE", "123456")
 AUTH_FAILURE_LIMIT = int(os.getenv("AUTH_FAILURE_LIMIT", "5"))
+AUTH_IP_FAILURE_LIMIT = int(os.getenv("AUTH_IP_FAILURE_LIMIT", "30"))
 AUTH_LOCK_SECONDS = int(os.getenv("AUTH_LOCK_SECONDS", "900"))
 PAYMENT_REFUND_PROCESSING_TIMEOUT_SECONDS = int(
     os.getenv("PAYMENT_REFUND_PROCESSING_TIMEOUT_SECONDS", "300")
 )
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "auth_sms_send": os.getenv("AUTH_SMS_SEND_RATE", "10/min"),
+    "auth_sms_send_ip_daily": os.getenv("AUTH_SMS_SEND_IP_DAILY_RATE", "50/day"),
     "auth_register": os.getenv("AUTH_REGISTER_RATE", "5/min"),
     "auth_login": os.getenv("AUTH_LOGIN_RATE", "30/min"),
+    "admin_auth_refresh": os.getenv("ADMIN_AUTH_REFRESH_RATE", "60/min"),
     "auth_password_reset": os.getenv("AUTH_PASSWORD_RESET_RATE", "10/min"),
+    "map_proxy_burst": os.getenv("MAP_PROXY_BURST_RATE", "30/min"),
+    "map_proxy_daily": os.getenv("MAP_PROXY_DAILY_RATE", "500/day"),
 }
 DAZZY_DEMO_USER_PUBLIC_ID = os.getenv("DAZZY_DEMO_USER_PUBLIC_ID", "")
 TENCENT_MAP_WEB_SERVICE_KEY = os.environ["TENCENT_MAP_WEB_SERVICE_KEY"]
 TENCENT_MAP_WEB_SERVICE_SK = os.environ["TENCENT_MAP_WEB_SERVICE_SK"]
 TENCENT_MAP_DEFAULT_REGION = os.getenv("TENCENT_MAP_DEFAULT_REGION", "邯郸市")
 TENCENT_MAP_TIMEOUT_SECONDS = float(os.getenv("TENCENT_MAP_TIMEOUT_SECONDS", "5"))
-SPECTACULAR_SETTINGS = {"TITLE": "DAZZY API", "VERSION": "1.0.0", "SERVE_INCLUDE_SCHEMA": False}
+SPECTACULAR_SETTINGS = {
+    "TITLE": "DAZZY API",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SERVE_PERMISSIONS": ["config.permissions.DebugOnlyPermission"],
+}

@@ -6,6 +6,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from config.throttles import MapProxyBurstThrottle, MapProxyDailyThrottle
+
 from .models import UserAddress
 from .serializers import CoordinatesQuerySerializer, UserAddressSerializer
 from .tencent import tencent_map
@@ -18,6 +20,7 @@ def lock_user_addresses(user):
 
 class PlaceSearchView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [MapProxyBurstThrottle, MapProxyDailyThrottle]
 
     def get(self, request):
         keyword = request.query_params.get("keyword", "").strip()
@@ -29,6 +32,7 @@ class PlaceSearchView(APIView):
 
 class ReverseGeocodeView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [MapProxyBurstThrottle, MapProxyDailyThrottle]
 
     def get(self, request):
         query = CoordinatesQuerySerializer(data=request.query_params)

@@ -1,15 +1,18 @@
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import TestCase
 
 from accounts.models import User
 
 from .models import UserAddress
+from .tencent import TencentMapClient
 
 
 class LocationApiTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = User.objects.create_user(phone="13800000901", password="test")
         self.client.force_login(self.user)
 
@@ -17,13 +20,38 @@ class LocationApiTests(TestCase):
     def test_search_places(self, search):
         search.return_value = [{
             "id": "poi-1", "name": "邯郸美乐城", "address": "人民东路456号",
-            "city_name": "邯郸市", "district_name": "丛台区",
+            "city_name": "邯郸市", "city_code": "130400", "district_name": "丛台区",
             "longitude": 114.512, "latitude": 36.613,
         }]
         response = self.client.get("/api/v1/locations/search/?keyword=美乐城")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["items"][0]["name"], "邯郸美乐城")
+        self.assertEqual(response.json()["data"]["items"][0]["city_code"], "130400")
         search.assert_called_once_with("美乐城", "邯郸市")
+
+    @patch("config.throttles.MapProxyBurstThrottle.rate", "2/min", create=True)
+    @patch("locations.views.tencent_map.search", return_value=[])
+    def test_map_proxy_burst_limit(self, search):
+        for _ in range(2):
+            response = self.client.get("/api/v1/locations/search/?keyword=美乐城")
+            self.assertEqual(response.status_code, 200)
+
+        limited = self.client.get("/api/v1/locations/search/?keyword=美乐城")
+
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(search.call_count, 2)
+
+    @patch("config.throttles.MapProxyDailyThrottle.rate", "2/day", create=True)
+    @patch("locations.views.tencent_map.search", return_value=[])
+    def test_map_proxy_daily_limit(self, search):
+        for _ in range(2):
+            response = self.client.get("/api/v1/locations/search/?keyword=美乐城")
+            self.assertEqual(response.status_code, 200)
+
+        limited = self.client.get("/api/v1/locations/search/?keyword=美乐城")
+
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(search.call_count, 2)
 
     def test_reverse_geocode_rejects_missing_or_invalid_coordinates(self):
         missing = self.client.get("/api/v1/locations/reverse-geocode/")
@@ -109,3 +137,42 @@ class LocationApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("contact_name", str(response.json()))
+
+
+class TencentMapClientTests(TestCase):
+    def setUp(self):
+        self.map_client = TencentMapClient()
+
+    @patch.object(TencentMapClient, "_get")
+    def test_search_returns_prefecture_city_code(self, get):
+        get.return_value = {
+            "data": [{
+                "id": "poi-shenzhen",
+                "title": "深圳湾公园",
+                "address": "滨海大道",
+                "city": "深圳市",
+                "district": "南山区",
+                "adcode": "440305",
+                "location": {"lng": 113.951, "lat": 22.526},
+            }]
+        }
+
+        item = self.map_client.search("深圳湾公园", "深圳市")[0]
+
+        self.assertEqual(item["city_code"], "440300")
+
+    @patch.object(TencentMapClient, "_get")
+    def test_reverse_geocode_returns_municipality_city_code(self, get):
+        get.return_value = {
+            "result": {
+                "address": "北京市朝阳区建国路",
+                "formatted_addresses": {"recommend": "国贸"},
+                "address_component": {"city": "北京市", "district": "朝阳区"},
+                "ad_info": {"adcode": "110105"},
+                "location": {"lng": 116.46, "lat": 39.91},
+            }
+        }
+
+        item = self.map_client.reverse_geocode(Decimal("116.46"), Decimal("39.91"))
+
+        self.assertEqual(item["city_code"], "110100")

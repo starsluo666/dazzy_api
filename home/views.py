@@ -4,6 +4,7 @@ from django.contrib.gis.db.models.functions import Distance
 from django.db.models import BooleanField, Case, Min, Q, Value, When
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -82,7 +83,7 @@ def _recommended_activities(point):
 
 
 class HomeDiscoveryView(APIView):
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     @extend_schema(parameters=[HomeQuerySerializer])
     def get(self, request):

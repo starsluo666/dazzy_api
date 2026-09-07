@@ -8,7 +8,7 @@ from django.utils import timezone
 from PIL import Image, UnidentifiedImageError
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class HomeCardAssetView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request):
         return Response({"data": build_home_card_assets()})

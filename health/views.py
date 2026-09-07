@@ -1,6 +1,7 @@
 from django.core.cache import cache
 from django.db import connection
 from drf_spectacular.utils import extend_schema
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.status import HTTP_503_SERVICE_UNAVAILABLE
 from rest_framework.views import APIView
@@ -8,7 +9,7 @@ from rest_framework.views import APIView
 
 class HealthView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     @extend_schema(responses={200: dict})
     def get(self, request):
@@ -17,7 +18,7 @@ class HealthView(APIView):
 
 class ReadinessView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     @extend_schema(responses={200: dict, 503: dict})
     def get(self, request):

@@ -4,7 +4,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.conf import settings
 from drf_spectacular.utils import extend_schema
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -54,7 +54,7 @@ from .serializers import (
 
 
 class ActivityListView(APIView):
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     @extend_schema(
         parameters=[ActivityListQuerySerializer],
@@ -114,7 +114,7 @@ class ActivityListView(APIView):
 
 class ActivityCategoryListView(APIView):
     authentication_classes = []
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request):
         categories = ActivityCategory.objects.filter(is_active=True).order_by("sort_order", "id")
@@ -124,7 +124,7 @@ class ActivityCategoryListView(APIView):
 
 
 class ActivityDetailView(APIView):
-    permission_classes = []
+    permission_classes = [AllowAny]
 
     def get(self, request, pk):
         visible_statuses = (

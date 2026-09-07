@@ -7,6 +7,7 @@ ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",
 SECURE_SSL_REDIRECT = True
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
+ADMIN_REFRESH_COOKIE_SECURE = True
 
 # The demo-user header is a local integration aid only. Remove the
 # authentication class entirely in production as a defence-in-depth measure.

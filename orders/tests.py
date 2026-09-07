@@ -128,6 +128,40 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(data["discount_amount"], 0)
         self.assertEqual(data["payable_amount"], 36600)
 
+    def test_customer_payload_hides_internal_commission_rate(self):
+        preview = self.client.post(
+            "/api/v1/provider-orders/preview/",
+            self.payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertNotIn(
+            "platform_commission_rate",
+            preview.json()["data"]["pricing_snapshot"],
+        )
+
+        created = self.client.post(
+            "/api/v1/provider-orders/",
+            self.payload(),
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 201)
+        order = ProviderOrder.objects.get(order_no=created.json()["data"]["order_no"])
+        self.assertNotIn(
+            "platform_commission_rate",
+            created.json()["data"]["pricing_snapshot"],
+        )
+        self.assertIn("platform_commission_rate", order.pricing_snapshot)
+
+        detail = self.client.get(f"/api/v1/provider-orders/{order.order_no}/")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertNotIn(
+            "platform_commission_rate",
+            detail.json()["data"]["pricing_snapshot"],
+        )
+
     def test_inactive_service_category_cannot_be_booked(self):
         category = self.service.category
         category.is_active = False

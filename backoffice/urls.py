@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .auth_views import AdminLogoutView, AdminPasswordLoginView, AdminTokenRefreshView
 from .views import (
     AdminActivityDetailView,
     AdminActivityActionView,
@@ -53,6 +54,9 @@ from .views import (
 )
 
 urlpatterns = [
+    path("auth/login/", AdminPasswordLoginView.as_view(), name="backoffice-auth-login"),
+    path("auth/refresh/", AdminTokenRefreshView.as_view(), name="backoffice-auth-refresh"),
+    path("auth/logout/", AdminLogoutView.as_view(), name="backoffice-auth-logout"),
     path("operation-settings/provider-ordering/", ProviderOrderingSettingView.as_view(), name="backoffice-provider-ordering-setting"),
     path("operation-settings/platform/", PlatformOperationSettingView.as_view(), name="backoffice-platform-operation-setting"),
     path("me/", AdminMeView.as_view(), name="backoffice-me"),

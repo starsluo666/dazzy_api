@@ -10,6 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from orders.models import ProviderOrder
 from engagements.models import ProviderFavorite
+from config.throttles import SmsSendIpDailyThrottle
 
 from .serializers import (
     LogoutSerializer,
@@ -35,7 +36,7 @@ def auth_payload(user) -> dict:
 
 class SmsCodeView(APIView):
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [ScopedRateThrottle, SmsSendIpDailyThrottle]
     throttle_scope = "auth_sms_send"
 
     def post(self, request):
@@ -55,7 +56,7 @@ class RegisterView(APIView):
 
     @transaction.atomic
     def post(self, request):
-        serializer = RegisterSerializer(data=request.data)
+        serializer = RegisterSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         return Response({"data": auth_payload(serializer.save())}, status=status.HTTP_201_CREATED)
 
@@ -77,7 +78,7 @@ class SmsLoginView(APIView):
     throttle_scope = "auth_login"
 
     def post(self, request):
-        serializer = SmsLoginSerializer(data=request.data)
+        serializer = SmsLoginSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         return Response({"data": auth_payload(serializer.validated_data["user"])})
 
@@ -89,7 +90,7 @@ class ResetPasswordView(APIView):
 
     @transaction.atomic
     def post(self, request):
-        serializer = ResetPasswordSerializer(data=request.data)
+        serializer = ResetPasswordSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response({"data": {"reset": True}})
