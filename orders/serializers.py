@@ -331,10 +331,6 @@ class ProviderOrderArrivalEvidenceInputSerializer(serializers.Serializer):
     )
 
 
-class ProviderOrderRejectInputSerializer(serializers.Serializer):
-    reason = serializers.CharField(min_length=2, max_length=200, trim_whitespace=True)
-
-
 class ProviderOrderManageQuerySerializer(serializers.Serializer):
     status = serializers.ChoiceField(
         required=False,

@@ -14,6 +14,10 @@ class ScheduledTask(models.Model):
             "provider_acceptance_timeout",
             "达人接单超时",
         )
+        PROVIDER_REJECTION_SUPPORT_TIMEOUT = (
+            "provider_rejection_support_timeout",
+            "达人拒单客服处理超时",
+        )
         PROVIDER_ORDER_CONFIRMATION_TIMEOUT = (
             "provider_order_confirmation_timeout",
             "达人订单确认超时",

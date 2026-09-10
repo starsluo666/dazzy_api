@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from backoffice.models import (
+    AdminAuditLog,
     PlatformOperationSetting,
     ProviderOrderAfterSalesCase,
     ProviderOrderingSetting,
@@ -568,7 +569,7 @@ class ProviderOrderApiTests(TestCase):
             ProviderOrder.Status.PENDING_SERVICE,
         )
 
-    def test_provider_rejects_paid_order_to_support_with_reason(self):
+    def test_provider_rejects_paid_order_without_reason_and_starts_support_deadline(self):
         create = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
         )
@@ -576,33 +577,44 @@ class ProviderOrderApiTests(TestCase):
         self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
         self.client.force_login(self.provider_user)
 
-        missing_reason = self.client.post(
-            f"/api/v1/providers/me/orders/{order_no}/reject/",
-            {"reason": ""},
-            content_type="application/json",
-        )
-        self.assertEqual(missing_reason.status_code, 400)
-
         rejected = self.client.post(
             f"/api/v1/providers/me/orders/{order_no}/reject/",
-            {"reason": "档期临时冲突"},
-            content_type="application/json",
         )
         self.assertEqual(rejected.status_code, 200)
         self.assertEqual(rejected.json()["data"]["status"], ProviderOrder.Status.PENDING_SUPPORT)
-        self.assertEqual(rejected.json()["data"]["provider_rejection_reason"], "档期临时冲突")
+        self.assertEqual(rejected.json()["data"]["provider_rejection_reason"], "")
         self.assertIsNotNone(rejected.json()["data"]["provider_rejected_at"])
         self.assertEqual(rejected.json()["data"]["contact_phone_display"], "138****6688")
+        order = ProviderOrder.objects.get(order_no=order_no)
+        self.assertEqual(
+            order.support_contact_deadline_at,
+            order.provider_rejected_at + timedelta(minutes=15),
+        )
+        support_task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT,
+            business_key=order_no,
+        )
+        self.assertEqual(support_task.scheduled_at, order.support_contact_deadline_at)
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                actor=self.provider_user,
+                action="provider_order.provider_reject",
+                target_id=order_no,
+            ).exists()
+        )
 
         repeated = self.client.post(
             f"/api/v1/providers/me/orders/{order_no}/reject/",
-            {"reason": "重复提交不会覆盖"},
-            content_type="application/json",
         )
         self.assertEqual(repeated.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.support_contact_deadline_at, support_task.scheduled_at)
         self.assertEqual(
-            repeated.json()["data"]["provider_rejection_reason"],
-            "档期临时冲突",
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT,
+                business_key=order_no,
+            ).count(),
+            1,
         )
         self.assertEqual(
             UserNotification.objects.filter(
@@ -619,10 +631,7 @@ class ProviderOrderApiTests(TestCase):
         self.client.force_login(self.customer)
         customer_detail = self.client.get(f"/api/v1/provider-orders/{order_no}/")
         self.assertEqual(customer_detail.status_code, 200)
-        self.assertEqual(
-            customer_detail.json()["data"]["provider_rejection_reason"],
-            "档期临时冲突",
-        )
+        self.assertEqual(customer_detail.json()["data"]["provider_rejection_reason"], "")
 
     def test_pending_review_order_is_counted_in_customer_overview(self):
         create = self.client.post(

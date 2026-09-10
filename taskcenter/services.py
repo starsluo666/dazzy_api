@@ -85,6 +85,18 @@ def register_provider_acceptance_timeout(order):
     )
 
 
+def register_provider_rejection_support_timeout(order):
+    if not order.support_contact_deadline_at:
+        raise ValueError("客服有效联系截止时间不能为空。")
+    return _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT,
+        business_type="provider_order",
+        business_key=order.order_no,
+        scheduled_at=order.support_contact_deadline_at,
+        payload={"order_no": order.order_no},
+    )
+
+
 def register_provider_order_confirmation_timeout(order):
     if not order.confirmation_expires_at:
         raise ValueError("用户确认截止时间不能为空。")
@@ -256,6 +268,15 @@ def cancel_provider_order_payment_expiry(order_no: str, reason: str):
 def cancel_provider_acceptance_timeout(order_no: str, reason: str):
     return cancel_business_task(
         task_type=ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT,
+        business_type="provider_order",
+        business_key=order_no,
+        reason=reason,
+    )
+
+
+def cancel_provider_rejection_support_timeout(order_no: str, reason: str):
+    return cancel_business_task(
+        task_type=ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT,
         business_type="provider_order",
         business_key=order_no,
         reason=reason,
@@ -481,6 +502,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
     batch_size = max(1, min(int(batch_size), 5000))
     payment_created = 0
     acceptance_created = 0
+    rejection_support_created = 0
     confirmation_created = 0
     settlement_created = 0
     settlement_task_created = 0
@@ -516,6 +538,24 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
             order.save(update_fields=("acceptance_expires_at", "updated_at"))
         _, created = register_provider_acceptance_timeout(order)
         acceptance_created += int(created)
+
+    rejection_support_orders = (
+        _requiring_task_synchronization(
+            ProviderOrder.objects.filter(
+                status=ProviderOrder.Status.PENDING_SUPPORT,
+                provider_rejected_at__isnull=False,
+                support_contact_deadline_at__isnull=False,
+                support_contacted_at__isnull=True,
+            ),
+            task_type=ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT,
+            deadline_field="support_contact_deadline_at",
+        )
+        .only("order_no", "support_contact_deadline_at")
+        .order_by("id")[:batch_size]
+    )
+    for order in rejection_support_orders:
+        _, created = register_provider_rejection_support_timeout(order)
+        rejection_support_created += int(created)
 
     confirmation_timeout = timedelta(
         days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
@@ -588,6 +628,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
     return {
         "payment_created": payment_created,
         "acceptance_created": acceptance_created,
+        "rejection_support_created": rejection_support_created,
         "confirmation_created": confirmation_created,
         "settlement_created": settlement_created,
         "settlement_task_created": settlement_task_created,
@@ -811,6 +852,32 @@ def _execute_provider_acceptance_timeout(task, now):
             status=ScheduledTask.Status.SUCCEEDED,
             result={**outcome, "source": "task_worker"},
         )
+    return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
+
+
+def _execute_provider_rejection_support_timeout(task, now):
+    from orders.services import expire_provider_rejection_support
+
+    outcome = expire_provider_rejection_support(task.business_key, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] in (
+        "refund_requested",
+        "refund_reserved",
+        "already_refunded",
+        "zero_amount_closed",
+    ):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result={**outcome, "source": "task_worker"},
+        )
+    if outcome["state"] == "invalid":
+        raise ValidationError(f"达人拒单客服超时任务数据异常：{outcome['reason']}")
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
@@ -1128,6 +1195,9 @@ def _execute_activity_settlement(task, now):
 TASK_HANDLERS = {
     ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY: (_execute_provider_order_payment_expiry),
     ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT: (_execute_provider_acceptance_timeout),
+    ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT: (
+        _execute_provider_rejection_support_timeout
+    ),
     ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT: (
         _execute_provider_order_confirmation_timeout
     ),

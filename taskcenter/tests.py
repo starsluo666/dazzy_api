@@ -35,6 +35,7 @@ from .models import ScheduledTask
 from .services import (
     process_due_tasks,
     register_provider_acceptance_timeout,
+    register_provider_rejection_support_timeout,
     register_provider_order_confirmation_timeout,
     register_provider_order_payment_expiry,
     register_activity_lifecycle_tasks,
@@ -67,6 +68,8 @@ class TaskCenterTests(TestCase):
     def make_order(
         self, *, order_no, status, payment_deadline, acceptance_deadline=None,
         completion_submitted_at=None, confirmation_deadline=None,
+        provider_rejected_at=None, support_contact_deadline=None,
+        support_contacted_at=None,
     ):
         now = timezone.now()
         starts_at = now + timedelta(days=1)
@@ -100,6 +103,9 @@ class TaskCenterTests(TestCase):
             acceptance_expires_at=acceptance_deadline,
             completion_submitted_at=completion_submitted_at,
             confirmation_expires_at=confirmation_deadline,
+            provider_rejected_at=provider_rejected_at,
+            support_contact_deadline_at=support_contact_deadline,
+            support_contacted_at=support_contacted_at,
         )
         payment, _ = create_provider_order_payment_order(order)
         if is_paid:
@@ -184,6 +190,13 @@ class TaskCenterTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(result["succeeded"], 1)
         self.assertEqual(order.status, ProviderOrder.Status.PENDING_SUPPORT)
+        self.assertIsNone(order.support_contact_deadline_at)
+        self.assertFalse(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT,
+                business_key=order.order_no,
+            ).exists()
+        )
         self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
         self.assertEqual(task.result["action"], "moved_to_support")
         self.assertEqual(
@@ -203,6 +216,143 @@ class TaskCenterTests(TestCase):
             ).count(),
             1,
         )
+
+    def test_provider_rejection_support_timeout_refunds_and_closes_order(self):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYREJECTSUPPORT001",
+            status=ProviderOrder.Status.PENDING_SUPPORT,
+            payment_deadline=now - timedelta(hours=1),
+            provider_rejected_at=now - timedelta(minutes=16),
+            support_contact_deadline=now - timedelta(minutes=1),
+        )
+        support_task, _ = register_provider_rejection_support_timeout(order)
+        repeated_task, created = register_provider_rejection_support_timeout(order)
+        self.assertFalse(created)
+        self.assertEqual(repeated_task.pk, support_task.pk)
+
+        support_result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT],
+            now=now,
+        )
+
+        support_task.refresh_from_db()
+        self.assertEqual(support_result["succeeded"], 1)
+        self.assertEqual(support_task.status, ScheduledTask.Status.SUCCEEDED)
+        self.assertEqual(support_task.result["state"], "refund_requested")
+        refund = ProviderOrderRefundOrder.objects.get(order=order)
+        self.assertEqual(refund.refund_amount, order.payable_amount)
+        self.assertEqual(refund.source_type, ProviderOrderRefundOrder.SourceType.SYSTEM)
+
+        refund_result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND],
+            now=now + timedelta(seconds=1),
+        )
+
+        self.assertEqual(refund_result["succeeded"], 1)
+        order.refresh_from_db()
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
+        self.assertEqual(order.status, ProviderOrder.Status.REFUNDED)
+        self.assertEqual(
+            ProviderOrderRefundOrder.objects.filter(order=order).count(),
+            1,
+        )
+        self.assertEqual(
+            process_due_tasks(
+                task_types=[ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT],
+                now=now + timedelta(minutes=1),
+            )["claimed"],
+            0,
+        )
+
+    def test_provider_rejection_support_timeout_stops_after_customer_contact(self):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYREJECTCONTACT001",
+            status=ProviderOrder.Status.PENDING_SUPPORT,
+            payment_deadline=now - timedelta(hours=1),
+            provider_rejected_at=now - timedelta(minutes=16),
+            support_contact_deadline=now - timedelta(minutes=1),
+            support_contacted_at=now - timedelta(minutes=2),
+        )
+        task, _ = register_provider_rejection_support_timeout(order)
+
+        result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT],
+            now=now,
+        )
+
+        task.refresh_from_db()
+        self.assertEqual(result["cancelled"], 1)
+        self.assertEqual(task.status, ScheduledTask.Status.CANCELLED)
+        self.assertEqual(task.result["state"], "contacted")
+        self.assertFalse(ProviderOrderRefundOrder.objects.filter(order=order).exists())
+
+    def test_provider_rejection_support_timeout_accepts_already_refunded_order(self):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYREJECTREFUNDED001",
+            status=ProviderOrder.Status.PENDING_SUPPORT,
+            payment_deadline=now - timedelta(hours=1),
+            provider_rejected_at=now - timedelta(minutes=16),
+            support_contact_deadline=now - timedelta(minutes=1),
+        )
+        order.status = ProviderOrder.Status.REFUNDED
+        order.save(update_fields=("status", "updated_at"))
+        order.payment_order.status = ProviderOrderPaymentOrder.Status.REFUNDED
+        order.payment_order.save(update_fields=("status", "updated_at"))
+        task, _ = register_provider_rejection_support_timeout(order)
+
+        result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT],
+            now=now,
+        )
+
+        task.refresh_from_db()
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(task.result["state"], "already_refunded")
+        self.assertFalse(ProviderOrderRefundOrder.objects.filter(order=order).exists())
+
+    def test_provider_rejection_auto_refund_gateway_failure_is_retryable(self):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYREJECTFAIL001",
+            status=ProviderOrder.Status.PENDING_SUPPORT,
+            payment_deadline=now - timedelta(hours=1),
+            provider_rejected_at=now - timedelta(minutes=16),
+            support_contact_deadline=now - timedelta(minutes=1),
+        )
+        register_provider_rejection_support_timeout(order)
+        process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT],
+            now=now,
+        )
+        refund = ProviderOrderRefundOrder.objects.get(order=order)
+        refund_task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+            business_key=refund.refund_no,
+        )
+        refund_task.max_attempts = 1
+        refund_task.save(update_fields=("max_attempts", "updated_at"))
+
+        with patch(
+            "orders.payment_gateway.MockProviderOrderPaymentGateway.refund",
+            side_effect=RuntimeError("模拟退款渠道不可用"),
+        ):
+            result = process_due_tasks(
+                task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND],
+                now=now + timedelta(seconds=1),
+            )
+
+        refund.refresh_from_db()
+        refund_task.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.FAILED)
+        self.assertEqual(refund_task.status, ScheduledTask.Status.FAILED)
+        self.assertIn("模拟退款渠道不可用", refund.failure_reason)
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_SUPPORT)
 
     def test_confirmation_timeout_moves_order_to_pending_review(self):
         now = timezone.now()

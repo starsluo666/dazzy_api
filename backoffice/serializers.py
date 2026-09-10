@@ -992,6 +992,14 @@ def provider_order_anomalies(order):
         and confirmation_deadline <= timezone.now()
     ):
         anomalies.append({"code": "confirmation_overdue", "label": "待确认超时"})
+    if (
+        order.status == ProviderOrder.Status.PENDING_SUPPORT
+        and order.provider_rejected_at
+        and order.support_contact_deadline_at
+        and not order.support_contacted_at
+        and order.support_contact_deadline_at <= timezone.now()
+    ):
+        anomalies.append({"code": "support_contact_overdue", "label": "拒单客服超时"})
     return anomalies
 
 
@@ -1011,6 +1019,7 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
         default="all",
         choices=(
             "all", "any", "missing_evidence", "timeline_gap", "confirmation_overdue",
+            "support_contact_overdue",
         ),
     )
     city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
@@ -1033,6 +1042,7 @@ class ProviderOrderReviewActionSerializer(serializers.Serializer):
 
 class ProviderOrderSupportNoteInputSerializer(serializers.Serializer):
     content = serializers.CharField(min_length=1, max_length=1000, trim_whitespace=True)
+    marks_customer_contact = serializers.BooleanField(required=False, default=False)
 
 
 class ProviderOrderSupportNoteSerializer(serializers.ModelSerializer):
@@ -1230,6 +1240,10 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
     arrival_location = serializers.SerializerMethodField()
     anomalies = serializers.SerializerMethodField()
     support_notes = ProviderOrderSupportNoteSerializer(many=True, read_only=True)
+    support_contacted_by_name = serializers.CharField(
+        source="support_contacted_by.nickname", allow_null=True, read_only=True
+    )
+    provider_rejection_refund = serializers.SerializerMethodField()
     after_sales_cases = ProviderOrderAfterSalesCaseSerializer(many=True, read_only=True)
     review = serializers.SerializerMethodField()
 
@@ -1244,6 +1258,8 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "contact_phone_masked", "note", "unit_price_amount", "service_fee_amount",
             "transport_fee_amount", "other_fee_amount", "discount_amount",
             "payable_amount", "paid_at", "accepted_at",
+            "provider_rejected_at", "support_contact_deadline_at", "support_contacted_at",
+            "support_contacted_by_name", "provider_rejection_refund",
             "departed_at", "arrival_photo_available", "arrival_photo_uploaded_at",
             "arrival_location", "service_started_at", "completion_submitted_at",
             "confirmation_expires_at", "customer_confirmed_at", "auto_confirmed_at",
@@ -1292,6 +1308,24 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
 
     def get_anomalies(self, obj):
         return provider_order_anomalies(obj)
+
+    def get_provider_rejection_refund(self, obj):
+        reference = f"provider-rejection-timeout:{obj.order_no}"
+        refund = next(
+            (item for item in obj.refund_orders.all() if item.idempotency_key == reference),
+            None,
+        )
+        if not refund:
+            return None
+        return {
+            "refund_no": refund.refund_no,
+            "status": refund.status,
+            "status_label": refund.get_status_display(),
+            "refund_amount": refund.refund_amount,
+            "failure_reason": refund.failure_reason,
+            "requested_at": refund.requested_at,
+            "refunded_at": refund.refunded_at,
+        }
 
 
 def normalize_city_codes(values):

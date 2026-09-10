@@ -11,6 +11,7 @@ from .views import (
     ActivityParticipationView,
     ActivityPublishOrderView,
     ActivityPublishPaymentView,
+    ActivityPublishRuleView,
     ActivityReportCreateView,
     MyActivityListView,
 )
@@ -18,6 +19,7 @@ from .views import (
 urlpatterns = [
     path("activities/", ActivityListView.as_view(), name="activity-list"),
     path("activity-categories/", ActivityCategoryListView.as_view(), name="activity-category-list"),
+    path("activity-publish-rules/", ActivityPublishRuleView.as_view(), name="activity-publish-rules"),
     path("activities/mine/", MyActivityListView.as_view(), name="my-activity-list"),
     path("activities/<int:pk>/", ActivityDetailView.as_view(), name="activity-detail"),
     path("activities/<int:pk>/copy-source/", ActivityCopySourceView.as_view(), name="activity-copy-source"),

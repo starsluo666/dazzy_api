@@ -10,7 +10,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from backoffice.models import ProviderOrderAfterSalesCase
+from backoffice.access import client_ip
+from backoffice.models import AdminAuditLog, ProviderOrderAfterSalesCase
 from backoffice.operation_settings import platform_operation_rules
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
@@ -23,6 +24,7 @@ from taskcenter.services import (
     cancel_provider_order_confirmation_timeout,
     cancel_provider_order_payment_expiry,
     mark_provider_acceptance_expired,
+    register_provider_rejection_support_timeout,
     register_provider_order_confirmation_timeout,
     register_provider_order_payment_expiry,
 )
@@ -38,12 +40,12 @@ from .serializers import (
     ProviderOrderManageSerializer,
     MyProviderOrderReviewSerializer,
     ProviderOrderReviewListQuerySerializer,
-    ProviderOrderRejectInputSerializer,
     ProviderOrderReviewInputSerializer,
     ProviderOrderSerializer,
     quote_payload,
 )
 from .services import (
+    PROVIDER_REJECTION_SUPPORT_TIMEOUT,
     apply_provider_order_payment_success,
     create_customer_provider_order_after_sales_case,
     create_provider_order_payment_order,
@@ -374,25 +376,47 @@ class CurrentProviderOrderRejectView(CurrentProviderOrderDetailView):
                 {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
                 status=409,
             )
-        serializer = ProviderOrderRejectInputSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        rejected_at = timezone.now()
         order.status = ProviderOrder.Status.PENDING_SUPPORT
-        order.provider_rejected_at = timezone.now()
-        order.provider_rejection_reason = serializer.validated_data["reason"]
+        order.provider_rejected_at = rejected_at
+        order.provider_rejection_reason = ""
+        order.support_contact_deadline_at = rejected_at + PROVIDER_REJECTION_SUPPORT_TIMEOUT
+        order.support_contacted_at = None
+        order.support_contacted_by = None
         order.save(
             update_fields=(
                 "status",
                 "provider_rejected_at",
                 "provider_rejection_reason",
+                "support_contact_deadline_at",
+                "support_contacted_at",
+                "support_contacted_by",
                 "updated_at",
             )
         )
         cancel_provider_acceptance_timeout(order_no, "provider_rejected")
+        register_provider_rejection_support_timeout(order)
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=None,
+            action="provider_order.provider_reject",
+            target_type="provider_order",
+            target_id=order.order_no,
+            before={"status": ProviderOrder.Status.PENDING_ACCEPTANCE},
+            after={
+                "status": order.status,
+                "provider_id": order.provider_id,
+                "provider_rejected_at": rejected_at.isoformat(),
+                "support_contact_deadline_at": order.support_contact_deadline_at.isoformat(),
+            },
+            request_id=request.headers.get("X-Request-ID", ""),
+            ip_address=client_ip(request),
+        )
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
             title="订单已转客服处理",
-            content="达人暂时无法接单，平台客服将协助更换达人或处理退款。",
+            content="达人暂时无法接单，平台客服将在15分钟内联系你；未完成有效联系时系统将自动全额退款。",
         )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 

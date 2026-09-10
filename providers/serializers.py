@@ -12,8 +12,16 @@ from .presence import MAX_LOCATION_ACCURACY_M, provider_is_online
 
 
 class ProviderListQuerySerializer(serializers.Serializer):
+    keyword = serializers.CharField(required=False, max_length=50, trim_whitespace=True)
     category = serializers.SlugField(required=False)
     city_code = serializers.CharField(required=False, max_length=20)
+    gender = serializers.ChoiceField(required=False, choices=("male", "female"))
+    online_only = serializers.BooleanField(required=False, default=False)
+    min_rating = serializers.DecimalField(
+        required=False, max_digits=3, decimal_places=2, min_value=Decimal("0.00"),
+        max_value=Decimal("5.00"),
+    )
+    max_price_amount = serializers.IntegerField(required=False, min_value=1)
     longitude = serializers.DecimalField(required=False, max_digits=10, decimal_places=7)
     latitude = serializers.DecimalField(required=False, max_digits=10, decimal_places=7)
     ordering = serializers.ChoiceField(

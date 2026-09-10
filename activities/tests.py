@@ -113,6 +113,20 @@ class ActivityModelTests(TestCase):
         self.assertNotIn("meeting_point", item)
         self.assertNotIn("meeting_address", item)
 
+    def test_activity_publish_rules_are_public_and_use_current_operation_settings(self):
+        PlatformOperationSetting.objects.create(
+            activity_minimum_advance_hours=24,
+            activity_maximum_advance_days=45,
+        )
+
+        response = self.client.get("/api/v1/activity-publish-rules/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["data"],
+            {"minimum_advance_hours": 24, "maximum_advance_days": 45},
+        )
+
     def test_activity_detail_returns_display_fields_and_calculated_fee(self):
         activity = self.build_activity(
             status=Activity.Status.RECRUITING,

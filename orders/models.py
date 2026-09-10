@@ -84,6 +84,18 @@ class ProviderOrder(models.Model):
     accepted_at = models.DateTimeField("达人接单时间", null=True, blank=True)
     provider_rejected_at = models.DateTimeField("达人拒单时间", null=True, blank=True)
     provider_rejection_reason = models.CharField("达人拒单原因", max_length=200, blank=True)
+    support_contact_deadline_at = models.DateTimeField(
+        "客服有效联系截止时间", null=True, blank=True
+    )
+    support_contacted_at = models.DateTimeField("客服有效联系时间", null=True, blank=True)
+    support_contacted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="contacted_provider_orders",
+        null=True,
+        blank=True,
+        verbose_name="有效联系登记人",
+    )
     departed_at = models.DateTimeField("达人出发时间", null=True, blank=True)
     arrival_photo = models.OneToOneField(
         "mediafiles.MediaAsset",
@@ -120,6 +132,10 @@ class ProviderOrder(models.Model):
             models.Index(fields=("provider", "starts_at", "ends_at")),
             models.Index(fields=("status", "payment_expires_at")),
             models.Index(fields=("status", "confirmation_expires_at")),
+            models.Index(
+                fields=("status", "support_contact_deadline_at"),
+                name="provider_order_support_due_idx",
+            ),
             models.Index(fields=("created_at",), name="provider_order_created_idx"),
             models.Index(
                 fields=("paid_at",),

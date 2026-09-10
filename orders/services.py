@@ -26,6 +26,11 @@ MAXIMUM_ADVANCE = timedelta(days=3)
 MINIMUM_HOURLY_MINUTES = 120
 TIME_GRAIN_MINUTES = 30
 PAYMENT_LOCK_MINUTES = 15
+PROVIDER_REJECTION_SUPPORT_TIMEOUT = timedelta(minutes=15)
+
+
+def provider_rejection_refund_reference(order_no: str) -> str:
+    return f"provider-rejection-timeout:{order_no}"
 
 
 def create_provider_order_payment_order(order: ProviderOrder):
@@ -708,7 +713,7 @@ def ensure_slot_available(provider: ProviderProfile, starts_at, ends_at):
 def expire_provider_order_payment(order_no: str, *, now=None) -> dict:
     now = now or timezone.now()
     order = (
-        ProviderOrder.objects.select_for_update()
+        ProviderOrder.objects.select_for_update(of=("self",))
         .filter(order_no=order_no)
         .only("order_no", "status", "payment_expires_at", "cancelled_at")
         .first()
@@ -775,6 +780,115 @@ def expire_provider_acceptance(order_no: str, *, now=None) -> dict:
         "state": "expired",
         "order_no": order_no,
         "action": "moved_to_support",
+    }
+
+
+@transaction.atomic
+def expire_provider_rejection_support(order_no: str, *, now=None) -> dict:
+    """Initiate the remaining full refund for an actively rejected order.
+
+    Acceptance-timeout orders deliberately have no support deadline and never enter
+    this flow. The refund itself stays on the shared asynchronous refund task path.
+    """
+    now = now or timezone.now()
+    order = (
+        ProviderOrder.objects.select_for_update(of=("self",))
+        .filter(order_no=order_no)
+        .select_related("customer", "payment_order")
+        .first()
+    )
+    if not order:
+        return {"state": "missing", "order_no": order_no}
+    if not order.provider_rejected_at or not order.support_contact_deadline_at:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "reason": "not_provider_rejection_support",
+        }
+    if order.support_contacted_at:
+        return {
+            "state": "contacted",
+            "order_no": order_no,
+            "contacted_at": order.support_contacted_at.isoformat(),
+        }
+    if order.support_contact_deadline_at > now:
+        return {
+            "state": "not_due",
+            "order_no": order_no,
+            "deadline": order.support_contact_deadline_at,
+        }
+
+    payment = getattr(order, "payment_order", None)
+    if order.status == ProviderOrder.Status.REFUNDED or (
+        payment and payment.status == ProviderOrderPaymentOrder.Status.REFUNDED
+    ):
+        if order.status != ProviderOrder.Status.REFUNDED:
+            order.status = ProviderOrder.Status.REFUNDED
+            order.save(update_fields=("status", "updated_at"))
+        return {"state": "already_refunded", "order_no": order_no, "action": "closed"}
+    if order.status != ProviderOrder.Status.PENDING_SUPPORT:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "order_status": order.status,
+        }
+    if not payment or payment.status not in (
+        ProviderOrderPaymentOrder.Status.PAID,
+        ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+    ):
+        return {"state": "invalid", "order_no": order_no, "reason": "missing_payment"}
+
+    reference = provider_rejection_refund_reference(order_no)
+    existing = order.refund_orders.filter(idempotency_key=reference).first()
+    if existing:
+        return {
+            "state": "refund_requested",
+            "order_no": order_no,
+            "refund_no": existing.refund_no,
+            "refund_status": existing.status,
+            "created": False,
+        }
+
+    reserved_amount = order.refund_orders.aggregate(total=Sum("refund_amount"))["total"] or 0
+    remaining_amount = max(order.payable_amount - reserved_amount, 0)
+    if remaining_amount == 0:
+        if order.payable_amount == 0:
+            payment.status = ProviderOrderPaymentOrder.Status.REFUNDED
+            payment.save(update_fields=("status", "updated_at"))
+            order.status = ProviderOrder.Status.REFUNDED
+            order.save(update_fields=("status", "updated_at"))
+            transaction.on_commit(
+                lambda: create_order_notification(
+                    order=order,
+                    event_type=UserNotification.EventType.ORDER_REFUND_COMPLETED,
+                    title="订单已关闭",
+                    content="该订单无需退款，系统已关闭待客服处理流程。",
+                    dedupe_suffix="provider-rejection-zero-amount",
+                ),
+                robust=True,
+            )
+            return {"state": "zero_amount_closed", "order_no": order_no, "action": "closed"}
+        return {
+            "state": "refund_reserved",
+            "order_no": order_no,
+            "reserved_amount": reserved_amount,
+        }
+
+    refund, created = create_provider_order_refund(
+        order_no=order_no,
+        amount=remaining_amount,
+        source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+        source_reference=reference,
+        idempotency_key=reference,
+        reason="达人主动拒单且客服未在15分钟内完成有效联系，系统自动退款。",
+    )
+    return {
+        "state": "refund_requested",
+        "order_no": order_no,
+        "refund_no": refund.refund_no,
+        "refund_status": refund.status,
+        "refund_amount": refund.refund_amount,
+        "created": created,
     }
 
 

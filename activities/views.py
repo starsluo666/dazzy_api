@@ -9,6 +9,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from backoffice.operation_settings import platform_operation_rules
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 
@@ -121,6 +122,22 @@ class ActivityCategoryListView(APIView):
         if city_code := request.query_params.get("city_code", "").strip():
             categories = categories.filter(Q(city_codes=[]) | Q(city_codes__contains=[city_code]))
         return Response({"data": {"items": ActivityCategorySerializer(categories, many=True).data}})
+
+
+class ActivityPublishRuleView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        rules = platform_operation_rules()
+        return Response(
+            {
+                "data": {
+                    "minimum_advance_hours": rules["activity_minimum_advance_hours"],
+                    "maximum_advance_days": rules["activity_maximum_advance_days"],
+                }
+            }
+        )
 
 
 class ActivityDetailView(APIView):

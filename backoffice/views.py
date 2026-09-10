@@ -36,7 +36,11 @@ from providers.models import ProviderProfile, ProviderService, ServiceCategory
 from providers.presence import online_provider_query
 from taskcenter.models import ScheduledTask
 from taskcenter.serializers import ScheduledTaskQuerySerializer, ScheduledTaskSerializer
-from taskcenter.services import TASK_LEASE_TIMEOUT, retry_failed_task
+from taskcenter.services import (
+    TASK_LEASE_TIMEOUT,
+    cancel_provider_rejection_support_timeout,
+    retry_failed_task,
+)
 
 from .access import client_ip, resolve_admin_access
 from .models import (
@@ -478,13 +482,20 @@ def order_anomaly_query(code):
         completion_submitted_at__lte=timezone.now()
         - timedelta(days=platform_operation_rules()["provider_order_confirmation_timeout_days"]),
     )
+    support_contact_overdue = Q(
+        status=ProviderOrder.Status.PENDING_SUPPORT,
+        provider_rejected_at__isnull=False,
+        support_contact_deadline_at__lte=timezone.now(),
+        support_contacted_at__isnull=True,
+    )
     mapping = {
         "missing_evidence": missing_evidence,
         "timeline_gap": timeline_gap,
         "confirmation_overdue": confirmation_overdue,
+        "support_contact_overdue": support_contact_overdue,
     }
     if code == "all":
-        return missing_evidence | timeline_gap | confirmation_overdue
+        return missing_evidence | timeline_gap | confirmation_overdue | support_contact_overdue
     return mapping[code]
 
 
@@ -494,6 +505,7 @@ def provider_order_queryset(access):
         "review__customer",
         "payment_order",
         "settlement",
+        "support_contacted_by",
     ).prefetch_related(
         "review__images",
         "support_notes__author",
@@ -1900,9 +1912,32 @@ class ProviderOrderSupportNoteView(APIView):
     def post(self, request, order_no):
         access = resolve_admin_access(request.user)
         access.require("order.support_note.add")
-        order = get_admin_provider_order(access, order_no)
         serializer = ProviderOrderSupportNoteInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        order = get_object_or_404(
+            provider_order_queryset(access).select_for_update(of=("self",)),
+            order_no=order_no,
+        )
+        marks_customer_contact = serializer.validated_data["marks_customer_contact"]
+        contact_marked = marks_customer_contact and not order.support_contacted_at
+        if contact_marked:
+            if (
+                order.status != ProviderOrder.Status.PENDING_SUPPORT
+                or not order.provider_rejected_at
+                or not order.support_contact_deadline_at
+            ):
+                raise ValidationError({
+                    "marks_customer_contact": "只有达人主动拒单后的待客服订单可以登记有效联系。"
+                })
+            if order.support_contact_deadline_at <= timezone.now():
+                raise ValidationError({
+                    "marks_customer_contact": "客服有效联系截止时间已到，不能再阻止自动退款。"
+                })
+            refund_reference = f"provider-rejection-timeout:{order.order_no}"
+            if order.refund_orders.filter(idempotency_key=refund_reference).exists():
+                raise ValidationError({
+                    "marks_customer_contact": "系统已经发起自动退款，不能再登记为已联系。"
+                })
         organization = access.member.organization if access.member else None
         note = ProviderOrderSupportNote.objects.create(
             order=order,
@@ -1910,13 +1945,31 @@ class ProviderOrderSupportNoteView(APIView):
             organization=organization,
             content=serializer.validated_data["content"],
         )
+        if contact_marked:
+            order.support_contacted_at = timezone.now()
+            order.support_contacted_by = request.user
+            order.save(update_fields=("support_contacted_at", "support_contacted_by", "updated_at"))
+            cancel_provider_rejection_support_timeout(order.order_no, "customer_contacted")
         AdminAuditLog.objects.create(
             actor=request.user,
             organization=organization,
-            action="order.support_note.add",
+            action=(
+                "order.support_contact.mark"
+                if contact_marked
+                else "order.support_note.add"
+            ),
             target_type="provider_order",
             target_id=order.order_no,
-            after={"note_id": note.id, "content": note.content},
+            after={
+                "note_id": note.id,
+                "content": note.content,
+                "marks_customer_contact": contact_marked,
+                "support_contacted_at": (
+                    order.support_contacted_at.isoformat()
+                    if order.support_contacted_at
+                    else None
+                ),
+            },
             request_id=request.headers.get("X-Request-ID", ""),
             ip_address=client_ip(request),
         )

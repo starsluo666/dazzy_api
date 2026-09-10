@@ -87,14 +87,35 @@ class ProviderListView(APIView):
                 filter=Q(services__is_active=True, services__category__is_active=True),
             )
         )
+        service_filter = Q()
         if category := params.get("category"):
-            queryset = queryset.filter(
+            service_filter &= Q(
                 services__category__slug=category,
                 services__category__is_active=True,
                 services__is_active=True,
             )
+        if max_price_amount := params.get("max_price_amount"):
+            service_filter &= Q(
+                services__price_amount__lte=max_price_amount,
+                services__category__is_active=True,
+                services__is_active=True,
+            )
+        if service_filter:
+            queryset = queryset.filter(service_filter)
         if city_code := params.get("city_code"):
             queryset = queryset.filter(service_city_code=city_code)
+        if keyword := params.get("keyword"):
+            queryset = queryset.filter(
+                Q(user__nickname__icontains=keyword)
+                | Q(bio__icontains=keyword)
+                | Q(services__category__name__icontains=keyword)
+            )
+        if gender := params.get("gender"):
+            queryset = queryset.filter(user__gender=gender)
+        if min_rating := params.get("min_rating"):
+            queryset = queryset.filter(rating__gte=min_rating)
+        if params["online_only"]:
+            queryset = queryset.filter(online_query)
 
         if "longitude" in params:
             point = gcj02_to_wgs84(params["longitude"], params["latitude"])

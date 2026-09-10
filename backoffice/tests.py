@@ -48,6 +48,7 @@ from taskcenter.services import (
     process_due_tasks,
     register_activity_participation_refund,
     register_provider_order_confirmation_timeout,
+    register_provider_rejection_support_timeout,
 )
 
 from .models import (
@@ -955,6 +956,75 @@ class BackofficeProviderReviewTests(APITestCase):
                 action="order.support_note.add", target_id=order.order_no
             ).exists()
         )
+
+    def test_support_note_can_mark_customer_contact_and_cancel_auto_refund(self):
+        now = timezone.now()
+        order = self.create_fulfillment_order(
+            order_no="ADMIN-SUPPORT-CONTACT",
+            provider=self.handan,
+            status=ProviderOrder.Status.PENDING_SUPPORT,
+        )
+        order.provider_rejected_at = now
+        order.support_contact_deadline_at = now + timedelta(minutes=15)
+        order.save(update_fields=(
+            "provider_rejected_at", "support_contact_deadline_at", "updated_at",
+        ))
+        task, _ = register_provider_rejection_support_timeout(order)
+
+        response = self.client.post(
+            reverse("backoffice-provider-order-support-note", args=(order.order_no,)),
+            {
+                "content": "已电话联系用户，用户知晓订单将由客服继续处理。",
+                "marks_customer_contact": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        order.refresh_from_db()
+        task.refresh_from_db()
+        self.assertIsNotNone(order.support_contacted_at)
+        self.assertEqual(order.support_contacted_by, self.admin_user)
+        self.assertEqual(task.status, ScheduledTask.Status.CANCELLED)
+        self.assertEqual(task.result["reason"], "customer_contacted")
+        detail = self.client.get(
+            reverse("backoffice-provider-order-detail", args=(order.order_no,))
+        )
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            detail.data["data"]["support_contacted_by_name"], self.admin_user.nickname
+        )
+        self.assertIsNotNone(detail.data["data"]["support_contacted_at"])
+        self.assertIsNone(detail.data["data"]["provider_rejection_refund"])
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                action="order.support_contact.mark", target_id=order.order_no
+            ).exists()
+        )
+
+    def test_support_contact_cannot_be_backdated_after_deadline(self):
+        now = timezone.now()
+        order = self.create_fulfillment_order(
+            order_no="ADMIN-SUPPORT-LATE",
+            provider=self.handan,
+            status=ProviderOrder.Status.PENDING_SUPPORT,
+        )
+        order.provider_rejected_at = now - timedelta(minutes=16)
+        order.support_contact_deadline_at = now - timedelta(minutes=1)
+        order.save(update_fields=(
+            "provider_rejected_at", "support_contact_deadline_at", "updated_at",
+        ))
+
+        response = self.client.post(
+            reverse("backoffice-provider-order-support-note", args=(order.order_no,)),
+            {"content": "补录联系记录", "marks_customer_contact": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertIsNone(order.support_contacted_at)
+        self.assertFalse(ProviderOrderSupportNote.objects.filter(order=order).exists())
 
     def test_after_sales_case_create_review_and_approve_are_audited(self):
         order = self.create_fulfillment_order(

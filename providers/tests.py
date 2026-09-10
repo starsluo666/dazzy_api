@@ -119,6 +119,56 @@ class ProviderModelTests(TestCase):
         no_expiry_response = self.client.get("/api/v1/providers/")
         self.assertTrue(no_expiry_response.json()["data"]["items"][0]["is_online"])
 
+    def test_provider_list_supports_advanced_filters(self):
+        user = User.objects.create_user(
+            phone="13800000033",
+            password="test-password",
+            nickname="甜甜桌游搭子",
+            gender=User.Gender.FEMALE,
+        )
+        provider = ProviderProfile.objects.create(
+            user=user,
+            status=ProviderProfile.Status.APPROVED,
+            is_accepting_orders=True,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+            bio="擅长桌游规则讲解",
+            rating=Decimal("4.80"),
+        )
+        category = ServiceCategory.objects.create(name="桌游陪玩", slug="board-games-filter")
+        ProviderService.objects.create(
+            provider=provider,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=15800,
+        )
+        create_live_location(provider)
+
+        matched = self.client.get(
+            "/api/v1/providers/",
+            {
+                "keyword": "桌游",
+                "category": category.slug,
+                "city_code": "130400",
+                "gender": "female",
+                "online_only": "true",
+                "min_rating": "4.80",
+                "max_price_amount": "16000",
+            },
+        )
+        self.assertEqual(matched.status_code, 200)
+        self.assertEqual(matched.json()["data"]["pagination"]["total"], 1)
+
+        for params in (
+            {"keyword": "台球"},
+            {"gender": "male"},
+            {"min_rating": "4.90"},
+            {"max_price_amount": "15000"},
+        ):
+            response = self.client.get("/api/v1/providers/", params)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["data"]["pagination"]["total"], 0)
+
     def test_provider_detail_returns_public_profile_and_active_services(self):
         user = User.objects.create_user(
             phone="13800000004",
