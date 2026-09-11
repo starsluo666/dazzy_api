@@ -11,11 +11,16 @@ def public_providers():
     return (
         ProviderProfile.objects.filter(
             status=ProviderProfile.Status.APPROVED,
+            identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            lifestyle_photo__isnull=False,
             user__is_active=True,
             user__account_status="active",
             services__is_active=True,
             services__category__is_active=True,
         )
+        .exclude(bio="")
+        .exclude(service_city_code="")
+        .exclude(service_city_name="")
         .select_related("user", "lifestyle_photo", "live_location")
         .prefetch_related(Prefetch("services", queryset=active_services))
         .distinct()

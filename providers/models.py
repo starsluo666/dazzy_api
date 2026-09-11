@@ -44,6 +44,12 @@ class ProviderProfile(models.Model):
         REJECTED = "rejected", "已驳回"
         SUSPENDED = "suspended", "已暂停"
 
+    class IdentityStatus(models.TextChoices):
+        UNVERIFIED = "unverified", "未认证"
+        PENDING = "pending", "认证中"
+        VERIFIED = "verified", "已认证"
+        REJECTED = "rejected", "认证未通过"
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -82,6 +88,42 @@ class ProviderProfile(models.Model):
     submitted_at = models.DateTimeField("申请提交时间", null=True, blank=True)
     reviewed_at = models.DateTimeField("审核时间", null=True, blank=True)
     rejection_reason = models.CharField("驳回原因", max_length=500, blank=True)
+    identity_status = models.CharField(
+        "达人实名认证状态",
+        max_length=16,
+        choices=IdentityStatus,
+        default=IdentityStatus.UNVERIFIED,
+    )
+    identity_real_name = models.CharField("实名姓名", max_length=50, blank=True)
+    identity_number_masked = models.CharField("证件号码脱敏值", max_length=32, blank=True)
+    identity_number_digest = models.CharField("证件号码摘要", max_length=64, blank=True)
+    identity_front_photo = models.ForeignKey(
+        "mediafiles.MediaAsset",
+        on_delete=models.PROTECT,
+        related_name="provider_identity_front_profiles",
+        null=True,
+        blank=True,
+        verbose_name="身份证人像面",
+    )
+    identity_back_photo = models.ForeignKey(
+        "mediafiles.MediaAsset",
+        on_delete=models.PROTECT,
+        related_name="provider_identity_back_profiles",
+        null=True,
+        blank=True,
+        verbose_name="身份证国徽面",
+    )
+    identity_face_photo = models.ForeignKey(
+        "mediafiles.MediaAsset",
+        on_delete=models.PROTECT,
+        related_name="provider_identity_face_profiles",
+        null=True,
+        blank=True,
+        verbose_name="本人核验照片",
+    )
+    identity_submitted_at = models.DateTimeField("实名认证提交时间", null=True, blank=True)
+    identity_reviewed_at = models.DateTimeField("实名认证审核时间", null=True, blank=True)
+    identity_rejection_reason = models.CharField("实名认证驳回原因", max_length=500, blank=True)
     is_accepting_orders = models.BooleanField("已开启接单", default=False)
     admin_order_restricted = models.BooleanField("后台限制接单", default=False)
     admin_restriction_reason = models.CharField("后台限制原因", max_length=500, blank=True)
@@ -103,6 +145,19 @@ class ProviderProfile(models.Model):
 
     def __str__(self) -> str:
         return str(self.user)
+
+    @property
+    def is_profile_complete(self) -> bool:
+        return bool(
+            self.bio.strip()
+            and self.lifestyle_photo_id
+            and self.service_city_code
+            and self.service_city_name
+        )
+
+    @property
+    def has_verified_identity(self) -> bool:
+        return self.identity_status == self.IdentityStatus.VERIFIED
 
 
 class ProviderLiveLocation(models.Model):

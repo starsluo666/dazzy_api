@@ -60,6 +60,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
                 is_active=True,
                 category__is_active=True,
                 provider__status=ProviderProfile.Status.APPROVED,
+                provider__identity_status=ProviderProfile.IdentityStatus.VERIFIED,
                 provider__is_accepting_orders=True,
             )
         except ProviderService.DoesNotExist as exc:
@@ -394,8 +395,8 @@ def quote_payload(validated_data):
             "public_id": service.provider.user.public_id,
             "nickname": service.provider.user.nickname,
             "avatar_url": build_media_url(service.provider.user.avatar_object_key),
-            "verified": service.provider.user.verification_status
-            == service.provider.user.VerificationStatus.VERIFIED,
+            "verified": service.provider.identity_status
+            == service.provider.IdentityStatus.VERIFIED,
         },
         "service": {
             "id": service.id,

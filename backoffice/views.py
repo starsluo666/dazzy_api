@@ -120,6 +120,7 @@ from .services import (
     moderate_provider_order_review,
     review_provider_order_after_sales_case,
     review_provider_application,
+    review_provider_identity,
     review_activity,
     review_activity_after_sales_case,
     review_activity_settlement,
@@ -167,7 +168,14 @@ def admin_user_queryset(access):
 def provider_admin_queryset(access):
     return (
         scoped_providers(access)
-        .select_related("user", "lifestyle_photo", "live_location")
+        .select_related(
+            "user",
+            "lifestyle_photo",
+            "live_location",
+            "identity_front_photo",
+            "identity_back_photo",
+            "identity_face_photo",
+        )
         .prefetch_related(
             "services__category",
             "weekly_availability",
@@ -1453,8 +1461,6 @@ class ProviderApplicationListView(APIView):
         queryset = queryset.filter(status=params["status"])
         if city_code := params.get("city_code"):
             queryset = queryset.filter(service_city_code=city_code)
-        if verification_status := params.get("verification_status"):
-            queryset = queryset.filter(user__verification_status=verification_status)
         if keyword := params.get("search", "").strip():
             queryset = queryset.filter(
                 Q(user__nickname__icontains=keyword) | Q(user__phone__icontains=keyword)
@@ -1521,17 +1527,12 @@ class AdminUserListView(APIView):
         summary_queryset = queryset
         summary = {
             "total": summary_queryset.count(),
-            "verified": summary_queryset.filter(
-                verification_status=User.VerificationStatus.VERIFIED
-            ).count(),
             "providers": summary_queryset.filter(provider_profile__isnull=False).count(),
             "flagged": summary_queryset.filter(admin_risk_flag__is_active=True).count(),
             "suspended": summary_queryset.filter(
                 account_status=User.AccountStatus.SUSPENDED
             ).count(),
         }
-        if verification_status := params.get("verification_status"):
-            queryset = queryset.filter(verification_status=verification_status)
         if account_status := params.get("account_status"):
             queryset = queryset.filter(account_status=account_status)
         if params["identity"] == "provider":
@@ -1679,8 +1680,8 @@ class ProviderAdminListView(APIView):
         }
         if provider_status := params.get("status"):
             queryset = queryset.filter(status=provider_status)
-        if verification_status := params.get("verification_status"):
-            queryset = queryset.filter(user__verification_status=verification_status)
+        if identity_status := params.get("identity_status"):
+            queryset = queryset.filter(identity_status=identity_status)
         if params["accepting"] == "accepting":
             queryset = queryset.filter(online_query)
         elif params["accepting"] == "paused":
@@ -1731,6 +1732,26 @@ class ProviderAdminDetailView(APIView):
             for order in profile.orders.select_related("customer").order_by("-created_at")[:5]
         ]
         return Response({"data": data})
+
+
+class ProviderIdentityReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, profile_id):
+        access = resolve_admin_access(request.user)
+        access.require("provider.review")
+        serializer = ProviderReviewDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        profile = review_provider_identity(
+            profile_id=profile_id,
+            decision=serializer.validated_data["decision"],
+            reason=serializer.validated_data.get("reason", ""),
+            actor=request.user,
+            access=access,
+            request=request,
+        )
+        context = {"can_review": True, "include_detail": True}
+        return Response({"data": ProviderAdminSerializer(profile, context=context).data})
 
 
 class ProviderAdminActionView(APIView):

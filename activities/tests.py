@@ -976,15 +976,12 @@ class ActivityModelTests(TestCase):
         activity.refresh_from_db()
         self.assertEqual(activity.status, Activity.Status.DRAFT)
 
-    def test_activity_create_enforces_verification_and_start_window(self):
+    def test_activity_create_does_not_require_identity_and_enforces_start_window(self):
         self.client.force_login(self.organizer)
         unverified = self.client.post(
             "/api/v1/activities/", self.activity_create_payload(), content_type="application/json"
         )
-        self.assertEqual(unverified.status_code, 403)
-
-        self.organizer.verification_status = User.VerificationStatus.VERIFIED
-        self.organizer.save(update_fields=("verification_status",))
+        self.assertEqual(unverified.status_code, 201)
         too_soon = timezone.now() + timedelta(hours=24)
         invalid = self.client.post(
             "/api/v1/activities/",

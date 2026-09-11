@@ -79,28 +79,14 @@ class ServiceCategorySerializer(serializers.ModelSerializer):
 
 
 class ProviderApplicationSerializer(serializers.ModelSerializer):
-    verification_status = serializers.CharField(source="user.verification_status", read_only=True)
     gender = serializers.CharField(source="user.gender", read_only=True)
-    lifestyle_photo_id = serializers.PrimaryKeyRelatedField(
-        source="lifestyle_photo",
-        queryset=MediaAsset.objects.filter(
-            category=MediaAsset.Category.PROVIDER_PHOTO,
-            status=MediaAsset.Status.UPLOADED,
-        ),
-        allow_null=True,
-        required=False,
-    )
-    lifestyle_photo_url = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderProfile
         fields = (
             "status",
-            "verification_status",
             "gender",
             "bio",
-            "lifestyle_photo_id",
-            "lifestyle_photo_url",
             "service_city_code",
             "service_city_name",
             "max_service_radius_km",
@@ -113,15 +99,55 @@ class ProviderApplicationSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "status",
-            "verification_status",
             "gender",
-            "lifestyle_photo_url",
             "agreement_accepted_at",
             "submitted_at",
             "reviewed_at",
             "rejection_reason",
             "updated_at",
         )
+
+    def validate_bio(self, value: str) -> str:
+        value = value.strip()
+        if value and len(value) < 10:
+            raise serializers.ValidationError("达人简介至少填写10个字。")
+        return value
+
+class ProviderApplicationSubmitSerializer(serializers.Serializer):
+    agreement_accepted = serializers.BooleanField()
+
+    def validate_agreement_accepted(self, value):
+        if not value:
+            raise serializers.ValidationError("请阅读并同意达人服务声明及平台协议。")
+        return value
+
+
+class ProviderProfileManageSerializer(serializers.ModelSerializer):
+    lifestyle_photo_id = serializers.PrimaryKeyRelatedField(
+        source="lifestyle_photo",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        allow_null=True,
+        required=False,
+    )
+    lifestyle_photo_url = serializers.SerializerMethodField()
+    is_profile_complete = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = ProviderProfile
+        fields = (
+            "bio",
+            "lifestyle_photo_id",
+            "lifestyle_photo_url",
+            "service_city_code",
+            "service_city_name",
+            "max_service_radius_km",
+            "is_profile_complete",
+            "updated_at",
+        )
+        read_only_fields = ("lifestyle_photo_url", "is_profile_complete", "updated_at")
 
     def validate_bio(self, value: str) -> str:
         value = value.strip()
@@ -141,13 +167,97 @@ class ProviderApplicationSerializer(serializers.ModelSerializer):
         return build_media_url(obj.lifestyle_photo.object_key)
 
 
-class ProviderApplicationSubmitSerializer(serializers.Serializer):
-    agreement_accepted = serializers.BooleanField()
+class ProviderIdentitySerializer(serializers.ModelSerializer):
+    id_number = serializers.CharField(write_only=True, required=False, max_length=18)
+    identity_status_label = serializers.CharField(source="get_identity_status_display", read_only=True)
+    identity_front_photo_id = serializers.PrimaryKeyRelatedField(
+        source="identity_front_photo",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.IDENTITY,
+            scope=MediaAsset.Scope.PRIVATE,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        required=False,
+        allow_null=True,
+    )
+    identity_back_photo_id = serializers.PrimaryKeyRelatedField(
+        source="identity_back_photo",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.IDENTITY,
+            scope=MediaAsset.Scope.PRIVATE,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        required=False,
+        allow_null=True,
+    )
+    identity_face_photo_id = serializers.PrimaryKeyRelatedField(
+        source="identity_face_photo",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.IDENTITY,
+            scope=MediaAsset.Scope.PRIVATE,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        required=False,
+        allow_null=True,
+    )
+    identity_front_photo_url = serializers.SerializerMethodField()
+    identity_back_photo_url = serializers.SerializerMethodField()
+    identity_face_photo_url = serializers.SerializerMethodField()
 
-    def validate_agreement_accepted(self, value):
-        if not value:
-            raise serializers.ValidationError("请阅读并同意达人服务声明及平台协议。")
-        return value
+    class Meta:
+        model = ProviderProfile
+        fields = (
+            "identity_status",
+            "identity_status_label",
+            "identity_real_name",
+            "id_number",
+            "identity_number_masked",
+            "identity_front_photo_id",
+            "identity_back_photo_id",
+            "identity_face_photo_id",
+            "identity_front_photo_url",
+            "identity_back_photo_url",
+            "identity_face_photo_url",
+            "identity_submitted_at",
+            "identity_reviewed_at",
+            "identity_rejection_reason",
+        )
+        read_only_fields = (
+            "identity_status",
+            "identity_status_label",
+            "identity_number_masked",
+            "identity_front_photo_url",
+            "identity_back_photo_url",
+            "identity_face_photo_url",
+            "identity_submitted_at",
+            "identity_reviewed_at",
+            "identity_rejection_reason",
+        )
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        for field in (
+            "identity_front_photo",
+            "identity_back_photo",
+            "identity_face_photo",
+        ):
+            asset = attrs.get(field)
+            if asset and (request is None or asset.owner_id != request.user.pk):
+                raise serializers.ValidationError({field: "认证材料不存在或无权使用。"})
+        return attrs
+
+    @staticmethod
+    def _private_url(asset) -> str | None:
+        return build_media_url(asset.object_key, private=True) if asset else None
+
+    def get_identity_front_photo_url(self, obj):
+        return self._private_url(obj.identity_front_photo)
+
+    def get_identity_back_photo_url(self, obj):
+        return self._private_url(obj.identity_back_photo)
+
+    def get_identity_face_photo_url(self, obj):
+        return self._private_url(obj.identity_face_photo)
 
 
 class ProviderServiceManageSerializer(serializers.ModelSerializer):
@@ -303,7 +413,7 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
         return build_media_url(obj.user.avatar_object_key)
 
     def get_verified(self, obj) -> bool:
-        return obj.user.verification_status == obj.user.VerificationStatus.VERIFIED
+        return obj.identity_status == obj.IdentityStatus.VERIFIED
 
     def get_is_online(self, obj) -> bool:
         annotated = getattr(obj, "is_currently_online", None)

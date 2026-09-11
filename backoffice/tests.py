@@ -132,6 +132,7 @@ class BackofficeProviderReviewTests(APITestCase):
         cls.handan = ProviderProfile.objects.create(
             user=cls.handan_user,
             status=ProviderProfile.Status.PENDING,
+            identity_status=ProviderProfile.IdentityStatus.VERIFIED,
             lifestyle_photo=cls.handan_lifestyle_photo,
             service_city_code="130400",
             service_city_name="邯郸市",
@@ -274,7 +275,7 @@ class BackofficeProviderReviewTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_unverified_application_cannot_be_approved(self):
+    def test_initial_application_can_be_approved_before_identity_verification(self):
         user = User.objects.create_user(
             phone="19900005555", password="test-password", nickname="未实名申请人"
         )
@@ -292,11 +293,15 @@ class BackofficeProviderReviewTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         profile.refresh_from_db()
-        self.assertEqual(profile.status, ProviderProfile.Status.PENDING)
+        self.assertEqual(profile.status, ProviderProfile.Status.APPROVED)
+        self.assertEqual(
+            profile.identity_status,
+            ProviderProfile.IdentityStatus.UNVERIFIED,
+        )
 
-    def test_application_without_lifestyle_photo_cannot_be_approved(self):
+    def test_initial_application_can_be_approved_before_profile_completion(self):
         user = User.objects.create_user(
             phone="19900007777",
             password="test-password",
@@ -317,8 +322,88 @@ class BackofficeProviderReviewTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("生活照", str(response.data))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        profile.refresh_from_db()
+        self.assertEqual(profile.status, ProviderProfile.Status.APPROVED)
+        self.assertFalse(profile.is_profile_complete)
+
+    def test_pending_provider_identity_can_be_approved(self):
+        photos = [
+            MediaAsset.objects.create(
+                owner=self.handan_user,
+                scope=MediaAsset.Scope.PRIVATE,
+                category=MediaAsset.Category.IDENTITY,
+                status=MediaAsset.Status.UPLOADED,
+                object_key=f"private/provider-identities/handan/{side}.webp",
+            )
+            for side in ("front", "back", "face")
+        ]
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.identity_status = ProviderProfile.IdentityStatus.PENDING
+        self.handan.identity_real_name = "张三"
+        self.handan.identity_number_masked = "1304**********1234"
+        self.handan.identity_number_digest = "test-digest"
+        self.handan.identity_front_photo = photos[0]
+        self.handan.identity_back_photo = photos[1]
+        self.handan.identity_face_photo = photos[2]
+        self.handan.identity_submitted_at = timezone.now()
+        self.handan.save()
+
+        response = self.client.post(
+            reverse("backoffice-provider-identity-review", args=(self.handan.id,)),
+            {"decision": "approve"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.handan.refresh_from_db()
+        self.assertEqual(
+            self.handan.identity_status,
+            ProviderProfile.IdentityStatus.VERIFIED,
+        )
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                target_id=str(self.handan.id),
+                action="provider.identity.approve",
+            ).exists()
+        )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.handan_user,
+                event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+                title="达人实名认证已通过",
+            ).exists()
+        )
+
+    def test_rejected_provider_identity_stops_accepting_orders(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.identity_status = ProviderProfile.IdentityStatus.PENDING
+        self.handan.is_accepting_orders = True
+        self.handan.identity_submitted_at = timezone.now()
+        self.handan.save(
+            update_fields=(
+                "status",
+                "identity_status",
+                "is_accepting_orders",
+                "identity_submitted_at",
+                "updated_at",
+            )
+        )
+
+        response = self.client.post(
+            reverse("backoffice-provider-identity-review", args=(self.handan.id,)),
+            {"decision": "reject", "reason": "证件照片文字不清晰"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.handan.refresh_from_db()
+        self.assertEqual(
+            self.handan.identity_status,
+            ProviderProfile.IdentityStatus.REJECTED,
+        )
+        self.assertEqual(self.handan.identity_rejection_reason, "证件照片文字不清晰")
+        self.assertFalse(self.handan.is_accepting_orders)
 
     def test_invalid_provider_list_query_returns_validation_error(self):
         response = self.client.get(
@@ -337,7 +422,6 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(data["items"][0]["phone_masked"], "199****2222")
         self.assertEqual(data["items"][0]["identity"], "provider")
         self.assertEqual(data["summary"]["total"], 1)
-        self.assertEqual(data["summary"]["verified"], 1)
         self.assertEqual(data["summary"]["providers"], 1)
 
     def test_user_detail_includes_address_contact_and_coordinates(self):

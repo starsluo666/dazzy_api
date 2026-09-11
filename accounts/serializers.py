@@ -43,9 +43,9 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             "public_id", "phone", "nickname", "gender", "birth_date", "avatar_url",
-            "verification_status", "account_status",
+            "account_status",
         )
-        read_only_fields = ("public_id", "phone", "avatar_url", "verification_status", "account_status")
+        read_only_fields = ("public_id", "phone", "avatar_url", "account_status")
 
     def get_avatar_url(self, obj) -> str | None:
         return build_media_url(obj.avatar_object_key)

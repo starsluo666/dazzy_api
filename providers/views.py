@@ -42,6 +42,8 @@ from .serializers import (
     ProviderDateClosureSerializer,
     ProviderLiveLocationInputSerializer,
     ProviderLiveLocationUpdateSerializer,
+    ProviderIdentitySerializer,
+    ProviderProfileManageSerializer,
     ProviderScheduleCreateSerializer,
     ProviderScheduleQuerySerializer,
 )
@@ -55,10 +57,13 @@ from .presence import (
 from .services import (
     create_provider_schedule_periods,
     save_provider_application,
+    save_provider_identity,
     start_provider_online,
     stop_provider_online,
     submit_provider_application,
+    submit_provider_identity,
     update_provider_live_location,
+    provider_profile_blockers,
 )
 
 
@@ -273,6 +278,60 @@ class CurrentProviderApplicationSubmitView(APIView):
         return Response({"data": ProviderApplicationSerializer(profile).data})
 
 
+class CurrentProviderProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profile = current_approved_provider(request)
+        return Response(
+            {"data": ProviderProfileManageSerializer(profile, context={"request": request}).data}
+        )
+
+    def patch(self, request):
+        profile = current_approved_provider(request)
+        serializer = ProviderProfileManageSerializer(
+            profile, data=request.data, partial=True, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({"data": serializer.data})
+
+
+class CurrentProviderIdentityView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profile = current_approved_provider(request)
+        return Response(
+            {"data": ProviderIdentitySerializer(profile, context={"request": request}).data}
+        )
+
+    def patch(self, request):
+        profile = current_approved_provider(request)
+        serializer = ProviderIdentitySerializer(
+            profile, data=request.data, partial=True, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        profile = save_provider_identity(
+            provider=profile,
+            data=dict(serializer.validated_data),
+        )
+        return Response(
+            {"data": ProviderIdentitySerializer(profile, context={"request": request}).data}
+        )
+
+
+class CurrentProviderIdentitySubmitView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        profile = current_approved_provider(request)
+        profile = submit_provider_identity(provider=profile)
+        return Response(
+            {"data": ProviderIdentitySerializer(profile, context={"request": request}).data}
+        )
+
+
 class CurrentProviderServiceListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -436,6 +495,11 @@ class CurrentProviderWorkbenchView(APIView):
                     ),
                     "admin_order_restricted": provider.admin_order_restricted,
                     "admin_restriction_reason": provider.admin_restriction_reason,
+                    "identity_status": provider.identity_status,
+                    "identity_status_label": provider.get_identity_status_display(),
+                    "is_profile_complete": provider.is_profile_complete,
+                    "can_accept_orders": not provider_profile_blockers(provider),
+                    "onboarding_blockers": provider_profile_blockers(provider),
                     "service_city_code": provider.service_city_code,
                     "service_city_name": provider.service_city_name,
                     "max_service_radius_km": provider.max_service_radius_km,

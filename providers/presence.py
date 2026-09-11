@@ -38,6 +38,8 @@ def online_provider_query(now=None) -> Q:
     rules = operation_rules()
     query = Q(
         status=ProviderProfile.Status.APPROVED,
+        identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+        lifestyle_photo__isnull=False,
         is_accepting_orders=True,
         admin_order_restricted=False,
         user__is_active=True,
@@ -45,6 +47,7 @@ def online_provider_query(now=None) -> Q:
         live_location__session_id__isnull=False,
         live_location__accuracy_m__lte=rules["max_accuracy_m"],
     )
+    query &= ~Q(bio="") & ~Q(service_city_code="") & ~Q(service_city_name="")
     cutoff = (now or timezone.now()) - rules["timeout"] if rules["timeout"] is not None else None
     if cutoff is not None:
         query &= Q(live_location__received_at__gte=cutoff)
@@ -61,6 +64,8 @@ def get_provider_live_location(provider: ProviderProfile) -> ProviderLiveLocatio
 def provider_is_online(provider: ProviderProfile, now=None) -> bool:
     if (
         provider.status != ProviderProfile.Status.APPROVED
+        or not provider.has_verified_identity
+        or not provider.is_profile_complete
         or not provider.is_accepting_orders
         or provider.admin_order_restricted
         or not provider.user.is_active

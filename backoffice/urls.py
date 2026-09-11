@@ -48,6 +48,7 @@ from .views import (
     ProviderApplicationDetailView,
     ProviderApplicationListView,
     ProviderApplicationReviewView,
+    ProviderIdentityReviewView,
     ScheduledTaskDetailView,
     ScheduledTaskListView,
     ScheduledTaskRetryView,
@@ -183,6 +184,11 @@ urlpatterns = [
         "provider-applications/<int:profile_id>/review/",
         ProviderApplicationReviewView.as_view(),
         name="backoffice-provider-application-review",
+    ),
+    path(
+        "providers/<int:profile_id>/identity-review/",
+        ProviderIdentityReviewView.as_view(),
+        name="backoffice-provider-identity-review",
     ),
     path(
         "provider-orders/",

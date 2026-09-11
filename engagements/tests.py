@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from activities.models import Activity, ActivityCategory
+from mediafiles.models import MediaAsset
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 
 from .models import BrowsingHistory, ProviderFavorite
@@ -16,8 +17,21 @@ class EngagementApiTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(phone="13900000101", password="test-password")
         provider_user = User.objects.create_user(phone="13900000102", nickname="收藏达人")
+        lifestyle_photo = MediaAsset.objects.create(
+            owner=provider_user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{provider_user.public_id}/engagement.webp",
+        )
         self.provider = ProviderProfile.objects.create(
-            user=provider_user, status=ProviderProfile.Status.APPROVED, service_city_name="邯郸市"
+            user=provider_user,
+            status=ProviderProfile.Status.APPROVED,
+            identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            lifestyle_photo=lifestyle_photo,
+            bio="用于收藏与浏览记录测试的完整达人资料。",
+            service_city_code="130400",
+            service_city_name="邯郸市",
         )
         category = ServiceCategory.objects.create(name="收藏测试服务", slug="favorite-service")
         ProviderService.objects.create(

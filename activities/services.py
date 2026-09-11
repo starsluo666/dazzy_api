@@ -384,8 +384,6 @@ def expire_activity_participation_payment(*, order_no: str, now=None) -> dict:
 def _validate_participation_eligibility(activity, user, now):
     if activity.organizer_id == user.pk:
         raise PermissionDenied("组织者无需重复报名自己的活动。")
-    if user.verification_status != user.VerificationStatus.VERIFIED:
-        raise PermissionDenied("完成实名认证后才能报名收费活动。")
     if user.account_status != user.AccountStatus.ACTIVE:
         raise PermissionDenied("当前账号状态不可报名活动。")
     if activity.status not in (Activity.Status.RECRUITING, Activity.Status.FORMED):

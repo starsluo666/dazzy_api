@@ -43,12 +43,22 @@ class ProviderOrderApiTests(TestCase):
         self.provider_user = User.objects.create_user(
             phone="13800000102", password="test", nickname="晓晓"
         )
+        lifestyle_photo = MediaAsset.objects.create(
+            owner=self.provider_user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{self.provider_user.public_id}/orders.webp",
+        )
         self.provider = ProviderProfile.objects.create(
             user=self.provider_user,
             status=ProviderProfile.Status.APPROVED,
+            identity_status=ProviderProfile.IdentityStatus.VERIFIED,
             is_accepting_orders=True,
+            lifestyle_photo=lifestyle_photo,
             service_city_code="130400",
             service_city_name="邯郸市",
+            bio="这是用于订单测试的已认证达人公开简介。",
         )
         now = timezone.now()
         self.live_location = ProviderLiveLocation.objects.create(

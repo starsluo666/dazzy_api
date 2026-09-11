@@ -93,8 +93,6 @@ class ActivityListView(APIView):
     def post(self, request):
         if not request.user.is_authenticated:
             return Response({"detail": "请登录后发布活动。"}, status=403)
-        if request.user.verification_status != request.user.VerificationStatus.VERIFIED:
-            return Response({"detail": "完成实名认证后才能发布活动。"}, status=403)
         serializer = ActivityCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         activity = create_activity_draft(

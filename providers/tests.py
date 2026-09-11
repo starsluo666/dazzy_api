@@ -35,6 +35,23 @@ def create_live_location(provider, *, received_at=None, accuracy_m="12.50"):
     )
 
 
+def make_provider_eligible(provider):
+    if not provider.lifestyle_photo_id:
+        provider.lifestyle_photo = MediaAsset.objects.create(
+            owner=provider.user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{provider.user.public_id}/{provider.pk}.webp",
+        )
+    provider.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+    provider.bio = provider.bio or "这是已经完成实名认证和公开资料的达人简介。"
+    provider.service_city_code = provider.service_city_code or "130400"
+    provider.service_city_name = provider.service_city_name or "邯郸市"
+    provider.save()
+    return provider
+
+
 class ProviderModelTests(TestCase):
     def test_provider_service_uses_integer_minor_units_and_live_wgs84_point(self):
         user = User.objects.create_user(phone="13800000001", password="test-password")
@@ -63,6 +80,7 @@ class ProviderModelTests(TestCase):
             service_city_code="110100",
             service_city_name="北京市",
         )
+        make_provider_eligible(provider)
         create_live_location(provider)
         category = ServiceCategory.objects.create(name="台球陪玩", slug="billiards-list")
         ProviderService.objects.create(
@@ -135,6 +153,7 @@ class ProviderModelTests(TestCase):
             bio="擅长桌游规则讲解",
             rating=Decimal("4.80"),
         )
+        make_provider_eligible(provider)
         category = ServiceCategory.objects.create(name="桌游陪玩", slug="board-games-filter")
         ProviderService.objects.create(
             provider=provider,
@@ -191,6 +210,7 @@ class ProviderModelTests(TestCase):
             service_city_name="北京市",
             bio="喜欢旅行与摄影",
         )
+        make_provider_eligible(provider)
         category = ServiceCategory.objects.create(name="旅行陪伴", slug="travel-detail")
         ProviderService.objects.create(
             provider=provider,
@@ -230,6 +250,7 @@ class ProviderModelTests(TestCase):
             service_city_name="邯郸市",
             rating="5.00",
         )
+        make_provider_eligible(provider)
         category = ServiceCategory.objects.create(name="桌游陪玩", slug="board-game-review")
         service = ProviderService.objects.create(
             provider=provider,
@@ -341,18 +362,10 @@ class ProviderSelfManagementTests(TestCase):
     def test_user_can_save_and_submit_provider_application(self):
         self.user.gender = User.Gender.FEMALE
         self.user.save(update_fields=("gender",))
-        lifestyle_photo = MediaAsset.objects.create(
-            owner=self.user,
-            scope=MediaAsset.Scope.PUBLIC,
-            category=MediaAsset.Category.PROVIDER_PHOTO,
-            status=MediaAsset.Status.UPLOADED,
-            object_key=f"public/provider-photos/{self.user.public_id}/lifestyle.webp",
-        )
         draft = self.client.patch(
             "/api/v1/providers/me/application/",
             {
                 "bio": "我熟悉本地路线，也喜欢摄影和旅行。",
-                "lifestyle_photo_id": str(lifestyle_photo.id),
                 "service_city_code": "110100",
                 "service_city_name": "北京市",
                 "max_service_radius_km": 15,
@@ -363,7 +376,6 @@ class ProviderSelfManagementTests(TestCase):
         self.assertEqual(draft.status_code, 200)
         self.assertEqual(draft.json()["data"]["status"], ProviderProfile.Status.DRAFT)
         self.assertEqual(draft.json()["data"]["gender"], User.Gender.FEMALE)
-        self.assertEqual(draft.json()["data"]["lifestyle_photo_id"], str(lifestyle_photo.id))
 
         submitted = self.client.post(
             "/api/v1/providers/me/application/submit/",
@@ -380,7 +392,7 @@ class ProviderSelfManagementTests(TestCase):
         )
         self.assertEqual(locked.status_code, 400)
 
-    def test_provider_application_requires_lifestyle_photo_before_submission(self):
+    def test_provider_application_does_not_require_lifestyle_photo_or_identity(self):
         self.client.patch(
             "/api/v1/providers/me/application/",
             {
@@ -397,10 +409,11 @@ class ProviderSelfManagementTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(submitted.status_code, 400)
-        self.assertIn("生活照", str(submitted.json()))
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(submitted.json()["data"]["status"], ProviderProfile.Status.PENDING)
 
-    def test_provider_application_rejects_another_users_lifestyle_photo(self):
+    def test_provider_profile_rejects_another_users_lifestyle_photo(self):
+        ProviderProfile.objects.create(user=self.user, status=ProviderProfile.Status.APPROVED)
         other = User.objects.create_user(phone="13800000029", password="test-password")
         lifestyle_photo = MediaAsset.objects.create(
             owner=other,
@@ -411,12 +424,96 @@ class ProviderSelfManagementTests(TestCase):
         )
 
         response = self.client.patch(
-            "/api/v1/providers/me/application/",
+            "/api/v1/providers/me/profile/",
             {"lifestyle_photo_id": str(lifestyle_photo.id)},
             format="json",
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_approved_applicant_can_submit_private_identity_materials(self):
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+        )
+        photos = [
+            MediaAsset.objects.create(
+                owner=self.user,
+                scope=MediaAsset.Scope.PRIVATE,
+                category=MediaAsset.Category.IDENTITY,
+                status=MediaAsset.Status.UPLOADED,
+                object_key=f"private/provider-identities/{self.user.public_id}/{kind}.webp",
+            )
+            for kind in ("front", "back", "face")
+        ]
+
+        saved = self.client.patch(
+            "/api/v1/providers/me/identity/",
+            {
+                "identity_real_name": "张三",
+                "id_number": "130400199001011234",
+                "identity_front_photo_id": str(photos[0].id),
+                "identity_back_photo_id": str(photos[1].id),
+                "identity_face_photo_id": str(photos[2].id),
+            },
+            format="json",
+        )
+        submitted = self.client.post(
+            "/api/v1/providers/me/identity/submit/", {}, format="json"
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertNotIn("id_number", saved.json()["data"])
+        self.assertEqual(saved.json()["data"]["identity_number_masked"], "1304**********1234")
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(
+            submitted.json()["data"]["identity_status"],
+            ProviderProfile.IdentityStatus.PENDING,
+        )
+        profile.refresh_from_db()
+        self.assertNotIn("130400199001011234", profile.identity_number_digest)
+
+    def test_unverified_provider_cannot_start_accepting_orders(self):
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            bio="这是已经完善但尚未完成实名认证的达人资料。",
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+        profile.lifestyle_photo = MediaAsset.objects.create(
+            owner=self.user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{self.user.public_id}/unverified.webp",
+        )
+        profile.save(update_fields=("lifestyle_photo", "updated_at"))
+        category = ServiceCategory.objects.create(
+            name="未实名接单测试",
+            slug="unverified-online",
+        )
+        ProviderService.objects.create(
+            provider=profile,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=16800,
+        )
+
+        response = self.client.post(
+            "/api/v1/providers/me/online/start/",
+            {
+                "longitude": "114.5389610",
+                "latitude": "36.6256570",
+                "accuracy_m": "18.50",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("实名认证", str(response.data))
+        profile.refresh_from_db()
+        self.assertFalse(profile.is_accepting_orders)
 
     def test_provider_application_rejects_radius_outside_supported_range(self):
         too_small = self.client.patch(
@@ -546,6 +643,7 @@ class ProviderSelfManagementTests(TestCase):
             service_city_code="130400",
             service_city_name="邯郸市",
         )
+        make_provider_eligible(provider)
         category = ServiceCategory.objects.create(name="城市陪伴", slug="online-session")
         ProviderService.objects.create(
             provider=provider,
@@ -765,10 +863,11 @@ class ProviderSelfManagementTests(TestCase):
         self.assertEqual(data["items"][0]["settlement_amount"], 26880)
 
     def test_provider_needs_active_service_and_accurate_first_location_to_start(self):
-        ProviderProfile.objects.create(
+        provider = ProviderProfile.objects.create(
             user=self.user,
             status=ProviderProfile.Status.APPROVED,
         )
+        make_provider_eligible(provider)
 
         no_service = self.client.post(
             "/api/v1/providers/me/online/start/",
@@ -792,6 +891,7 @@ class ProviderSelfManagementTests(TestCase):
             status=ProviderProfile.Status.APPROVED,
             is_accepting_orders=True,
         )
+        make_provider_eligible(provider)
         category = ServiceCategory.objects.create(name="摄影陪伴", slug="photo-availability")
         service = ProviderService.objects.create(
             provider=provider,
@@ -843,6 +943,7 @@ class ProviderSelfManagementTests(TestCase):
     def test_availability_does_not_expose_slots_beyond_booking_horizon(self):
         user = User.objects.create_user(phone="13800000010", password="test", nickname="远期达人")
         provider = ProviderProfile.objects.create(user=user, status=ProviderProfile.Status.APPROVED)
+        make_provider_eligible(provider)
         category = ServiceCategory.objects.create(name="远期服务", slug="future-availability")
         service = ProviderService.objects.create(
             provider=provider,

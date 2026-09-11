@@ -8,6 +8,7 @@ from .views import (
     ReviewImageUploadView,
     SupportAttachmentUploadView,
     ProviderLifestylePhotoUploadView,
+    ProviderIdentityPhotoUploadView,
 )
 
 urlpatterns = [
@@ -17,6 +18,11 @@ urlpatterns = [
         "media/provider-lifestyle-photos/",
         ProviderLifestylePhotoUploadView.as_view(),
         name="provider-lifestyle-photo-upload",
+    ),
+    path(
+        "media/provider-identities/",
+        ProviderIdentityPhotoUploadView.as_view(),
+        name="provider-identity-photo-upload",
     ),
     path("media/avatars/", AvatarUploadView.as_view(), name="avatar-upload"),
     path("media/order-evidence/", OrderEvidenceUploadView.as_view(), name="order-evidence-upload"),

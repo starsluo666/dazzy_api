@@ -18,6 +18,9 @@ from .views import (
     CurrentProviderOnlineStopView,
     CurrentProviderWorkbenchView,
     CurrentProviderIncomeView,
+    CurrentProviderIdentitySubmitView,
+    CurrentProviderIdentityView,
+    CurrentProviderProfileView,
 )
 
 urlpatterns = [
@@ -32,6 +35,13 @@ urlpatterns = [
         "providers/me/application/submit/",
         CurrentProviderApplicationSubmitView.as_view(),
         name="provider-application-submit",
+    ),
+    path("providers/me/profile/", CurrentProviderProfileView.as_view(), name="provider-profile"),
+    path("providers/me/identity/", CurrentProviderIdentityView.as_view(), name="provider-identity"),
+    path(
+        "providers/me/identity/submit/",
+        CurrentProviderIdentitySubmitView.as_view(),
+        name="provider-identity-submit",
     ),
     path(
         "providers/me/services/",

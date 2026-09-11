@@ -454,10 +454,6 @@ class AdminActivitySerializer(serializers.ModelSerializer):
     organizer_public_id = serializers.UUIDField(source="organizer.public_id")
     organizer_name = serializers.CharField(source="organizer.nickname")
     organizer_phone_masked = serializers.SerializerMethodField()
-    organizer_verification_status = serializers.CharField(source="organizer.verification_status")
-    organizer_verification_status_label = serializers.CharField(
-        source="organizer.get_verification_status_display"
-    )
     organizer_account_status = serializers.CharField(source="organizer.account_status")
     organizer_account_status_label = serializers.CharField(
         source="organizer.get_account_status_display"
@@ -480,7 +476,6 @@ class AdminActivitySerializer(serializers.ModelSerializer):
         fields = (
             "id", "title", "status", "status_label", "category_name", "category_slug",
             "organizer_public_id", "organizer_name", "organizer_phone_masked",
-            "organizer_verification_status", "organizer_verification_status_label",
             "organizer_account_status", "organizer_account_status_label", "cover_url",
             "city_code", "city_name", "starts_at", "ends_at", "formation_deadline",
             "meeting_place_name", "meeting_address", "source_longitude", "source_latitude",
@@ -612,7 +607,6 @@ class ProviderReviewListSerializer(serializers.ModelSerializer):
     public_id = serializers.UUIDField(source="user.public_id")
     nickname = serializers.CharField(source="user.nickname")
     phone = serializers.CharField(source="user.phone")
-    verification_status = serializers.CharField(source="user.verification_status")
     gender = serializers.CharField(source="user.gender")
     birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
     lifestyle_photo_url = serializers.SerializerMethodField()
@@ -621,7 +615,7 @@ class ProviderReviewListSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProviderProfile
         fields = (
-            "id", "public_id", "nickname", "phone", "verification_status", "gender",
+            "id", "public_id", "nickname", "phone", "gender",
             "birth_date", "status", "lifestyle_photo_url", "service_city_code",
             "service_city_name", "bio", "max_service_radius_km",
             "service_names", "submitted_at", "reviewed_at", "rejection_reason",
@@ -643,11 +637,6 @@ class ProviderApplicationQuerySerializer(serializers.Serializer):
         choices=ProviderProfile.Status.choices,
     )
     city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
-    verification_status = serializers.ChoiceField(
-        required=False,
-        allow_blank=True,
-        choices=User.VerificationStatus.choices,
-    )
     search = serializers.CharField(required=False, allow_blank=True, max_length=50)
     page = serializers.IntegerField(required=False, default=1, min_value=1)
     page_size = serializers.IntegerField(required=False, default=10, min_value=1, max_value=50)
@@ -664,11 +653,6 @@ class ProviderReviewDecisionSerializer(serializers.Serializer):
 
 
 class AdminUserQuerySerializer(serializers.Serializer):
-    verification_status = serializers.ChoiceField(
-        required=False,
-        allow_blank=True,
-        choices=User.VerificationStatus.choices,
-    )
     account_status = serializers.ChoiceField(
         required=False,
         allow_blank=True,
@@ -727,7 +711,6 @@ class AdminUserListSerializer(serializers.ModelSerializer):
     phone_masked = serializers.SerializerMethodField()
     avatar_url = serializers.SerializerMethodField()
     gender_label = serializers.CharField(source="get_gender_display")
-    verification_status_label = serializers.CharField(source="get_verification_status_display")
     account_status_label = serializers.CharField(source="get_account_status_display")
     identity = serializers.SerializerMethodField()
     provider_status = serializers.SerializerMethodField()
@@ -740,8 +723,7 @@ class AdminUserListSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             "public_id", "nickname", "phone_masked", "avatar_url", "gender",
-            "gender_label", "birth_date", "verification_status",
-            "verification_status_label", "account_status", "account_status_label",
+            "gender_label", "birth_date", "account_status", "account_status_label",
             "identity", "provider_status", "provider_status_label", "risk_flag",
             "order_count", "activity_count", "date_joined", "last_login",
         )
@@ -782,10 +764,10 @@ class ProviderAdminQuerySerializer(serializers.Serializer):
         choices=("all", "accepting", "paused", "restricted"),
     )
     city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
-    verification_status = serializers.ChoiceField(
+    identity_status = serializers.ChoiceField(
         required=False,
         allow_blank=True,
-        choices=User.VerificationStatus.choices,
+        choices=ProviderProfile.IdentityStatus.choices,
     )
     search = serializers.CharField(required=False, allow_blank=True, max_length=50)
     page = serializers.IntegerField(required=False, default=1, min_value=1)
@@ -828,10 +810,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     gender = serializers.CharField(source="user.gender")
     gender_label = serializers.CharField(source="user.get_gender_display")
     birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
-    verification_status = serializers.CharField(source="user.verification_status")
-    verification_status_label = serializers.CharField(
-        source="user.get_verification_status_display"
-    )
+    identity_status_label = serializers.CharField(source="get_identity_status_display")
     account_status = serializers.CharField(source="user.account_status")
     account_status_label = serializers.CharField(source="user.get_account_status_display")
     status_label = serializers.CharField(source="get_status_display")
@@ -848,12 +827,16 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     services = serializers.SerializerMethodField()
     weekly_availability = serializers.SerializerMethodField()
     credit_adjustments = serializers.SerializerMethodField()
+    identity_front_photo_url = serializers.SerializerMethodField()
+    identity_back_photo_url = serializers.SerializerMethodField()
+    identity_face_photo_url = serializers.SerializerMethodField()
+    is_profile_complete = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = ProviderProfile
         fields = (
             "id", "public_id", "nickname", "phone_masked", "gender", "gender_label",
-            "birth_date", "verification_status", "verification_status_label",
+            "birth_date", "identity_status", "identity_status_label",
             "account_status", "account_status_label", "status", "status_label", "bio",
             "lifestyle_photo_available", "lifestyle_photo_url", "service_city_code",
             "service_city_name", "is_online", "has_live_location", "current_longitude",
@@ -863,6 +846,9 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "order_count", "credit_score", "is_accepting_orders", "admin_order_restricted",
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
             "credit_adjustments", "submitted_at", "reviewed_at", "rejection_reason",
+            "identity_real_name", "identity_number_masked", "identity_front_photo_url",
+            "identity_back_photo_url", "identity_face_photo_url", "identity_submitted_at",
+            "identity_reviewed_at", "identity_rejection_reason", "is_profile_complete",
             "created_at", "updated_at",
         )
 
@@ -876,6 +862,20 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
         if not obj.lifestyle_photo_id or not self.context.get("can_review", False):
             return None
         return build_media_url(obj.lifestyle_photo.object_key)
+
+    def _identity_photo_url(self, asset):
+        if not asset or not self.context.get("can_review", False):
+            return None
+        return build_media_url(asset.object_key, private=True)
+
+    def get_identity_front_photo_url(self, obj):
+        return self._identity_photo_url(obj.identity_front_photo)
+
+    def get_identity_back_photo_url(self, obj):
+        return self._identity_photo_url(obj.identity_back_photo)
+
+    def get_identity_face_photo_url(self, obj):
+        return self._identity_photo_url(obj.identity_face_photo)
 
     def get_is_online(self, obj):
         return provider_is_online(obj)

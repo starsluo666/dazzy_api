@@ -93,8 +93,6 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
     if decision == "approve":
         if not activity.category.is_active:
             raise ValidationError({"decision": "活动分类已停用，不能通过审核。"})
-        if activity.organizer.verification_status != User.VerificationStatus.VERIFIED:
-            raise ValidationError({"decision": "发起人尚未完成实名认证。"})
         if activity.organizer.account_status != User.AccountStatus.ACTIVE:
             raise ValidationError({"decision": "发起人账号当前不可用。"})
         if activity.formation_deadline <= now or activity.starts_at <= now:
@@ -503,13 +501,6 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
     profile = get_object_or_404(queryset, id=profile_id)
     if profile.status != ProviderProfile.Status.PENDING:
         raise ValidationError("仅待审核申请可以执行审核。")
-    if (
-        decision == "approve"
-        and profile.user.verification_status != profile.user.VerificationStatus.VERIFIED
-    ):
-        raise ValidationError({"decision": "申请人尚未完成实名认证，不能通过达人审核。"})
-    if decision == "approve" and not profile.lifestyle_photo_id:
-        raise ValidationError({"decision": "申请人尚未上传生活照，不能通过达人审核。"})
     before = {"status": profile.status, "rejection_reason": profile.rejection_reason}
     profile.status = (
         ProviderProfile.Status.APPROVED
@@ -546,13 +537,73 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
         event_type=UserNotification.EventType.PROVIDER_APPLICATION_RESULT,
         title="达人申请审核通过" if decision == "approve" else "达人申请审核未通过",
         content=(
-            "你的达人申请已通过，可以进入达人端完善服务并开始接单。"
+            "你的达人申请已通过，可以进入达人端完成实名认证并完善资料。"
             if decision == "approve"
             else f"你的达人申请未通过：{profile.rejection_reason}。修改资料后可重新提交。"
         ),
         action_text="查看申请",
         action_url="/pages/providers/apply",
         dedupe_key=f"provider-application:{profile.pk}:{decision}:{profile.reviewed_at.isoformat()}",
+    )
+    return profile
+
+
+@transaction.atomic
+def review_provider_identity(*, profile_id, decision, reason, actor, access, request):
+    queryset = ProviderProfile.objects.select_for_update().select_related("user")
+    if not access.all_data:
+        queryset = queryset.filter(service_city_code__in=access.city_codes)
+    profile = get_object_or_404(queryset, id=profile_id)
+    if profile.status != ProviderProfile.Status.APPROVED:
+        raise ValidationError("仅入驻申请已通过的达人可以审核实名认证。")
+    if profile.identity_status != ProviderProfile.IdentityStatus.PENDING:
+        raise ValidationError("仅认证中的实名认证可以执行审核。")
+    before = {
+        "identity_status": profile.identity_status,
+        "identity_rejection_reason": profile.identity_rejection_reason,
+    }
+    profile.identity_status = (
+        ProviderProfile.IdentityStatus.VERIFIED
+        if decision == "approve"
+        else ProviderProfile.IdentityStatus.REJECTED
+    )
+    profile.identity_reviewed_at = timezone.now()
+    profile.identity_rejection_reason = reason.strip() if decision == "reject" else ""
+    if decision == "reject":
+        profile.is_accepting_orders = False
+    profile.save(
+        update_fields=(
+            "identity_status",
+            "identity_reviewed_at",
+            "identity_rejection_reason",
+            "is_accepting_orders",
+            "updated_at",
+        )
+    )
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"provider.identity.{decision}",
+        target_type="provider_profile",
+        target_id=str(profile.id),
+        before=before,
+        after={
+            "identity_status": profile.identity_status,
+            "identity_rejection_reason": profile.identity_rejection_reason,
+        },
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    create_system_notification(
+        recipient=profile.user,
+        event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+        title="达人实名认证已通过" if decision == "approve" else "达人实名认证未通过",
+        content=(
+            "实名认证已通过，完善达人资料和服务后即可开启接单。"
+            if decision == "approve"
+            else f"实名认证未通过：{profile.identity_rejection_reason}。请修改后重新提交。"
+        ),
+        dedupe_key=f"provider-identity:{profile.pk}:{decision}:{profile.identity_reviewed_at.isoformat()}",
     )
     return profile
 

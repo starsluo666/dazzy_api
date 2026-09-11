@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from activities.models import Activity, ActivityCategory
+from mediafiles.models import MediaAsset
 from providers.models import (
     ProviderProfile,
     ProviderLiveLocation,
@@ -30,9 +31,19 @@ class HomeDiscoveryTests(TestCase):
                 password="test",
                 nickname=f"达人{index}",
             )
+            lifestyle_photo = MediaAsset.objects.create(
+                owner=user,
+                scope=MediaAsset.Scope.PUBLIC,
+                category=MediaAsset.Category.PROVIDER_PHOTO,
+                status=MediaAsset.Status.UPLOADED,
+                object_key=f"public/provider-photos/{user.public_id}/home-{index}.webp",
+            )
             provider = ProviderProfile.objects.create(
                 user=user,
                 status=ProviderProfile.Status.APPROVED,
+                identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+                lifestyle_photo=lifestyle_photo,
+                bio="用于首页推荐测试的完整达人资料。",
                 service_city_code="130400",
                 service_city_name="邯郸市",
                 is_accepting_orders=True,

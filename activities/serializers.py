@@ -395,7 +395,6 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
     remaining_capacity = serializers.SerializerMethodField()
     platform_service_fee_amount = serializers.SerializerMethodField()
     payable_amount = serializers.SerializerMethodField()
-    organizer_verified = serializers.SerializerMethodField()
     organizer_rating = serializers.SerializerMethodField()
     reviewed_at = serializers.DateTimeField(allow_null=True)
     rejection_reason = serializers.CharField()
@@ -419,7 +418,6 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
             "remaining_capacity",
             "platform_service_fee_amount",
             "payable_amount",
-            "organizer_verified",
             "organizer_rating",
             "reviewed_at",
             "rejection_reason",
@@ -430,9 +428,6 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
 
     def get_payable_amount(self, obj) -> int:
         return obj.aa_principal_amount + self.get_platform_service_fee_amount(obj)
-
-    def get_organizer_verified(self, obj) -> bool:
-        return obj.organizer.verification_status == obj.organizer.VerificationStatus.VERIFIED
 
     def get_organizer_rating(self, obj) -> str | None:
         profile = getattr(obj.organizer, "provider_profile", None)

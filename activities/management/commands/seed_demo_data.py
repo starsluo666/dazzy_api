@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from config.geospatial import gcj02_to_wgs84
+from mediafiles.models import MediaAsset
 from providers.models import (
     ProviderLiveLocation,
     ProviderProfile,
@@ -88,11 +89,22 @@ class Command(BaseCommand):
                 },
             )
             users.append(user)
+            lifestyle_photo, _ = MediaAsset.objects.update_or_create(
+                owner=user,
+                category=MediaAsset.Category.PROVIDER_PHOTO,
+                object_key=f"public/provider-photos/{user.public_id}/demo.webp",
+                defaults={
+                    "scope": MediaAsset.Scope.PUBLIC,
+                    "status": MediaAsset.Status.UPLOADED,
+                },
+            )
             provider, _ = ProviderProfile.objects.update_or_create(
                 user=user,
                 defaults={
                     "status": ProviderProfile.Status.APPROVED,
+                    "identity_status": ProviderProfile.IdentityStatus.VERIFIED,
                     "bio": "认真生活，也认真陪你体验城市里的好时光。",
+                    "lifestyle_photo": lifestyle_photo,
                     "service_city_code": "130400",
                     "service_city_name": "邯郸市",
                     "max_service_radius_km": 20,
@@ -146,11 +158,22 @@ class Command(BaseCommand):
             multi_user.avatar_object_key = users[0].avatar_object_key
             multi_user.save(update_fields=("avatar_object_key",))
         users.append(multi_user)
+        multi_lifestyle_photo, _ = MediaAsset.objects.update_or_create(
+            owner=multi_user,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            object_key=f"public/provider-photos/{multi_user.public_id}/demo.webp",
+            defaults={
+                "scope": MediaAsset.Scope.PUBLIC,
+                "status": MediaAsset.Status.UPLOADED,
+            },
+        )
         multi_provider, _ = ProviderProfile.objects.update_or_create(
             user=multi_user,
             defaults={
                 "status": ProviderProfile.Status.APPROVED,
+                "identity_status": ProviderProfile.IdentityStatus.VERIFIED,
                 "bio": "喜欢旅行、桌游与城市探索，可根据你的计划灵活选择服务。",
+                "lifestyle_photo": multi_lifestyle_photo,
                 "service_city_code": "130400",
                 "service_city_name": "邯郸市",
                 "max_service_radius_km": 30,
