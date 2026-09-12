@@ -119,6 +119,99 @@ class AuthenticationApiTests(APITestCase):
         )
         self.assertEqual(reused.status_code, 400)
 
+    def test_authenticated_user_can_view_account_security_status(self):
+        user = User.objects.create_user(phone=self.phone, password=self.password)
+        self.client.force_authenticate(user)
+
+        response = self.client.get("/api/v1/auth/security/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["phone_masked"], "138****0001")
+        self.assertTrue(response.data["data"]["password_set"])
+        self.assertEqual(response.data["data"]["account_status"], "active")
+        self.assertEqual(response.data["data"]["account_status_label"], "正常")
+
+    def test_change_password_rotates_current_session_and_invalidates_old_tokens(self):
+        User.objects.create_user(phone=self.phone, password=self.password)
+        login = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": self.phone, "password": self.password},
+            format="json",
+        ).data["data"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login['access']}")
+
+        changed = self.client.post(
+            "/api/v1/auth/password/change/",
+            {"current_password": self.password, "new_password": "new-secure-pass-456"},
+            format="json",
+        )
+
+        self.assertEqual(changed.status_code, 200)
+        self.assertIn("access", changed.data["data"])
+        self.assertIn("refresh", changed.data["data"])
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login['access']}")
+        self.assertEqual(self.client.get("/api/v1/auth/security/").status_code, 401)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {changed.data['data']['access']}"
+        )
+        self.assertEqual(self.client.get("/api/v1/auth/security/").status_code, 200)
+
+        self.client.credentials()
+        old_login = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": self.phone, "password": self.password},
+            format="json",
+        )
+        new_login = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": self.phone, "password": "new-secure-pass-456"},
+            format="json",
+        )
+        self.assertEqual(old_login.status_code, 400)
+        self.assertEqual(new_login.status_code, 200)
+
+    def test_logout_other_sessions_requires_password_and_rotates_tokens(self):
+        User.objects.create_user(phone=self.phone, password=self.password)
+        first = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": self.phone, "password": self.password},
+            format="json",
+        ).data["data"]
+        second = self.client.post(
+            "/api/v1/auth/login/password/",
+            {"phone": self.phone, "password": self.password},
+            format="json",
+        ).data["data"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {first['access']}")
+
+        rejected = self.client.post(
+            "/api/v1/auth/sessions/logout-others/",
+            {"current_password": "incorrect-password"},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        rotated = self.client.post(
+            "/api/v1/auth/sessions/logout-others/",
+            {"current_password": self.password},
+            format="json",
+        )
+        self.assertEqual(rotated.status_code, 200)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {second['access']}")
+        self.assertEqual(self.client.get("/api/v1/auth/security/").status_code, 401)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {rotated.data['data']['access']}"
+        )
+        self.assertEqual(self.client.get("/api/v1/auth/security/").status_code, 200)
+
+        self.client.credentials()
+        old_refresh = self.client.post(
+            "/api/v1/auth/token/refresh/", {"refresh": second["refresh"]}, format="json"
+        )
+        self.assertEqual(old_refresh.status_code, 401)
+
     def test_rejects_duplicate_registration_and_fast_resend(self):
         User.objects.create_user(phone=self.phone, password=self.password)
         duplicate = self.request_code("register")

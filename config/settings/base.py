@@ -191,6 +191,7 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "auth_login": os.getenv("AUTH_LOGIN_RATE", "30/min"),
     "admin_auth_refresh": os.getenv("ADMIN_AUTH_REFRESH_RATE", "60/min"),
     "auth_password_reset": os.getenv("AUTH_PASSWORD_RESET_RATE", "10/min"),
+    "auth_security": os.getenv("AUTH_SECURITY_RATE", "10/min"),
     "map_proxy_burst": os.getenv("MAP_PROXY_BURST_RATE", "30/min"),
     "map_proxy_daily": os.getenv("MAP_PROXY_DAILY_RATE", "500/day"),
 }

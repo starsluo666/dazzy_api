@@ -13,7 +13,10 @@ from engagements.models import ProviderFavorite
 from config.throttles import SmsSendIpDailyThrottle
 
 from .serializers import (
+    ChangePasswordSerializer,
+    CloseAccountSerializer,
     LogoutSerializer,
+    LogoutOtherSessionsSerializer,
     PasswordLoginSerializer,
     RegisterSerializer,
     ResetPasswordSerializer,
@@ -94,6 +97,62 @@ class ResetPasswordView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response({"data": {"reset": True}})
+
+
+class AccountSecurityView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        phone = request.user.phone
+        return Response(
+            {
+                "data": {
+                    "phone_masked": f"{phone[:3]}****{phone[-4:]}",
+                    "password_set": request.user.has_usable_password(),
+                    "account_status": request.user.account_status,
+                    "account_status_label": request.user.get_account_status_display(),
+                }
+            }
+        )
+
+
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": auth_payload(serializer.save())})
+
+
+class LogoutOtherSessionsView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = LogoutOtherSessionsSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": auth_payload(serializer.save())})
+
+
+class CloseAccountView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = CloseAccountSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({"data": {"closed": True}})
 
 
 class LogoutView(APIView):

@@ -219,11 +219,66 @@ class ResetPasswordSerializer(serializers.Serializer):
         )
         user = self.validated_data["user"]
         user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=("password",))
+        return invalidate_user_sessions(user)
+
+
+def invalidate_user_sessions(user: User) -> User:
+    user.auth_version = F("auth_version") + 1
+    user.save(update_fields=("auth_version",))
+    for token in OutstandingToken.objects.filter(user=user):
+        BlacklistedToken.objects.get_or_create(token=token)
+    user.refresh_from_db(fields=("auth_version",))
+    return user
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, validators=[validate_password])
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if not user.check_password(attrs["current_password"]):
+            raise serializers.ValidationError({"current_password": "当前密码不正确。"})
+        if attrs["current_password"] == attrs["new_password"]:
+            raise serializers.ValidationError({"new_password": "新密码不能与当前密码相同。"})
+        attrs["user"] = user
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.validated_data["user"]
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=("password",))
+        return invalidate_user_sessions(user)
+
+
+class LogoutOtherSessionsSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if not user.check_password(attrs["current_password"]):
+            raise serializers.ValidationError({"current_password": "当前密码不正确。"})
+        attrs["user"] = user
+        return attrs
+
+    def save(self, **kwargs):
+        return invalidate_user_sessions(self.validated_data["user"])
+
+
+class CloseAccountSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+
+    def save(self, **kwargs):
+        user = self.context["request"].user
+        if not user.check_password(self.validated_data["current_password"]):
+            raise serializers.ValidationError({"current_password": "当前密码不正确。"})
+        user.account_status = User.AccountStatus.CLOSED
+        user.is_active = False
         user.auth_version = F("auth_version") + 1
-        user.save(update_fields=("password", "auth_version"))
+        user.save(update_fields=("account_status", "is_active", "auth_version"))
         for token in OutstandingToken.objects.filter(user=user):
             BlacklistedToken.objects.get_or_create(token=token)
-        user.refresh_from_db(fields=("auth_version",))
         return user
 
 
