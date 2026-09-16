@@ -206,3 +206,6 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
     "SERVE_PERMISSIONS": ["config.permissions.DebugOnlyPermission"],
 }
+if os.name == 'nt':  # Windows
+    GDAL_LIBRARY_PATH = r'C:\Users\13106\AppData\Local\Programs\OSGeo4W\bin\gdal313.dll'
+    GEOS_LIBRARY_PATH = r'C:\Users\13106\AppData\Local\Programs\OSGeo4W\bin\geos_c.dll'
