@@ -178,6 +178,12 @@ class ProviderOrderPaymentOrder(models.Model):
         PARTIALLY_REFUNDED = "partially_refunded", "部分退款"
         REFUNDED = "refunded", "已退款"
 
+    class PreorderStatus(models.TextChoices):
+        NOT_STARTED = "not_started", "未发起"
+        SUBMITTING = "submitting", "预下单处理中"
+        READY = "ready", "预下单成功"
+        FAILED = "failed", "预下单失败"
+
     payment_no = models.CharField(
         "支付单号",
         max_length=24,
@@ -215,7 +221,29 @@ class ProviderOrderPaymentOrder(models.Model):
         choices=Status,
         default=Status.PENDING_PAYMENT,
     )
-    gateway_trade_no = models.CharField("渠道交易号", max_length=64, blank=True)
+    gateway_trade_no = models.CharField("渠道交易号", max_length=128, blank=True)
+    preorder_status = models.CharField(
+        "汇付预下单状态",
+        max_length=16,
+        choices=PreorderStatus,
+        default=PreorderStatus.NOT_STARTED,
+    )
+    gateway_merchant_id = models.CharField("汇付商户号", max_length=32, blank=True)
+    req_date = models.CharField("汇付请求日期", max_length=8, blank=True)
+    req_seq_id = models.CharField("汇付请求流水号", max_length=128, blank=True)
+    payment_scene = models.CharField("支付场景", max_length=32, blank=True)
+    trade_type = models.CharField("汇付交易类型", max_length=16, blank=True)
+    payment_invoke_payload = models.JSONField("客户端调起参数", default=dict, blank=True)
+    gateway_party_order_id = models.CharField("渠道商户订单号", max_length=64, blank=True)
+    gateway_out_trans_id = models.CharField("渠道交易订单号", max_length=64, blank=True)
+    gateway_response_code = models.CharField("汇付响应码", max_length=32, blank=True)
+    gateway_response_digest = models.CharField("汇付响应摘要", max_length=64, blank=True)
+    gateway_last_query_status = models.CharField("最近查单状态", max_length=8, blank=True)
+    gateway_last_query_digest = models.CharField("最近查单响应摘要", max_length=64, blank=True)
+    gateway_last_queried_at = models.DateTimeField("最近查单时间", null=True, blank=True)
+    preorder_attempts = models.PositiveSmallIntegerField("预下单尝试次数", default=0)
+    preorder_requested_at = models.DateTimeField("预下单请求时间", null=True, blank=True)
+    preorder_ready_at = models.DateTimeField("预下单完成时间", null=True, blank=True)
     expires_at = models.DateTimeField("支付失效时间")
     paid_at = models.DateTimeField("支付时间", null=True, blank=True)
     closed_at = models.DateTimeField("关闭时间", null=True, blank=True)
@@ -233,6 +261,10 @@ class ProviderOrderPaymentOrder(models.Model):
             models.Index(
                 fields=("status", "expires_at"),
                 name="provider_pay_status_exp_idx",
+            ),
+            models.Index(
+                fields=("preorder_status", "-updated_at"),
+                name="provider_pay_preorder_idx",
             ),
         ]
         constraints = [
@@ -252,12 +284,63 @@ class ProviderOrderPaymentOrder(models.Model):
                 condition=~Q(gateway_trade_no=""),
                 name="uniq_provider_gateway_trade_no",
             ),
+            models.UniqueConstraint(
+                fields=("req_date", "req_seq_id"),
+                condition=~Q(req_seq_id=""),
+                name="uniq_provider_huifu_request",
+            ),
         ]
         verbose_name = "达人订单支付单"
         verbose_name_plural = verbose_name
 
     def __str__(self):
         return f"{self.payment_no} / {self.order.order_no}"
+
+
+class HuifuPaymentNotification(models.Model):
+    class Status(models.TextChoices):
+        RECEIVED = "received", "已接收"
+        PROCESSED = "processed", "已处理"
+
+    event_key = models.CharField("事件幂等键", max_length=64, unique=True)
+    payment_order = models.ForeignKey(
+        ProviderOrderPaymentOrder,
+        on_delete=models.PROTECT,
+        related_name="huifu_notifications",
+        verbose_name="支付单",
+    )
+    huifu_id = models.CharField("汇付商户号", max_length=32)
+    req_date = models.CharField("原请求日期", max_length=8)
+    req_seq_id = models.CharField("原请求流水号", max_length=128)
+    hf_seq_id = models.CharField("汇付全局流水号", max_length=128, blank=True)
+    trans_type = models.CharField("交易类型", max_length=16, blank=True)
+    notify_type = models.CharField("通知类型", max_length=8, blank=True)
+    trans_stat = models.CharField("交易状态", max_length=8)
+    trans_amt = models.CharField("交易金额（元）", max_length=16, blank=True)
+    payload_digest = models.CharField("通知报文摘要", max_length=64)
+    signature_verified = models.BooleanField("验签通过", default=False)
+    query_req_date = models.CharField("查单请求日期", max_length=8, blank=True)
+    query_req_seq_id = models.CharField("查单定位流水号", max_length=128, blank=True)
+    query_response_digest = models.CharField("查单响应摘要", max_length=64, blank=True)
+    status = models.CharField(
+        "处理状态",
+        max_length=16,
+        choices=Status,
+        default=Status.RECEIVED,
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "huifu_payment_notification"
+        ordering = ("-received_at", "-id")
+        indexes = [
+            models.Index(fields=("req_date", "req_seq_id"), name="huifu_notify_request_idx"),
+            models.Index(fields=("status", "-received_at"), name="huifu_notify_status_idx"),
+        ]
+
+    def __str__(self):
+        return self.event_key
 
 
 def generate_provider_refund_no():

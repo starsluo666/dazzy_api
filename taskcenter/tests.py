@@ -144,6 +144,57 @@ class TaskCenterTests(TestCase):
         self.assertEqual(task.result["action"], "cancelled")
         self.assertEqual(process_due_tasks(now=now)["claimed"], 0)
 
+    @patch("orders.services.confirm_provider_order_huifu_payment_status")
+    def test_payment_expiry_reschedules_while_gateway_is_processing(self, confirm_status):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYTASKPAYPROCESSING001",
+            status=ProviderOrder.Status.PENDING_PAYMENT,
+            payment_deadline=now - timedelta(seconds=1),
+        )
+        task, _ = register_provider_order_payment_expiry(order)
+        confirm_status.return_value = {
+            "state": "processing",
+            "order_no": order.order_no,
+            "trans_stat": "P",
+        }
+
+        result = process_due_tasks(now=now)
+
+        order.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(result["rescheduled"], 1)
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertEqual(task.status, ScheduledTask.Status.PENDING)
+        self.assertEqual(task.available_at, now + timedelta(minutes=1))
+        self.assertEqual(task.result["source"], "expiry_query")
+
+    @patch("orders.services.confirm_provider_order_huifu_payment_status")
+    def test_payment_expiry_never_closes_after_processing_retry_limit(self, confirm_status):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYTASKPAYREVIEW001",
+            status=ProviderOrder.Status.PENDING_PAYMENT,
+            payment_deadline=now - timedelta(seconds=1),
+        )
+        task, _ = register_provider_order_payment_expiry(order)
+        task.attempt_count = task.max_attempts - 1
+        task.save(update_fields=("attempt_count", "updated_at"))
+        confirm_status.return_value = {
+            "state": "processing",
+            "order_no": order.order_no,
+            "trans_stat": "P",
+        }
+
+        result = process_due_tasks(now=now)
+
+        order.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertEqual(task.status, ScheduledTask.Status.FAILED)
+        self.assertIn("禁止自动关闭", task.last_error)
+
     def test_stale_provider_refund_processing_is_recovered_idempotently(self):
         order = self.make_order(
             order_no="DZYTASKREFUND001",

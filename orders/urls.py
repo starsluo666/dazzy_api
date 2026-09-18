@@ -10,17 +10,27 @@ from .views import (
     CurrentProviderOrderRejectView,
     CurrentProviderOrderStartView,
     CurrentUserProviderReviewListView,
+    HuifuPaymentNotificationView,
     ProviderOrderAfterSalesView,
     ProviderOrderCancelView,
     ProviderOrderConfirmCompletionView,
     ProviderOrderDetailView,
     ProviderOrderListCreateView,
+    ProviderOrderPaymentAuthorizationView,
+    ProviderOrderPaymentSessionView,
+    ProviderOrderPaymentStatusView,
     ProviderOrderPreviewView,
     ProviderOrderReviewView,
     ProviderOrderSimulatePaymentView,
+    WechatOfficialOAuthCallbackView,
 )
 
 urlpatterns = [
+    path("payments/huifu/notify/", HuifuPaymentNotificationView.as_view()),
+    path(
+        "payments/wechat/oauth/callback/",
+        WechatOfficialOAuthCallbackView.as_view(),
+    ),
     path("providers/me/orders/", CurrentProviderOrderListView.as_view()),
     path("providers/me/orders/<str:order_no>/", CurrentProviderOrderDetailView.as_view()),
     path(
@@ -60,6 +70,18 @@ urlpatterns = [
         ProviderOrderConfirmCompletionView.as_view(),
     ),
     path("provider-orders/<str:order_no>/review/", ProviderOrderReviewView.as_view()),
+    path(
+        "provider-orders/<str:order_no>/payment-authorization/",
+        ProviderOrderPaymentAuthorizationView.as_view(),
+    ),
+    path(
+        "provider-orders/<str:order_no>/payment-session/",
+        ProviderOrderPaymentSessionView.as_view(),
+    ),
+    path(
+        "provider-orders/<str:order_no>/payment-status/",
+        ProviderOrderPaymentStatusView.as_view(),
+    ),
     path("users/me/provider-reviews/", CurrentUserProviderReviewListView.as_view()),
     path("provider-orders/<str:order_no>/simulate-payment/", ProviderOrderSimulatePaymentView.as_view()),
 ]

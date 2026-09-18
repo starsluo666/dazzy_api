@@ -99,6 +99,14 @@ class ProviderOrderInputSerializer(serializers.Serializer):
         return attrs
 
 
+class ProviderOrderPaymentSessionInputSerializer(serializers.Serializer):
+    payment_scene = serializers.ChoiceField(
+        choices=("official_account", "mobile_app"),
+        default="official_account",
+        required=False,
+    )
+
+
 class ProviderOrderReviewInputSerializer(serializers.Serializer):
     rating = serializers.IntegerField(min_value=1, max_value=5)
     content = serializers.CharField(required=False, allow_blank=True, max_length=500)

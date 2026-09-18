@@ -1,7 +1,9 @@
+import json
 import math
 from dataclasses import dataclass
-from datetime import timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from hashlib import sha256
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -15,10 +17,18 @@ from notifications.services import create_notification, create_order_notificatio
 from providers.models import ProviderProfile, ProviderService
 
 from .models import (
+    HuifuPaymentNotification,
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
     ProviderOrderSettlement,
+)
+from .huifu import (
+    HuifuGatewayError,
+    HuifuPaymentQueryResult,
+    HuifuPaymentSessionInProgress,
+    HuifuPaymentSessionResult,
+    get_huifu_payment_gateway,
 )
 
 MINIMUM_ADVANCE = timedelta(hours=1)
@@ -27,6 +37,12 @@ MINIMUM_HOURLY_MINUTES = 120
 TIME_GRAIN_MINUTES = 30
 PAYMENT_LOCK_MINUTES = 15
 PROVIDER_REJECTION_SUPPORT_TIMEOUT = timedelta(minutes=15)
+PAYMENT_SESSION_STALE_AFTER = timedelta(seconds=30)
+
+PAYMENT_SCENE_TRADE_TYPES = {
+    "official_account": "T_JSAPI",
+    "mobile_app": "T_APP",
+}
 
 
 def provider_rejection_refund_reference(order_no: str) -> str:
@@ -47,6 +63,424 @@ def create_provider_order_payment_order(order: ProviderOrder):
             "expires_at": order.payment_expires_at,
         },
     )
+
+
+def _stored_huifu_payment_session(
+    payment: ProviderOrderPaymentOrder,
+) -> HuifuPaymentSessionResult:
+    return HuifuPaymentSessionResult(
+        req_seq_id=payment.req_seq_id,
+        req_date=payment.req_date,
+        huifu_id=payment.gateway_merchant_id,
+        trade_type=payment.trade_type,
+        trans_stat="P",
+        hf_seq_id=payment.gateway_trade_no,
+        party_order_id=payment.gateway_party_order_id,
+        out_trans_id=payment.gateway_out_trans_id,
+        pay_info=payment.payment_invoke_payload,
+        response_code=payment.gateway_response_code,
+        response_digest=payment.gateway_response_digest,
+    )
+
+
+def create_provider_order_huifu_payment_session(
+    *,
+    order_id: int,
+    customer_id: int,
+    payment_scene: str,
+    sub_openid: str = "",
+):
+    """Create or replay one idempotent Huifu aggregate payment session."""
+
+    gateway = get_huifu_payment_gateway()
+    try:
+        trade_type = PAYMENT_SCENE_TRADE_TYPES[payment_scene]
+    except KeyError as exc:
+        raise ValidationError({"payment_scene": "当前支付场景尚未开放。"}) from exc
+    gateway.validate_for_payment(trade_type=trade_type)
+    if trade_type == "T_JSAPI" and not sub_openid:
+        raise ValidationError({"authorization": "请先完成微信服务号网页授权。"})
+    now = timezone.now()
+    with transaction.atomic():
+        order = ProviderOrder.objects.select_for_update().get(
+            pk=order_id,
+            customer_id=customer_id,
+        )
+        payment, _ = create_provider_order_payment_order(order)
+        payment = ProviderOrderPaymentOrder.objects.select_for_update().get(pk=payment.pk)
+        if order.status != ProviderOrder.Status.PENDING_PAYMENT:
+            raise ValidationError({"status": "订单不在待支付状态。"})
+        if payment.status != ProviderOrderPaymentOrder.Status.PENDING_PAYMENT:
+            raise ValidationError({"status": "支付单不在待支付状态。"})
+        if order.payment_expires_at <= now:
+            raise ValidationError({"status": "支付已超时，请重新下单。"})
+        if (
+            payment.preorder_status == ProviderOrderPaymentOrder.PreorderStatus.READY
+            and payment.payment_scene == payment_scene
+            and payment.trade_type == trade_type
+            and payment.payment_invoke_payload
+        ):
+            return _stored_huifu_payment_session(payment), False
+        if (
+            payment.preorder_status == ProviderOrderPaymentOrder.PreorderStatus.SUBMITTING
+            and payment.preorder_requested_at
+            and payment.preorder_requested_at > now - PAYMENT_SESSION_STALE_AFTER
+        ):
+            raise HuifuPaymentSessionInProgress()
+        if payment.payment_scene and payment.payment_scene != payment_scene:
+            raise ValidationError({"payment_scene": "当前支付单已绑定其他支付场景。"})
+
+        payment.req_date = payment.req_date or timezone.localtime(now).strftime("%Y%m%d")
+        payment.req_seq_id = payment.req_seq_id or payment.payment_no
+        payment.gateway_merchant_id = gateway.merchant_id
+        payment.payment_scene = payment_scene
+        payment.trade_type = trade_type
+        payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.SUBMITTING
+        payment.preorder_requested_at = now
+        payment.preorder_attempts += 1
+        payment.gateway_response_code = ""
+        payment.payment_invoke_payload = {}
+        payment.save(
+            update_fields=(
+                "req_date",
+                "req_seq_id",
+                "gateway_merchant_id",
+                "payment_scene",
+                "trade_type",
+                "preorder_status",
+                "preorder_requested_at",
+                "preorder_attempts",
+                "gateway_response_code",
+                "payment_invoke_payload",
+                "updated_at",
+            )
+        )
+        req_date = payment.req_date
+        req_seq_id = payment.req_seq_id
+        amount = payment.payable_amount
+        goods_desc = order.service_name_snapshot
+        attach = order.order_no
+        time_expire = timezone.localtime(order.payment_expires_at).strftime("%Y%m%d%H%M%S")
+
+    try:
+        result = gateway.create_payment(
+            req_date=req_date,
+            req_seq_id=req_seq_id,
+            amount=amount,
+            goods_desc=goods_desc,
+            trade_type=trade_type,
+            attach=attach,
+            time_expire=time_expire,
+            sub_openid=sub_openid,
+        )
+    except HuifuGatewayError as exc:
+        with transaction.atomic():
+            payment = ProviderOrderPaymentOrder.objects.select_for_update().get(order_id=order_id)
+            if payment.req_date == req_date and payment.req_seq_id == req_seq_id:
+                payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.FAILED
+                payment.gateway_response_code = exc.response_code[:32]
+                payment.gateway_response_digest = exc.response_digest[:64]
+                payment.save(
+                    update_fields=(
+                        "preorder_status",
+                        "gateway_response_code",
+                        "gateway_response_digest",
+                        "updated_at",
+                    )
+                )
+        raise
+
+    with transaction.atomic():
+        payment = ProviderOrderPaymentOrder.objects.select_for_update().get(order_id=order_id)
+        if payment.req_date != req_date or payment.req_seq_id != req_seq_id:
+            raise HuifuGatewayError("支付请求流水已变更，请重新进入支付页。")
+        payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.READY
+        payment.gateway_merchant_id = result.huifu_id
+        payment.gateway_trade_no = result.hf_seq_id
+        payment.gateway_party_order_id = result.party_order_id
+        payment.gateway_out_trans_id = result.out_trans_id
+        payment.payment_invoke_payload = result.pay_info
+        payment.gateway_response_code = result.response_code
+        payment.gateway_response_digest = result.response_digest
+        payment.preorder_ready_at = timezone.now()
+        payment.save(
+            update_fields=(
+                "preorder_status",
+                "gateway_merchant_id",
+                "gateway_trade_no",
+                "gateway_party_order_id",
+                "gateway_out_trans_id",
+                "payment_invoke_payload",
+                "gateway_response_code",
+                "gateway_response_digest",
+                "preorder_ready_at",
+                "updated_at",
+            )
+        )
+        return _stored_huifu_payment_session(payment), True
+
+
+def _huifu_amount_to_cents(value: str) -> int:
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HuifuGatewayError("支付通道返回的金额格式无效。") from exc
+    cents = amount * Decimal("100")
+    if cents != cents.to_integral_value() or cents < 0:
+        raise HuifuGatewayError("支付通道返回的金额格式无效。")
+    return int(cents)
+
+
+def _huifu_payment_channel(pay_type: str) -> str:
+    if pay_type.startswith("T_"):
+        return ProviderOrderPaymentOrder.Channel.WECHAT
+    if pay_type.startswith("A_"):
+        return ProviderOrderPaymentOrder.Channel.ALIPAY
+    raise HuifuGatewayError("支付通道返回了当前未开放的支付方式。")
+
+
+def _huifu_paid_at(value: str):
+    try:
+        parsed = datetime.strptime(value, "%Y%m%d%H%M%S")
+    except (TypeError, ValueError) as exc:
+        raise HuifuGatewayError("支付通道未返回有效的交易完成时间。") from exc
+    return timezone.make_aware(parsed, timezone.get_current_timezone())
+
+
+def _query_provider_order_huifu_payment(
+    payment: ProviderOrderPaymentOrder,
+    *,
+    fallback_hf_seq_id: str = "",
+) -> HuifuPaymentQueryResult:
+    gateway = get_huifu_payment_gateway()
+    query = gateway.query_payment(
+        req_date=payment.req_date,
+        req_seq_id=payment.req_seq_id,
+        hf_seq_id=payment.gateway_trade_no or fallback_hf_seq_id,
+    )
+    if query.huifu_id != payment.gateway_merchant_id:
+        raise HuifuGatewayError("支付查询返回的商户号与本地支付单不一致。")
+    if query.trans_amt:
+        if _huifu_amount_to_cents(query.trans_amt) != payment.payable_amount:
+            raise HuifuGatewayError("支付查询金额与本地支付单不一致。")
+    elif query.trans_stat == "S":
+        raise HuifuGatewayError("支付成功查询未返回交易金额。")
+    if query.trade_type and payment.trade_type and query.trade_type != payment.trade_type:
+        raise HuifuGatewayError("支付查询返回的交易类型与本地支付单不一致。")
+    queried_at = timezone.now()
+    ProviderOrderPaymentOrder.objects.filter(pk=payment.pk).update(
+        gateway_last_query_status=query.trans_stat,
+        gateway_last_query_digest=query.response_digest,
+        gateway_last_queried_at=queried_at,
+        updated_at=queried_at,
+    )
+    return query
+
+
+def _apply_huifu_payment_query_success(
+    payment: ProviderOrderPaymentOrder,
+    query: HuifuPaymentQueryResult,
+    *,
+    fallback_hf_seq_id: str = "",
+    fallback_end_time: str = "",
+):
+    if query.trans_stat != "S":
+        return None
+    gateway_trade_no = query.gateway_trade_no or fallback_hf_seq_id
+    if not gateway_trade_no:
+        raise HuifuGatewayError("支付查询未返回汇付全局流水号。")
+    channel_trade_type = query.trade_type or payment.trade_type
+    result = apply_provider_order_payment_success(
+        order_no=payment.order.order_no,
+        customer_id=payment.payer_id,
+        channel=_huifu_payment_channel(channel_trade_type),
+        gateway_trade_no=gateway_trade_no,
+        paid_amount=payment.payable_amount,
+        signature_verified=True,
+        now=_huifu_paid_at(query.end_time or fallback_end_time),
+    )
+    if result[1].status not in (
+        ProviderOrderPaymentOrder.Status.PAID,
+        ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+        ProviderOrderPaymentOrder.Status.REFUNDED,
+    ):
+        raise HuifuGatewayError("支付成功时间晚于订单失效时间，需要人工核对退款。")
+    return result
+
+
+def confirm_provider_order_huifu_payment_status(
+    *,
+    order_no: str,
+    customer_id: int | None = None,
+) -> dict:
+    """Actively query Huifu so a missing notification cannot strand a paid order."""
+
+    queryset = ProviderOrder.objects.select_related("payment_order")
+    if customer_id is not None:
+        queryset = queryset.filter(customer_id=customer_id)
+    order = queryset.filter(order_no=order_no).first()
+    if order is None:
+        raise ValidationError({"order": "订单不存在或无权操作。"})
+    payment = getattr(order, "payment_order", None)
+    if payment is None:
+        return {"state": "not_started", "order_no": order_no}
+    if payment.status in (
+        ProviderOrderPaymentOrder.Status.PAID,
+        ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+        ProviderOrderPaymentOrder.Status.REFUNDED,
+    ):
+        return {"state": "paid", "order_no": order_no, "changed": False}
+    if order.status != ProviderOrder.Status.PENDING_PAYMENT:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "order_status": order.status,
+        }
+    if not payment.req_date or not payment.req_seq_id or not payment.gateway_merchant_id:
+        return {"state": "not_started", "order_no": order_no}
+
+    query = _query_provider_order_huifu_payment(payment)
+    applied = _apply_huifu_payment_query_success(payment, query)
+    if applied is not None:
+        return {
+            "state": "paid",
+            "order_no": order_no,
+            "changed": applied[2],
+            "trans_stat": query.trans_stat,
+        }
+    return {
+        "state": "failed" if query.trans_stat == "F" else "processing",
+        "order_no": order_no,
+        "trans_stat": query.trans_stat,
+    }
+
+
+def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
+    """Verify, query-confirm and idempotently apply an aggregate payment notification."""
+
+    gateway = get_huifu_payment_gateway()
+    if not resp_data or not sign:
+        raise ValidationError({"notification": "支付通知缺少 resp_data 或 sign。"})
+    if not gateway.verify_payment_notification(resp_data=resp_data, sign=sign):
+        raise ValidationError({"signature": "支付通知验签失败。"})
+    try:
+        payload = json.loads(resp_data)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({"notification": "支付通知业务数据不是有效 JSON。"}) from exc
+    if not isinstance(payload, dict):
+        raise ValidationError({"notification": "支付通知业务数据格式无效。"})
+
+    fields = {
+        name: str(payload.get(name, ""))
+        for name in (
+            "huifu_id",
+            "req_date",
+            "req_seq_id",
+            "hf_seq_id",
+            "trans_stat",
+            "trans_amt",
+            "trans_type",
+            "notify_type",
+            "end_time",
+        )
+    }
+    if any(not fields[name] for name in ("huifu_id", "req_date", "req_seq_id")):
+        raise ValidationError({"notification": "支付通知缺少订单识别字段。"})
+    if fields["trans_stat"] not in {"", "P", "S", "F", "I"}:
+        raise ValidationError({"notification": "支付通知交易状态无效。"})
+
+    payload_digest = sha256(resp_data.encode("utf-8")).hexdigest()
+    event_key = sha256(
+        ":".join(
+            (
+                "payment",
+                fields["huifu_id"],
+                fields["req_date"],
+                fields["req_seq_id"],
+                fields["hf_seq_id"],
+                fields["trans_type"],
+                fields["notify_type"],
+                fields["trans_stat"],
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+    with transaction.atomic():
+        payment = (
+            ProviderOrderPaymentOrder.objects.select_for_update()
+            .select_related("order")
+            .filter(req_date=fields["req_date"], req_seq_id=fields["req_seq_id"])
+            .first()
+        )
+        if payment is None:
+            raise ValidationError({"notification": "支付通知未匹配到本地支付单。"})
+        if payment.gateway_merchant_id != fields["huifu_id"]:
+            raise ValidationError({"notification": "支付通知商户号与本地支付单不一致。"})
+        if fields["trans_amt"] and _huifu_amount_to_cents(fields["trans_amt"]) != payment.payable_amount:
+            raise ValidationError({"notification": "支付通知金额与本地支付单不一致。"})
+        event, _ = HuifuPaymentNotification.objects.get_or_create(
+            event_key=event_key,
+            defaults={
+                "payment_order": payment,
+                "huifu_id": fields["huifu_id"],
+                "req_date": fields["req_date"],
+                "req_seq_id": fields["req_seq_id"],
+                "hf_seq_id": fields["hf_seq_id"],
+                "trans_stat": fields["trans_stat"],
+                "trans_amt": fields["trans_amt"],
+                "trans_type": fields["trans_type"],
+                "notify_type": fields["notify_type"],
+                "payload_digest": payload_digest,
+                "signature_verified": True,
+            },
+        )
+        event = HuifuPaymentNotification.objects.select_for_update().get(pk=event.pk)
+        if event.payload_digest != payload_digest or event.payment_order_id != payment.pk:
+            raise ValidationError({"notification": "支付通知幂等键冲突。"})
+        if event.status == HuifuPaymentNotification.Status.PROCESSED:
+            if (
+                event.trans_stat != "S"
+                or payment.status
+                in (
+                    ProviderOrderPaymentOrder.Status.PAID,
+                    ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+                    ProviderOrderPaymentOrder.Status.REFUNDED,
+                )
+            ):
+                return f"RECV_ORD_ID_{fields['req_seq_id']}"
+            raise HuifuGatewayError("支付通知已处理，但本地支付状态不一致。")
+        if not event.query_req_seq_id:
+            event.query_req_date = payment.req_date
+            event.query_req_seq_id = payment.req_seq_id
+            event.save(update_fields=("query_req_date", "query_req_seq_id"))
+        gateway_trade_no = payment.gateway_trade_no or fields["hf_seq_id"]
+        payment_id = payment.pk
+
+    payment = ProviderOrderPaymentOrder.objects.select_related("order").get(pk=payment_id)
+    query = _query_provider_order_huifu_payment(
+        payment,
+        fallback_hf_seq_id=gateway_trade_no,
+    )
+    _apply_huifu_payment_query_success(
+        payment,
+        query,
+        fallback_hf_seq_id=fields["hf_seq_id"],
+        fallback_end_time=fields["end_time"],
+    )
+
+    with transaction.atomic():
+        event = HuifuPaymentNotification.objects.select_for_update().get(event_key=event_key)
+        event.query_response_digest = query.response_digest
+        event.status = HuifuPaymentNotification.Status.PROCESSED
+        event.processed_at = timezone.now()
+        event.save(
+            update_fields=(
+                "query_response_digest",
+                "status",
+                "processed_at",
+            )
+        )
+    return f"RECV_ORD_ID_{fields['req_seq_id']}"
 
 
 @transaction.atomic

@@ -1,6 +1,8 @@
+import json
 import uuid
 from datetime import time, timedelta
 from decimal import Decimal
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
@@ -8,7 +10,7 @@ from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from accounts.models import User
+from accounts.models import User, WechatOfficialAccountIdentity
 from backoffice.models import (
     AdminAuditLog,
     PlatformOperationSetting,
@@ -28,12 +30,14 @@ from locations.tencent import RouteResult
 from locations.models import UserAddress
 from taskcenter.models import ScheduledTask
 
-from .payment_gateway import PaymentResult
+from .huifu import HuifuGatewayError, HuifuPaymentQueryResult, HuifuPaymentSessionResult
 from .models import (
+    HuifuPaymentNotification,
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderSettlement,
 )
+from .payment_gateway import PaymentResult
 
 
 @override_settings(DEBUG=True)
@@ -282,6 +286,417 @@ class ProviderOrderApiTests(TestCase):
                 business_key=order_no,
             ).exists()
         )
+
+    @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
+    def test_huifu_payment_session_uses_server_amount_and_is_idempotent(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        WechatOfficialAccountIdentity.objects.create(
+            user=self.customer,
+            app_id="wx-official-app-id",
+            openid="customer-openid",
+            authorized_at=timezone.now(),
+        )
+        gateway_patcher = patch("orders.services.get_huifu_payment_gateway")
+        gateway = gateway_patcher.start()
+        self.addCleanup(gateway_patcher.stop)
+        gateway.return_value.merchant_id = "6666000000000000"
+
+        payment = ProviderOrderPaymentOrder.objects.get(order__order_no=order_no)
+        gateway.return_value.create_payment.return_value = HuifuPaymentSessionResult(
+            req_seq_id=payment.payment_no,
+            req_date=timezone.localdate().strftime("%Y%m%d"),
+            huifu_id="6666000000000000",
+            trade_type="T_JSAPI",
+            trans_stat="P",
+            hf_seq_id="HF-GLOBAL-001",
+            party_order_id="PARTY-001",
+            out_trans_id="",
+            pay_info={"package": "prepay_id=PREPAY"},
+            response_code="00000000",
+            response_digest="a" * 64,
+        )
+
+        payload = {"payment_scene": "official_account"}
+        first = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            payload,
+            content_type="application/json",
+        )
+        second = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            payload,
+            content_type="application/json",
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            set(first.json()["data"]),
+            {"invoke_type", "pay_info"},
+        )
+        self.assertEqual(first.json()["data"]["invoke_type"], "WECHAT_JSAPI")
+        self.assertEqual(first.json()["data"]["pay_info"]["package"], "prepay_id=PREPAY")
+        gateway.return_value.create_payment.assert_called_once()
+        call = gateway.return_value.create_payment.call_args.kwargs
+        self.assertEqual(call["amount"], 36600)
+        self.assertEqual(call["goods_desc"], self.service.category.name)
+        self.assertEqual(call["attach"], order_no)
+        self.assertEqual(call["trade_type"], "T_JSAPI")
+        self.assertEqual(call["sub_openid"], "customer-openid")
+        payment.refresh_from_db()
+        self.assertEqual(
+            payment.preorder_status,
+            ProviderOrderPaymentOrder.PreorderStatus.READY,
+        )
+        self.assertEqual(payment.req_seq_id, payment.payment_no)
+        self.assertEqual(payment.gateway_trade_no, "HF-GLOBAL-001")
+        self.assertEqual(payment.payment_scene, "official_account")
+        self.assertEqual(payment.preorder_attempts, 1)
+
+    def test_huifu_payment_session_rejects_client_amount(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+
+        response = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            {"trans_amt": "0.01"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("服务端订单生成", response.json()["non_field_errors"])
+
+    @override_settings(
+        WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id",
+        WECHAT_OFFICIAL_ACCOUNT_APP_SECRET="official-app-secret",
+        WECHAT_OFFICIAL_ACCOUNT_OAUTH_CALLBACK_URL=(
+            "https://api.example.test/api/v1/payments/wechat/oauth/callback/"
+        ),
+        WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL=(
+            "https://m.example.test/#/pages/booking/payment"
+        ),
+    )
+    def test_wechat_payment_authorization_binds_openid_and_returns_to_order(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+
+        authorization = self.client.get(
+            f"/api/v1/provider-orders/{order_no}/payment-authorization/"
+        )
+
+        self.assertEqual(authorization.status_code, 200)
+        authorization_data = authorization.json()["data"]
+        self.assertFalse(authorization_data["authorized"])
+        authorize_query = parse_qs(
+            urlsplit(authorization_data["authorize_url"]).query
+        )
+        self.assertEqual(authorize_query["appid"], ["wx-official-app-id"])
+        self.assertEqual(authorize_query["scope"], ["snsapi_base"])
+
+        self.client.logout()
+        with patch(
+            "orders.wechat_oauth._exchange_code",
+            return_value=("customer-openid", "customer-unionid"),
+        ):
+            callback = self.client.get(
+                "/api/v1/payments/wechat/oauth/callback/",
+                {"code": "wechat-code", "state": authorize_query["state"][0]},
+            )
+
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(
+            callback["Location"],
+            (
+                "https://m.example.test/#/pages/booking/payment"
+                f"?orderNo={order_no}&wechatAuthorized=1"
+            ),
+        )
+        identity = WechatOfficialAccountIdentity.objects.get(user=self.customer)
+        self.assertEqual(identity.app_id, "wx-official-app-id")
+        self.assertEqual(identity.openid, "customer-openid")
+        self.assertEqual(identity.unionid, "customer-unionid")
+
+    @override_settings(
+        WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id",
+        WECHAT_OFFICIAL_ACCOUNT_OAUTH_CALLBACK_URL=(
+            "https://api.example.test/api/v1/payments/wechat/oauth/callback/"
+        ),
+        WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL=(
+            "https://m.example.test/#/pages/booking/payment"
+        ),
+    )
+    def test_wechat_payment_authorization_rejects_non_payable_order(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
+
+        authorization = self.client.get(
+            f"/api/v1/provider-orders/{order_no}/payment-authorization/"
+        )
+
+        self.assertEqual(authorization.status_code, 400)
+        self.assertEqual(
+            authorization.json()["order"],
+            "当前订单状态不允许发起支付。",
+        )
+
+    @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
+    def test_huifu_payment_session_fails_closed_when_not_configured(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        WechatOfficialAccountIdentity.objects.create(
+            user=self.customer,
+            app_id="wx-official-app-id",
+            openid="customer-openid",
+            authorized_at=timezone.now(),
+        )
+
+        response = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            {"payment_scene": "official_account"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payment = ProviderOrderPaymentOrder.objects.get(order__order_no=order_no)
+        self.assertEqual(
+            payment.preorder_status,
+            ProviderOrderPaymentOrder.PreorderStatus.NOT_STARTED,
+        )
+
+    @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
+    def test_huifu_gateway_failure_is_retryable_with_same_request_identity(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        WechatOfficialAccountIdentity.objects.create(
+            user=self.customer,
+            app_id="wx-official-app-id",
+            openid="customer-openid",
+            authorized_at=timezone.now(),
+        )
+        gateway_patcher = patch("orders.services.get_huifu_payment_gateway")
+        gateway = gateway_patcher.start()
+        self.addCleanup(gateway_patcher.stop)
+        gateway.return_value.merchant_id = "6666000000000000"
+        gateway.return_value.create_payment.side_effect = HuifuGatewayError(
+            response_code="40000001",
+            response_digest="b" * 64,
+        )
+
+        payload = {"payment_scene": "official_account"}
+        failed = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            payload,
+            content_type="application/json",
+        )
+
+        self.assertEqual(failed.status_code, 502)
+        payment = ProviderOrderPaymentOrder.objects.get(order__order_no=order_no)
+        original_identity = (payment.req_date, payment.req_seq_id)
+        self.assertEqual(payment.preorder_status, ProviderOrderPaymentOrder.PreorderStatus.FAILED)
+        self.assertEqual(payment.gateway_response_code, "40000001")
+
+        gateway.return_value.create_payment.side_effect = None
+        gateway.return_value.create_payment.return_value = HuifuPaymentSessionResult(
+            req_seq_id=payment.req_seq_id,
+            req_date=payment.req_date,
+            huifu_id="6666000000000000",
+            trade_type="T_JSAPI",
+            trans_stat="P",
+            hf_seq_id="HF-GLOBAL-RETRY",
+            party_order_id="PARTY-RETRY",
+            out_trans_id="",
+            pay_info={"package": "prepay_id=RETRY"},
+            response_code="00000000",
+            response_digest="c" * 64,
+        )
+
+        retried = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            payload,
+            content_type="application/json",
+        )
+
+        self.assertEqual(retried.status_code, 201)
+        payment.refresh_from_db()
+        self.assertEqual((payment.req_date, payment.req_seq_id), original_identity)
+        self.assertEqual(payment.preorder_attempts, 2)
+
+    def test_payment_status_actively_queries_and_applies_success(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        payment = ProviderOrderPaymentOrder.objects.get(order__order_no=order_no)
+        payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.READY
+        payment.gateway_merchant_id = "6666000000000000"
+        payment.req_date = "20260918"
+        payment.req_seq_id = payment.payment_no
+        payment.payment_scene = "official_account"
+        payment.trade_type = "T_JSAPI"
+        payment.gateway_trade_no = "HF-STATUS-001"
+        payment.save(
+            update_fields=(
+                "preorder_status",
+                "gateway_merchant_id",
+                "req_date",
+                "req_seq_id",
+                "payment_scene",
+                "trade_type",
+                "gateway_trade_no",
+                "updated_at",
+            )
+        )
+        gateway_patcher = patch("orders.services.get_huifu_payment_gateway")
+        gateway = gateway_patcher.start()
+        self.addCleanup(gateway_patcher.stop)
+        gateway.return_value.query_payment.return_value = HuifuPaymentQueryResult(
+            req_date=payment.req_date,
+            req_seq_id=payment.req_seq_id,
+            huifu_id=payment.gateway_merchant_id,
+            trans_stat="S",
+            trans_amt="366.00",
+            end_time=timezone.localtime().strftime("%Y%m%d%H%M%S"),
+            trade_type="T_JSAPI",
+            gateway_trade_no=payment.gateway_trade_no,
+            party_order_id="PARTY-STATUS-001",
+            out_trans_id="OUT-STATUS-001",
+            response_code="00000000",
+            response_digest="e" * 64,
+        )
+
+        response = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-status/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["data"]["status"],
+            ProviderOrder.Status.PENDING_ACCEPTANCE,
+        )
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PAID)
+        self.assertEqual(payment.gateway_last_query_status, "S")
+        gateway.return_value.query_payment.assert_called_once_with(
+            req_date=payment.req_date,
+            req_seq_id=payment.req_seq_id,
+            hf_seq_id="HF-STATUS-001",
+        )
+
+    def test_huifu_notification_is_verified_queried_and_idempotently_applied(self):
+        created = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        order_no = created.json()["data"]["order_no"]
+        payment = ProviderOrderPaymentOrder.objects.get(order__order_no=order_no)
+        payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.READY
+        payment.gateway_merchant_id = "6666000000000000"
+        payment.req_date = "20260916"
+        payment.req_seq_id = payment.payment_no
+        payment.payment_scene = "official_account"
+        payment.trade_type = "T_JSAPI"
+        payment.payment_invoke_payload = {"package": "prepay_id=PREPAY"}
+        payment.gateway_trade_no = "HF-GLOBAL-001"
+        payment.save(
+            update_fields=(
+                "preorder_status",
+                "gateway_merchant_id",
+                "req_date",
+                "req_seq_id",
+                "payment_scene",
+                "trade_type",
+                "payment_invoke_payload",
+                "gateway_trade_no",
+                "updated_at",
+            )
+        )
+        payload = json.dumps(
+            {
+                "resp_code": "00000000",
+                "huifu_id": payment.gateway_merchant_id,
+                "req_date": payment.req_date,
+                "req_seq_id": payment.req_seq_id,
+                "hf_seq_id": "HF-GLOBAL-001",
+                "trans_amt": "366.00",
+                "trans_type": "T_JSAPI",
+                "end_time": timezone.localtime().strftime("%Y%m%d%H%M%S"),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        gateway_patcher = patch("orders.services.get_huifu_payment_gateway")
+        gateway = gateway_patcher.start()
+        self.addCleanup(gateway_patcher.stop)
+        gateway.return_value.verify_payment_notification.return_value = True
+        gateway.return_value.query_payment.return_value = HuifuPaymentQueryResult(
+            req_date=payment.req_date,
+            req_seq_id=payment.req_seq_id,
+            huifu_id=payment.gateway_merchant_id,
+            trans_stat="S",
+            trans_amt="366.00",
+            end_time=timezone.localtime().strftime("%Y%m%d%H%M%S"),
+            trade_type="T_JSAPI",
+            gateway_trade_no="HF-GLOBAL-001",
+            party_order_id="PARTY-001",
+            out_trans_id="OUT-001",
+            response_code="00000000",
+            response_digest="d" * 64,
+        )
+
+        first = self.client.post(
+            "/api/v1/payments/huifu/notify/",
+            {"resp_data": payload, "sign": "verified-signature"},
+        )
+        second = self.client.post(
+            "/api/v1/payments/huifu/notify/",
+            {"resp_data": payload, "sign": "verified-signature"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.content.decode(), f"RECV_ORD_ID_{payment.req_seq_id}")
+        self.assertEqual(second.status_code, 200)
+        gateway.return_value.query_payment.assert_called_once()
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PAID)
+        self.assertEqual(payment.channel, ProviderOrderPaymentOrder.Channel.WECHAT)
+        self.assertEqual(payment.gateway_trade_no, "HF-GLOBAL-001")
+        event = HuifuPaymentNotification.objects.get()
+        self.assertTrue(event.signature_verified)
+        self.assertEqual(event.status, HuifuPaymentNotification.Status.PROCESSED)
+        self.assertEqual(event.trans_stat, "")
+        self.assertEqual(event.query_req_seq_id, payment.req_seq_id)
+        payment.refresh_from_db()
+        self.assertEqual(payment.gateway_last_query_status, "S")
+        self.assertEqual(payment.gateway_last_query_digest, "d" * 64)
+        self.assertIsNotNone(payment.gateway_last_queried_at)
+
+    def test_huifu_notification_rejects_invalid_signature_before_lookup(self):
+        gateway_patcher = patch("orders.services.get_huifu_payment_gateway")
+        gateway = gateway_patcher.start()
+        self.addCleanup(gateway_patcher.stop)
+        gateway.return_value.verify_payment_notification.return_value = False
+
+        response = self.client.post(
+            "/api/v1/payments/huifu/notify/",
+            {"resp_data": "{}", "sign": "invalid-signature"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(HuifuPaymentNotification.objects.exists())
+        gateway.return_value.query_payment.assert_not_called()
 
     def test_payment_rejects_gateway_amount_mismatch(self):
         created = self.client.post(

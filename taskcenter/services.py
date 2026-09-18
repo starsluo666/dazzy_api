@@ -818,7 +818,29 @@ def synchronize_business_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
 
 
 def _execute_provider_order_payment_expiry(task, now):
-    from orders.services import expire_provider_order_payment
+    from orders.services import (
+        confirm_provider_order_huifu_payment_status,
+        expire_provider_order_payment,
+    )
+
+    confirmation = confirm_provider_order_huifu_payment_status(
+        order_no=task.business_key,
+    )
+    if confirmation["state"] == "paid":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result={**confirmation, "source": "expiry_query"},
+        )
+    if confirmation["state"] == "processing":
+        if task.attempt_count >= task.max_attempts:
+            raise ValidationError(
+                "支付查询持续处于处理中，已保留订单并转人工核对，禁止自动关闭。"
+            )
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**confirmation, "source": "expiry_query"},
+            available_at=now + timedelta(minutes=1),
+        )
 
     outcome = expire_provider_order_payment(task.business_key, now=now)
     if outcome["state"] == "not_due":

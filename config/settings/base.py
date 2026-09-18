@@ -184,6 +184,34 @@ AUTH_LOCK_SECONDS = int(os.getenv("AUTH_LOCK_SECONDS", "900"))
 PAYMENT_REFUND_PROCESSING_TIMEOUT_SECONDS = int(
     os.getenv("PAYMENT_REFUND_PROCESSING_TIMEOUT_SECONDS", "300")
 )
+HUIFU_PAYMENT_ENABLED = os.getenv("HUIFU_PAYMENT_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+HUIFU_ENV = os.getenv("HUIFU_ENV", "mertest")
+HUIFU_SYS_ID = os.getenv("HUIFU_SYS_ID", "")
+HUIFU_PRODUCT_ID = os.getenv("HUIFU_PRODUCT_ID", "")
+HUIFU_MERCHANT_ID = os.getenv("HUIFU_MERCHANT_ID", "")
+HUIFU_RSA_PRIVATE_KEY = os.getenv("HUIFU_RSA_PRIVATE_KEY", "")
+HUIFU_RSA_PUBLIC_KEY = os.getenv("HUIFU_RSA_PUBLIC_KEY", "")
+HUIFU_SKILL_SOURCE = os.getenv("HUIFU_SKILL_SOURCE", "hfps/1.3.5")
+HUIFU_NOTIFY_URL = os.getenv("HUIFU_NOTIFY_URL", "")
+HUIFU_FEE_FLAG = os.getenv("HUIFU_FEE_FLAG", "1")
+HUIFU_CONNECT_TIMEOUT_SECONDS = int(os.getenv("HUIFU_CONNECT_TIMEOUT_SECONDS", "15"))
+WECHAT_OFFICIAL_ACCOUNT_APP_ID = os.getenv("WECHAT_OFFICIAL_ACCOUNT_APP_ID", "")
+WECHAT_OFFICIAL_ACCOUNT_APP_SECRET = os.getenv("WECHAT_OFFICIAL_ACCOUNT_APP_SECRET", "")
+WECHAT_OFFICIAL_ACCOUNT_OAUTH_CALLBACK_URL = os.getenv(
+    "WECHAT_OFFICIAL_ACCOUNT_OAUTH_CALLBACK_URL", ""
+)
+WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL = os.getenv(
+    "WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL", ""
+)
+WECHAT_MOBILE_APP_ID = os.getenv("WECHAT_MOBILE_APP_ID", "")
+WECHAT_OAUTH_STATE_MAX_AGE_SECONDS = int(
+    os.getenv("WECHAT_OAUTH_STATE_MAX_AGE_SECONDS", "600")
+)
+WECHAT_OAUTH_TIMEOUT_SECONDS = int(os.getenv("WECHAT_OAUTH_TIMEOUT_SECONDS", "10"))
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "auth_sms_send": os.getenv("AUTH_SMS_SEND_RATE", "10/min"),
     "auth_sms_send_ip_daily": os.getenv("AUTH_SMS_SEND_IP_DAILY_RATE", "50/day"),
@@ -192,6 +220,12 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "admin_auth_refresh": os.getenv("ADMIN_AUTH_REFRESH_RATE", "60/min"),
     "auth_password_reset": os.getenv("AUTH_PASSWORD_RESET_RATE", "10/min"),
     "auth_security": os.getenv("AUTH_SECURITY_RATE", "10/min"),
+    "provider_order_payment_create": os.getenv(
+        "PROVIDER_ORDER_PAYMENT_CREATE_RATE", "10/min"
+    ),
+    "provider_order_payment_status": os.getenv(
+        "PROVIDER_ORDER_PAYMENT_STATUS_RATE", "30/min"
+    ),
     "map_proxy_burst": os.getenv("MAP_PROXY_BURST_RATE", "30/min"),
     "map_proxy_daily": os.getenv("MAP_PROXY_DAILY_RATE", "500/day"),
 }

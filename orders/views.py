@@ -2,12 +2,14 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.exceptions import PermissionDenied
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from backoffice.access import client_ip
@@ -35,6 +37,7 @@ from .serializers import (
     ProviderOrderAfterSalesInputSerializer,
     ProviderOrderAfterSalesSerializer,
     ProviderOrderInputSerializer,
+    ProviderOrderPaymentSessionInputSerializer,
     ProviderOrderArrivalEvidenceInputSerializer,
     ProviderOrderManageQuerySerializer,
     ProviderOrderManageSerializer,
@@ -47,11 +50,20 @@ from .serializers import (
 from .services import (
     PROVIDER_REJECTION_SUPPORT_TIMEOUT,
     apply_provider_order_payment_success,
+    confirm_provider_order_huifu_payment_status,
     create_customer_provider_order_after_sales_case,
+    create_provider_order_huifu_payment_session,
     create_provider_order_payment_order,
     ensure_provider_order_settlement,
     ensure_slot_available,
     refresh_provider_review_metrics,
+    process_huifu_payment_notification,
+)
+from .wechat_oauth import (
+    WechatOAuthConfigurationError,
+    build_payment_authorization,
+    complete_payment_authorization,
+    get_official_account_openid,
 )
 
 
@@ -265,6 +277,106 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
             signature_verified=result.signature_verified,
         )
         return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class ProviderOrderPaymentSessionView(ProviderOrderDetailView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "provider_order_payment_create"
+
+    def post(self, request, order_no):
+        unexpected_fields = set(request.data.keys()) - {"payment_scene"}
+        if unexpected_fields:
+            raise ValidationError(
+                {"non_field_errors": "支付金额和商品信息由服务端订单生成，无需提交请求体。"}
+            )
+        input_serializer = ProviderOrderPaymentSessionInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        payment_scene = input_serializer.validated_data["payment_scene"]
+        order = self.get_object(request, order_no)
+        sub_openid = ""
+        if payment_scene == "official_account":
+            app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
+            if not app_id:
+                raise WechatOAuthConfigurationError()
+            sub_openid = get_official_account_openid(
+                user_id=request.user.pk,
+                app_id=app_id,
+            )
+            if not sub_openid:
+                raise ValidationError(
+                    {"authorization": "请先在微信服务号内完成网页授权。"}
+                )
+        result, created = create_provider_order_huifu_payment_session(
+            order_id=order.pk,
+            customer_id=request.user.pk,
+            payment_scene=payment_scene,
+            sub_openid=sub_openid,
+        )
+        return Response(
+            {
+                "data": {
+                    "invoke_type": (
+                        "WECHAT_JSAPI"
+                        if result.trade_type == "T_JSAPI"
+                        else "WECHAT_APP"
+                    ),
+                    "pay_info": result.pay_info,
+                }
+            },
+            status=201 if created else 200,
+        )
+
+
+class ProviderOrderPaymentStatusView(ProviderOrderDetailView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "provider_order_payment_status"
+
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no)
+        confirm_provider_order_huifu_payment_status(
+            order_no=order.order_no,
+            customer_id=request.user.pk,
+        )
+        order = self.get_object(request, order_no)
+        return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class ProviderOrderPaymentAuthorizationView(ProviderOrderDetailView):
+    def get(self, request, order_no):
+        order = self.get_object(request, order_no)
+        if order.status != ProviderOrder.Status.PENDING_PAYMENT:
+            raise ValidationError({"order": "当前订单状态不允许发起支付。"})
+        if order.payment_expires_at <= timezone.now():
+            raise ValidationError({"order": "订单支付时限已过，请重新下单。"})
+        authorization = build_payment_authorization(
+            user_id=request.user.pk,
+            order_no=order.order_no,
+        )
+        return Response({"data": authorization})
+
+
+class WechatOfficialOAuthCallbackView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return_url = complete_payment_authorization(
+            code=request.query_params.get("code", ""),
+            state=request.query_params.get("state", ""),
+        )
+        return redirect(return_url)
+
+
+class HuifuPaymentNotificationView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        acknowledgement = process_huifu_payment_notification(
+            resp_data=request.data.get("resp_data", ""),
+            sign=request.data.get("sign", ""),
+        )
+        return HttpResponse(acknowledgement, content_type="text/plain; charset=utf-8")
 
 
 class CurrentProviderOrderListView(APIView):
