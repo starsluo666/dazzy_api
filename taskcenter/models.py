@@ -26,6 +26,10 @@ class ScheduledTask(models.Model):
             "provider_order_settlement",
             "达人订单资金结算",
         )
+        PROVIDER_ORDER_CANCEL_COMPENSATION = (
+            "provider_order_cancel_compensation",
+            "达人订单取消支付补偿",
+        )
         PROVIDER_ORDER_REFUND = "provider_order_refund", "达人订单退款"
         ACTIVITY_PUBLISH_PAYMENT_EXPIRY = (
             "activity_publish_payment_expiry",

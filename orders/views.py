@@ -12,9 +12,14 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from accounts.account_closure import lock_active_user_for_business
 from backoffice.access import client_ip
 from backoffice.models import AdminAuditLog, ProviderOrderAfterSalesCase
 from backoffice.operation_settings import platform_operation_rules
+from config.payment_capabilities import (
+    ensure_provider_order_payment_scene_available,
+    payment_capabilities,
+)
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from notifications.services import create_order_notification
@@ -24,7 +29,6 @@ from providers.presence import operation_rules
 from taskcenter.services import (
     cancel_provider_acceptance_timeout,
     cancel_provider_order_confirmation_timeout,
-    cancel_provider_order_payment_expiry,
     mark_provider_acceptance_expired,
     register_provider_rejection_support_timeout,
     register_provider_order_confirmation_timeout,
@@ -50,6 +54,7 @@ from .serializers import (
 from .services import (
     PROVIDER_REJECTION_SUPPORT_TIMEOUT,
     apply_provider_order_payment_success,
+    cancel_provider_order_with_compensation,
     confirm_provider_order_huifu_payment_status,
     create_customer_provider_order_after_sales_case,
     create_provider_order_huifu_payment_session,
@@ -109,6 +114,7 @@ class ProviderOrderListCreateView(APIView):
         # outside the database transaction. Recheck mutable scheduling state only
         # after taking the provider lock.
         with transaction.atomic():
+            customer = lock_active_user_for_business(request.user)
             provider = (
                 ProviderProfile.objects.select_for_update()
                 .select_related("user")
@@ -121,7 +127,7 @@ class ProviderOrderListCreateView(APIView):
             quote = data["quote"]
             order = ProviderOrder.objects.create(
                 order_no=make_order_no(),
-                customer=request.user,
+                customer=customer,
                 provider=provider,
                 service=service,
                 provider_name_snapshot=provider.user.nickname,
@@ -220,22 +226,11 @@ class ProviderOrderAfterSalesView(APIView):
 
 
 class ProviderOrderCancelView(ProviderOrderDetailView):
-    @transaction.atomic
     def post(self, request, order_no):
-        order = get_object_or_404(
-            ProviderOrder.objects.select_for_update(), order_no=order_no, customer=request.user
+        order = cancel_provider_order_with_compensation(
+            order_no=order_no,
+            customer_id=request.user.pk,
         )
-        if order.status != ProviderOrder.Status.PENDING_PAYMENT:
-            raise ValidationError({"status": "当前阶段暂不支持用户直接取消，请联系客服。"})
-        order.status = ProviderOrder.Status.CANCELLED
-        order.cancelled_at = timezone.now()
-        order.save(update_fields=("status", "cancelled_at", "updated_at"))
-        payment = ProviderOrderPaymentOrder.objects.select_for_update().filter(order=order).first()
-        if payment and payment.status == ProviderOrderPaymentOrder.Status.PENDING_PAYMENT:
-            payment.status = ProviderOrderPaymentOrder.Status.CLOSED
-            payment.closed_at = order.cancelled_at
-            payment.save(update_fields=("status", "closed_at", "updated_at"))
-        cancel_provider_order_payment_expiry(order_no, "customer_cancelled")
         return Response({"data": ProviderOrderSerializer(order).data})
 
 
@@ -348,11 +343,20 @@ class ProviderOrderPaymentAuthorizationView(ProviderOrderDetailView):
             raise ValidationError({"order": "当前订单状态不允许发起支付。"})
         if order.payment_expires_at <= timezone.now():
             raise ValidationError({"order": "订单支付时限已过，请重新下单。"})
+        ensure_provider_order_payment_scene_available("official_account")
         authorization = build_payment_authorization(
             user_id=request.user.pk,
             order_no=order.order_no,
         )
         return Response({"data": authorization})
+
+
+class PaymentCapabilitiesView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"data": payment_capabilities()})
 
 
 class WechatOfficialOAuthCallbackView(APIView):

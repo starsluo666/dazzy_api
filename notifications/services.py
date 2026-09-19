@@ -53,6 +53,23 @@ def create_order_notification(
     )
 
 
+def create_provider_new_order_notification(*, order):
+    service_name = getattr(order, "service_name_snapshot", "")
+    return create_notification(
+        recipient=order.provider.user,
+        category=UserNotification.Category.ORDER,
+        event_type=UserNotification.EventType.PROVIDER_NEW_ORDER,
+        title="收到新的待接订单",
+        content="用户已完成支付，请在接单时限内确认是否接单。",
+        target_type="provider_order",
+        target_id=order.order_no,
+        target_title=f"订单 {order.order_no}{f' · {service_name}' if service_name else ''}",
+        action_text="立即处理",
+        action_url=f"/pages/orders/detail?order_no={order.order_no}",
+        dedupe_key=f"provider-order:{order.order_no}:provider-new-order",
+    )
+
+
 def create_activity_notification(
     *, activity, recipient, event_type, title, content, dedupe_suffix=""
 ):

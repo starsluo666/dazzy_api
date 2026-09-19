@@ -11,6 +11,7 @@ from .views import (
     CurrentProviderOrderStartView,
     CurrentUserProviderReviewListView,
     HuifuPaymentNotificationView,
+    PaymentCapabilitiesView,
     ProviderOrderAfterSalesView,
     ProviderOrderCancelView,
     ProviderOrderConfirmCompletionView,
@@ -26,6 +27,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path("payments/capabilities/", PaymentCapabilitiesView.as_view()),
     path("payments/huifu/notify/", HuifuPaymentNotificationView.as_view()),
     path(
         "payments/wechat/oauth/callback/",

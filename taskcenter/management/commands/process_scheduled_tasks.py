@@ -9,10 +9,26 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--limit", type=int, default=100)
         parser.add_argument("--sync-limit", type=int, default=500)
+        parser.add_argument(
+            "--sync-only",
+            action="store_true",
+            help="只补建缺失任务，不领取、释放或执行任何任务。",
+        )
 
     def handle(self, *args, **options):
         synchronized = synchronize_business_tasks(batch_size=options["sync_limit"])
-        processed = process_due_tasks(limit=options["limit"])
+        if options["sync_only"]:
+            processed = {
+                "released": 0,
+                "claimed": 0,
+                "succeeded": 0,
+                "cancelled": 0,
+                "rescheduled": 0,
+                "retried": 0,
+                "failed": 0,
+            }
+        else:
+            processed = process_due_tasks(limit=options["limit"])
         provider = synchronized["provider_orders"]
         activities = synchronized["activities"]
         self.stdout.write(

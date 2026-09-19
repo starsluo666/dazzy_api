@@ -1,9 +1,12 @@
+import json
+from io import StringIO
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
-from django.test import TestCase
+from django.core.management import call_command
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
@@ -22,13 +25,25 @@ from activities.services import (
 )
 from backoffice.models import AdminAuditLog
 from notifications.models import UserNotification
+from orders.huifu import (
+    HuifuCloseResult,
+    HuifuPaymentQueryResult,
+    HuifuRefundQueryResult,
+    HuifuRefundResult,
+)
 from orders.models import (
+    HuifuRefundNotification,
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
     ProviderOrderSettlement,
 )
-from orders.services import create_provider_order_payment_order, create_provider_order_refund
+from orders.services import (
+    cancel_provider_order_with_compensation,
+    create_provider_order_payment_order,
+    create_provider_order_refund,
+    process_huifu_payment_notification,
+)
 from providers.models import ProviderProfile, ProviderService, ServiceCategory
 
 from .models import ScheduledTask
@@ -43,6 +58,33 @@ from .services import (
     synchronize_provider_order_tasks,
 )
 from .tasks import process_due_scheduled_tasks, synchronize_scheduled_tasks
+
+
+class ProcessScheduledTasksCommandTests(SimpleTestCase):
+    @patch(
+        "taskcenter.management.commands.process_scheduled_tasks.process_due_tasks"
+    )
+    @patch(
+        "taskcenter.management.commands.process_scheduled_tasks.synchronize_business_tasks"
+    )
+    def test_sync_only_never_claims_or_processes_tasks(self, synchronize, process):
+        synchronize.return_value = {
+            "provider_orders": {"payment_created": 1},
+            "activities": {"formation_created": 2},
+        }
+
+        output = StringIO()
+        call_command(
+            "process_scheduled_tasks",
+            "--sync-only",
+            "--sync-limit",
+            "25",
+            stdout=output,
+        )
+
+        synchronize.assert_called_once_with(batch_size=25)
+        process.assert_not_called()
+        self.assertIn("领取 0 条", output.getvalue())
 
 
 class TaskCenterTests(TestCase):
@@ -224,6 +266,239 @@ class TaskCenterTests(TestCase):
         refund.refresh_from_db()
         self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
         self.assertTrue(refund.gateway_refund_no.startswith("MOCKREF"))
+
+    @patch("orders.services.get_huifu_payment_gateway")
+    def test_real_provider_refund_waits_for_query_terminal_success(self, get_gateway):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYREALREFUND001",
+            status=ProviderOrder.Status.AFTER_SALES,
+            payment_deadline=now - timedelta(hours=1),
+        )
+        payment = order.payment_order
+        payment.channel = ProviderOrderPaymentOrder.Channel.WECHAT
+        payment.gateway_merchant_id = "6666000000000000"
+        payment.req_date = "20260918"
+        payment.req_seq_id = payment.payment_no
+        payment.gateway_trade_no = "HF-PAYMENT-REAL-001"
+        payment.trade_type = "T_JSAPI"
+        payment.save()
+        refund, _ = create_provider_order_refund(
+            order_no=order.order_no,
+            amount=order.payable_amount,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference="real-refund-test",
+            idempotency_key="real-provider-refund-test",
+            reason="验证真实退款终态",
+        )
+        gateway = get_gateway.return_value
+        gateway.merchant_id = payment.gateway_merchant_id
+        gateway.refund_payment.return_value = HuifuRefundResult(
+            req_date="20260919",
+            req_seq_id=refund.refund_no,
+            huifu_id=payment.gateway_merchant_id,
+            trans_stat="P",
+            ord_amt="200.00",
+            actual_ref_amt="",
+            gateway_refund_no="HF-REFUND-REAL-001",
+            trans_finish_time="",
+            response_code="00000100",
+            response_digest="a" * 64,
+        )
+        gateway.query_refund.side_effect = (
+            HuifuRefundQueryResult(
+                req_date="20260919",
+                req_seq_id=refund.refund_no,
+                huifu_id=payment.gateway_merchant_id,
+                trans_stat="P",
+                ord_amt="200.00",
+                actual_ref_amt="",
+                gateway_refund_no="HF-REFUND-REAL-001",
+                trans_finish_time="",
+                response_code="00000000",
+                response_digest="b" * 64,
+            ),
+            HuifuRefundQueryResult(
+                req_date="20260919",
+                req_seq_id=refund.refund_no,
+                huifu_id=payment.gateway_merchant_id,
+                trans_stat="S",
+                ord_amt="200.00",
+                actual_ref_amt="200.00",
+                gateway_refund_no="HF-REFUND-REAL-001",
+                trans_finish_time="20260919153000",
+                response_code="00000000",
+                response_digest="c" * 64,
+            ),
+        )
+
+        first = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND],
+            now=now + timedelta(seconds=1),
+        )
+        refund.refresh_from_db()
+        self.assertEqual(first["rescheduled"], 1)
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.PROCESSING)
+
+        gateway.verify_payment_notification.return_value = True
+        payload = json.dumps(
+            {
+                "resp_code": "00000000",
+                "huifu_id": payment.gateway_merchant_id,
+                "req_date": refund.req_date,
+                "req_seq_id": refund.req_seq_id,
+                "hf_seq_id": "HF-REFUND-REAL-001",
+                "trans_type": "TRANS_REFUND",
+                "trans_stat": "S",
+                "ord_amt": "200.00",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        acknowledgement = process_huifu_payment_notification(
+            resp_data=payload,
+            sign="verified-signature",
+        )
+        refund.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.SUCCEEDED)
+        self.assertEqual(order.status, ProviderOrder.Status.REFUNDED)
+        self.assertEqual(acknowledgement, f"RECV_ORD_ID_{refund.req_seq_id}")
+        self.assertEqual(
+            HuifuRefundNotification.objects.get().status,
+            HuifuRefundNotification.Status.PROCESSED,
+        )
+        self.assertEqual(
+            process_due_tasks(
+                task_types=[ScheduledTask.Type.PROVIDER_ORDER_REFUND],
+                now=now + timedelta(minutes=1, seconds=1),
+            )["claimed"],
+            0,
+        )
+        gateway.refund_payment.assert_called_once()
+        self.assertEqual(gateway.query_refund.call_count, 2)
+
+    @patch("orders.services.get_huifu_payment_gateway")
+    def test_cancel_compensation_queries_then_closes_unpaid_trade(self, get_gateway):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYCANCELCLOSE001",
+            status=ProviderOrder.Status.PENDING_PAYMENT,
+            payment_deadline=now + timedelta(minutes=10),
+        )
+        payment = order.payment_order
+        payment.gateway_merchant_id = "6666000000000000"
+        payment.req_date = "20260919"
+        payment.req_seq_id = payment.payment_no
+        payment.trade_type = "T_JSAPI"
+        payment.preorder_requested_at = now - timedelta(minutes=2)
+        payment.save()
+        cancel_provider_order_with_compensation(
+            order_no=order.order_no,
+            customer_id=self.customer.pk,
+        )
+        gateway = get_gateway.return_value
+        gateway.query_payment.return_value = HuifuPaymentQueryResult(
+            req_date=payment.req_date,
+            req_seq_id=payment.req_seq_id,
+            huifu_id=payment.gateway_merchant_id,
+            trans_stat="P",
+            trans_amt="200.00",
+            end_time="",
+            trade_type="T_JSAPI",
+            gateway_trade_no="",
+            party_order_id="",
+            out_trans_id="",
+            response_code="00000000",
+            response_digest="d" * 64,
+        )
+        gateway.close_payment.return_value = HuifuCloseResult(
+            req_date="20260919",
+            req_seq_id=f"{payment.payment_no}CLOSE",
+            huifu_id=payment.gateway_merchant_id,
+            trans_stat="S",
+            org_trans_stat="F",
+            response_code="00000000",
+            response_digest="e" * 64,
+        )
+
+        result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION],
+            now=now + timedelta(seconds=1),
+        )
+
+        order.refresh_from_db()
+        payment.refresh_from_db()
+        task = ScheduledTask.objects.get(
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION,
+            business_key=order.order_no,
+        )
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(order.status, ProviderOrder.Status.CANCELLED)
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.CLOSED)
+        self.assertEqual(payment.gateway_close_status, "S")
+        self.assertEqual(task.status, ScheduledTask.Status.SUCCEEDED)
+        gateway.close_payment.assert_called_once()
+        gateway.query_close.assert_not_called()
+
+    @patch("orders.services.get_huifu_payment_gateway")
+    def test_cancel_compensation_refunds_late_successful_payment(self, get_gateway):
+        now = timezone.now()
+        order = self.make_order(
+            order_no="DZYCANCELREFUND001",
+            status=ProviderOrder.Status.PENDING_PAYMENT,
+            payment_deadline=now + timedelta(minutes=10),
+        )
+        payment = order.payment_order
+        payment.gateway_merchant_id = "6666000000000000"
+        payment.req_date = "20260919"
+        payment.req_seq_id = payment.payment_no
+        payment.trade_type = "T_JSAPI"
+        payment.preorder_requested_at = now - timedelta(minutes=2)
+        payment.save()
+        cancel_provider_order_with_compensation(
+            order_no=order.order_no,
+            customer_id=self.customer.pk,
+        )
+        gateway = get_gateway.return_value
+        gateway.query_payment.return_value = HuifuPaymentQueryResult(
+            req_date=payment.req_date,
+            req_seq_id=payment.req_seq_id,
+            huifu_id=payment.gateway_merchant_id,
+            trans_stat="S",
+            trans_amt="200.00",
+            end_time=timezone.localtime(now).strftime("%Y%m%d%H%M%S"),
+            trade_type="T_JSAPI",
+            gateway_trade_no="HF-LATE-PAYMENT-001",
+            party_order_id="PARTY-LATE-001",
+            out_trans_id="OUT-LATE-001",
+            response_code="00000000",
+            response_digest="f" * 64,
+        )
+
+        result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION],
+            now=now + timedelta(seconds=1),
+        )
+
+        order.refresh_from_db()
+        payment.refresh_from_db()
+        refund = ProviderOrderRefundOrder.objects.get(order=order)
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(order.status, ProviderOrder.Status.CANCELLED)
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PAID)
+        self.assertEqual(payment.gateway_trade_no, "HF-LATE-PAYMENT-001")
+        self.assertEqual(refund.status, ProviderOrderRefundOrder.Status.PENDING)
+        self.assertEqual(refund.refund_amount, payment.payable_amount)
+        self.assertEqual(refund.source_type, ProviderOrderRefundOrder.SourceType.SYSTEM)
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_REFUND,
+                business_key=refund.refund_no,
+                status=ScheduledTask.Status.PENDING,
+            ).exists()
+        )
+        gateway.close_payment.assert_not_called()
 
     def test_acceptance_timeout_moves_order_to_support(self):
         now = timezone.now()
@@ -548,6 +823,31 @@ class TaskCenterTests(TestCase):
             ).exists()
         )
 
+    def test_compensation_backfills_cancelled_real_payment_task(self):
+        order = self.make_order(
+            order_no="DZYSYNCCANCEL001",
+            status=ProviderOrder.Status.CANCELLED,
+            payment_deadline=timezone.now() - timedelta(minutes=1),
+        )
+        payment = order.payment_order
+        payment.gateway_merchant_id = "6666000000000000"
+        payment.req_date = "20260919"
+        payment.req_seq_id = payment.payment_no
+        payment.save()
+
+        first = synchronize_provider_order_tasks()
+        second = synchronize_provider_order_tasks()
+
+        self.assertEqual(first["cancel_compensation_created"], 1)
+        self.assertEqual(second["cancel_compensation_created"], 0)
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION,
+                business_key=order.order_no,
+                status=ScheduledTask.Status.PENDING,
+            ).exists()
+        )
+
     def test_periodic_processing_and_compensation_are_separate(self):
         with (
             patch("taskcenter.tasks.process_due_tasks", return_value={"claimed": 0}) as process,
@@ -719,6 +1019,7 @@ class ActivityTaskCenterTests(TestCase):
         )
         return participation
 
+    @override_settings(DEBUG=True)
     def test_participation_payment_expiry_runs_through_task_center(self):
         activity = self.make_activity()
         participation, payment, _ = get_or_create_participation_order(

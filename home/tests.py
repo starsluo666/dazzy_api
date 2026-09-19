@@ -86,6 +86,8 @@ class HomeDiscoveryTests(TestCase):
                 formation_deadline=starts_at - timedelta(hours=12),
                 meeting_place_name="测试场馆",
                 meeting_address="邯郸市测试地址",
+                city_code="130400",
+                city_name="邯郸市",
                 source_longitude=Decimal("114.5240070") + Decimal(index) / 1000,
                 source_latitude=Decimal("36.6074460"),
                 meeting_point=Point(114.524 + index * 0.001, 36.607, srid=4326),
@@ -127,6 +129,43 @@ class HomeDiscoveryTests(TestCase):
         activity = data["recommended_activities"][0]
         self.assertEqual(activity["participant_count"], 0)
         self.assertIsNotNone(activity["distance_km"])
+        self.assertTrue(
+            all(item["city_code"] == "130400" for item in data["recommended_activities"])
+        )
+
+    @patch("home.views.build_home_card_assets", return_value={})
+    def test_home_activity_recommendations_follow_selected_city(self, _build_assets):
+        source = Activity.objects.first()
+        Activity.objects.create(
+            organizer=source.organizer,
+            category=source.category,
+            title="北京活动",
+            starts_at=timezone.now() + timedelta(days=1),
+            ends_at=timezone.now() + timedelta(days=1, hours=3),
+            formation_deadline=timezone.now() + timedelta(hours=12),
+            meeting_place_name="北京测试场馆",
+            meeting_address="北京市测试地址",
+            city_code="110100",
+            city_name="北京市",
+            source_longitude=Decimal("116.4039810"),
+            source_latitude=Decimal("39.9150010"),
+            meeting_point=Point(116.397755, 39.913873, srid=4326),
+            capacity=8,
+            min_participants=4,
+            description="跨城市过滤测试",
+            participation_rules="准时到场",
+            aa_principal_amount=6800,
+            refund_template_version="standard-v1",
+            refund_rule_snapshot={"version": "standard-v1"},
+            status=Activity.Status.RECRUITING,
+        )
+
+        response = self.client.get("/api/v1/home/", {"city_code": "110100"})
+
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["data"]["recommended_activities"]
+        self.assertEqual([item["title"] for item in items], ["北京活动"])
+        self.assertTrue(all(item["city_code"] == "110100" for item in items))
 
     def test_home_rejects_incomplete_coordinates(self):
         response = self.client.get("/api/v1/home/", {"longitude": "114.5240070"})

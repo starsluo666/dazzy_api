@@ -37,6 +37,11 @@ class HuifuPaymentSessionInProgress(APIException):
     default_code = "huifu_payment_session_in_progress"
 
 
+class HuifuRefundTerminalError(HuifuGatewayError):
+    default_detail = "退款渠道返回失败终态，请人工核对后重试。"
+    default_code = "huifu_refund_terminal_error"
+
+
 @dataclass(frozen=True)
 class HuifuPaymentConfig:
     enabled: bool
@@ -132,6 +137,45 @@ class HuifuPaymentQueryResult:
     gateway_trade_no: str
     party_order_id: str
     out_trans_id: str
+    response_code: str
+    response_digest: str
+
+
+@dataclass(frozen=True)
+class HuifuCloseResult:
+    req_date: str
+    req_seq_id: str
+    huifu_id: str
+    trans_stat: str
+    org_trans_stat: str
+    response_code: str
+    response_digest: str
+
+
+@dataclass(frozen=True)
+class HuifuRefundResult:
+    req_date: str
+    req_seq_id: str
+    huifu_id: str
+    trans_stat: str
+    ord_amt: str
+    actual_ref_amt: str
+    gateway_refund_no: str
+    trans_finish_time: str
+    response_code: str
+    response_digest: str
+
+
+@dataclass(frozen=True)
+class HuifuRefundQueryResult:
+    req_date: str
+    req_seq_id: str
+    huifu_id: str
+    trans_stat: str
+    ord_amt: str
+    actual_ref_amt: str
+    gateway_refund_no: str
+    trans_finish_time: str
     response_code: str
     response_digest: str
 
@@ -389,6 +433,278 @@ class HuifuAggregatePaymentGateway:
             gateway_trade_no=returned_hf_seq_id,
             party_order_id=str(data.get("party_order_id", "")),
             out_trans_id=str(data.get("out_trans_id", "")),
+            response_code=response_code,
+            response_digest=digest,
+        )
+
+    def close_payment(
+        self,
+        *,
+        req_date: str,
+        req_seq_id: str,
+        org_req_date: str,
+        org_req_seq_id: str,
+        org_hf_seq_id: str = "",
+    ) -> HuifuCloseResult:
+        from dg_sdk import Payment, PaymentCloseRequest
+
+        self.config.validate_common()
+        try:
+            with _SDK_LOCK:
+                self._init_sdk()
+                request = PaymentCloseRequest()
+                request.req_date = req_date
+                request.req_seq_id = req_seq_id
+                request.huifu_id = self.config.merchant_id
+                request.org_req_date = org_req_date
+                if org_hf_seq_id:
+                    request.org_hf_seq_id = org_hf_seq_id
+                else:
+                    request.org_req_seq_id = org_req_seq_id
+                response = Payment.close(request)
+        except (HuifuConfigurationError, HuifuGatewayError):
+            raise
+        except Exception as exc:
+            digest = sha256(type(exc).__name__.encode("utf-8")).hexdigest()
+            raise HuifuGatewayError(response_digest=digest) from exc
+        return self._decode_close_result(
+            response,
+            req_date=req_date,
+            req_seq_id=req_seq_id,
+        )
+
+    def query_close(
+        self,
+        *,
+        req_date: str,
+        req_seq_id: str,
+        org_req_date: str,
+        org_req_seq_id: str,
+        org_hf_seq_id: str = "",
+    ) -> HuifuCloseResult:
+        from dg_sdk import Payment, PaymentCloseQueryRequest
+
+        self.config.validate_common()
+        try:
+            with _SDK_LOCK:
+                self._init_sdk()
+                request = PaymentCloseQueryRequest()
+                request.req_date = req_date
+                request.req_seq_id = req_seq_id
+                request.huifu_id = self.config.merchant_id
+                request.org_req_date = org_req_date
+                if org_hf_seq_id:
+                    request.org_hf_seq_id = org_hf_seq_id
+                else:
+                    request.org_req_seq_id = org_req_seq_id
+                response = Payment.close_query(request)
+        except (HuifuConfigurationError, HuifuGatewayError):
+            raise
+        except Exception as exc:
+            digest = sha256(type(exc).__name__.encode("utf-8")).hexdigest()
+            raise HuifuGatewayError(response_digest=digest) from exc
+        return self._decode_close_result(
+            response,
+            req_date=req_date,
+            req_seq_id=req_seq_id,
+        )
+
+    def _decode_close_result(
+        self,
+        response,
+        *,
+        req_date: str,
+        req_seq_id: str,
+    ) -> HuifuCloseResult:
+        digest = _canonical_digest(response)
+        data = _response_data(response)
+        if data is None:
+            raise HuifuGatewayError(response_digest=digest)
+        response_code = str(data.get("resp_code", ""))
+        if response_code not in HUIFU_ACCEPTED_CODES:
+            raise HuifuGatewayError(
+                response_code=response_code,
+                response_digest=digest,
+            )
+        if str(data.get("huifu_id", "")) != self.config.merchant_id:
+            raise HuifuGatewayError(
+                "关单返回的商户号不一致。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        returned_req_date = str(data.get("req_date", ""))
+        returned_req_seq_id = str(data.get("req_seq_id", ""))
+        if returned_req_date and returned_req_date != req_date:
+            raise HuifuGatewayError(
+                "关单返回的请求日期不一致。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        if returned_req_seq_id and returned_req_seq_id != req_seq_id:
+            raise HuifuGatewayError(
+                "关单返回的请求流水号不一致。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        trans_stat = str(data.get("trans_stat", ""))
+        if trans_stat not in {"P", "S", "F"}:
+            raise HuifuGatewayError(
+                "关单未返回有效状态。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        org_trans_stat = str(data.get("org_trans_stat", ""))
+        if org_trans_stat not in {"", "P", "S", "F"}:
+            raise HuifuGatewayError(
+                "关单返回的原交易状态无效。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        return HuifuCloseResult(
+            req_date=returned_req_date or req_date,
+            req_seq_id=returned_req_seq_id or req_seq_id,
+            huifu_id=self.config.merchant_id,
+            trans_stat=trans_stat,
+            org_trans_stat=org_trans_stat,
+            response_code=response_code,
+            response_digest=digest,
+        )
+
+    def refund_payment(
+        self,
+        *,
+        req_date: str,
+        req_seq_id: str,
+        amount: int,
+        org_req_date: str,
+        org_req_seq_id: str,
+        org_hf_seq_id: str = "",
+        remark: str = "",
+    ) -> HuifuRefundResult:
+        from dg_sdk import Payment, PaymentRefundRequest
+
+        self.config.validate_common()
+        try:
+            with _SDK_LOCK:
+                self._init_sdk()
+                request = PaymentRefundRequest()
+                request.req_date = req_date
+                request.req_seq_id = req_seq_id
+                request.huifu_id = self.config.merchant_id
+                request.ord_amt = cents_to_yuan(amount)
+                request.org_req_date = org_req_date
+                if org_hf_seq_id:
+                    request.org_hf_seq_id = org_hf_seq_id
+                else:
+                    request.org_req_seq_id = org_req_seq_id
+                request.remark = remark[:84]
+                request.notify_url = self.config.notify_url
+                response = Payment.refund(request)
+        except (HuifuConfigurationError, HuifuGatewayError):
+            raise
+        except Exception as exc:
+            digest = sha256(type(exc).__name__.encode("utf-8")).hexdigest()
+            raise HuifuGatewayError(response_digest=digest) from exc
+        return self._decode_refund_result(
+            response,
+            req_date=req_date,
+            req_seq_id=req_seq_id,
+            query=False,
+        )
+
+    def query_refund(
+        self,
+        *,
+        req_date: str,
+        req_seq_id: str,
+        refund_hf_seq_id: str = "",
+    ) -> HuifuRefundQueryResult:
+        from dg_sdk import Payment, PaymentRefundQueryRequest
+
+        self.config.validate_common()
+        try:
+            with _SDK_LOCK:
+                self._init_sdk()
+                request = PaymentRefundQueryRequest()
+                request.huifu_id = self.config.merchant_id
+                request.org_req_date = req_date
+                if refund_hf_seq_id:
+                    request.org_hf_seq_id = refund_hf_seq_id
+                else:
+                    request.org_req_seq_id = req_seq_id
+                response = Payment.refund_query(request)
+        except (HuifuConfigurationError, HuifuGatewayError):
+            raise
+        except Exception as exc:
+            digest = sha256(type(exc).__name__.encode("utf-8")).hexdigest()
+            raise HuifuGatewayError(response_digest=digest) from exc
+        return self._decode_refund_result(
+            response,
+            req_date=req_date,
+            req_seq_id=req_seq_id,
+            query=True,
+        )
+
+    def _decode_refund_result(
+        self,
+        response,
+        *,
+        req_date: str,
+        req_seq_id: str,
+        query: bool,
+    ) -> HuifuRefundResult | HuifuRefundQueryResult:
+        digest = _canonical_digest(response)
+        data = _response_data(response)
+        if data is None:
+            raise HuifuGatewayError(response_digest=digest)
+        response_code = str(data.get("resp_code", ""))
+        if response_code not in HUIFU_ACCEPTED_CODES:
+            raise HuifuGatewayError(
+                response_code=response_code,
+                response_digest=digest,
+            )
+        if str(data.get("huifu_id", "")) != self.config.merchant_id:
+            raise HuifuGatewayError(
+                "退款返回的商户号不一致。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        date_field = "org_req_date" if query else "req_date"
+        sequence_field = "org_req_seq_id" if query else "req_seq_id"
+        returned_req_date = str(data.get(date_field, ""))
+        returned_req_seq_id = str(data.get(sequence_field, ""))
+        if returned_req_date and returned_req_date != req_date:
+            raise HuifuGatewayError(
+                "退款返回的请求日期不一致。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        if returned_req_seq_id and returned_req_seq_id != req_seq_id:
+            raise HuifuGatewayError(
+                "退款返回的请求流水号不一致。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        trans_stat = str(data.get("trans_stat", ""))
+        allowed_statuses = {"I", "P", "S", "F"} if query else {"", "P", "S", "F"}
+        if trans_stat not in allowed_statuses:
+            raise HuifuGatewayError(
+                "退款返回了无效状态。",
+                response_code=response_code,
+                response_digest=digest,
+            )
+        result_type = HuifuRefundQueryResult if query else HuifuRefundResult
+        return result_type(
+            req_date=returned_req_date or req_date,
+            req_seq_id=returned_req_seq_id or req_seq_id,
+            huifu_id=self.config.merchant_id,
+            trans_stat=trans_stat,
+            ord_amt=str(data.get("ord_amt", "")),
+            actual_ref_amt=str(data.get("actual_ref_amt", "")),
+            gateway_refund_no=str(
+                data.get("org_hf_seq_id" if query else "hf_seq_id", "")
+            ),
+            trans_finish_time=str(data.get("trans_finish_time", "")),
             response_code=response_code,
             response_digest=digest,
         )

@@ -9,6 +9,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 
 from mediafiles.services import build_media_url
 
+from .account_closure import account_closure_blockers
 from .models import User
 from .services import (
     auth_client_identifier,
@@ -270,9 +271,24 @@ class CloseAccountSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True)
 
     def save(self, **kwargs):
-        user = self.context["request"].user
+        user = User.objects.select_for_update().get(
+            pk=self.context["request"].user.pk
+        )
         if not user.check_password(self.validated_data["current_password"]):
             raise serializers.ValidationError({"current_password": "当前密码不正确。"})
+        blockers = account_closure_blockers(user)
+        if blockers:
+            summary = "、".join(
+                f"{item['label']} {item['count']} 项" for item in blockers[:4]
+            )
+            if len(blockers) > 4:
+                summary += f"等 {len(blockers)} 类"
+            raise serializers.ValidationError(
+                {
+                    "business": f"账号还有未结业务：{summary}。请处理完成后再注销。",
+                    "blocking_items": blockers,
+                }
+            )
         user.account_status = User.AccountStatus.CLOSED
         user.is_active = False
         user.auth_version = F("auth_version") + 1

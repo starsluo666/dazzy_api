@@ -976,6 +976,7 @@ class ActivityModelTests(TestCase):
         activity.refresh_from_db()
         self.assertEqual(activity.status, Activity.Status.DRAFT)
 
+    @override_settings(DEBUG=True)
     def test_activity_create_does_not_require_identity_and_enforces_start_window(self):
         self.client.force_login(self.organizer)
         unverified = self.client.post(
@@ -994,6 +995,20 @@ class ActivityModelTests(TestCase):
         )
         self.assertEqual(invalid.status_code, 400)
         self.assertIn("48小时", str(invalid.json()))
+
+    @override_settings(DEBUG=False)
+    def test_activity_draft_is_not_created_without_an_available_payment_path(self):
+        self.client.force_login(self.organizer)
+
+        response = self.client.post(
+            "/api/v1/activities/",
+            self.activity_create_payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("活动发布真实支付尚未开放", str(response.json()))
+        self.assertFalse(Activity.objects.filter(title="我发布的桌游活动").exists())
 
     def test_activity_create_honors_category_city_people_and_amount_rules(self):
         self.category.city_codes = ["130400"]

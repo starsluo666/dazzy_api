@@ -255,6 +255,22 @@ class ProviderOrderApiTests(TestCase):
             ).count(),
             1,
         )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.provider_user,
+                event_type=UserNotification.EventType.PROVIDER_NEW_ORDER,
+                target_id=order_no,
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            UserNotification.objects.get(
+                recipient=self.provider_user,
+                event_type=UserNotification.EventType.PROVIDER_NEW_ORDER,
+                target_id=order_no,
+            ).action_url,
+            f"/pages/orders/detail?order_no={order_no}",
+        )
 
     def test_payment_and_acceptance_task_transition_is_atomic(self):
         created = self.client.post(
@@ -288,7 +304,10 @@ class ProviderOrderApiTests(TestCase):
         )
 
     @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
-    def test_huifu_payment_session_uses_server_amount_and_is_idempotent(self):
+    @patch("orders.services.ensure_provider_order_payment_scene_available")
+    def test_huifu_payment_session_uses_server_amount_and_is_idempotent(
+        self, _ensure_payment_scene_available
+    ):
         created = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
         )
@@ -381,7 +400,10 @@ class ProviderOrderApiTests(TestCase):
             "https://m.example.test/#/pages/booking/payment"
         ),
     )
-    def test_wechat_payment_authorization_binds_openid_and_returns_to_order(self):
+    @patch("orders.views.ensure_provider_order_payment_scene_available")
+    def test_wechat_payment_authorization_binds_openid_and_returns_to_order(
+        self, _ensure_payment_scene_available
+    ):
         created = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
         )
@@ -450,7 +472,10 @@ class ProviderOrderApiTests(TestCase):
         )
 
     @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
-    def test_huifu_payment_session_fails_closed_when_not_configured(self):
+    @patch("orders.services.ensure_provider_order_payment_scene_available")
+    def test_huifu_payment_session_fails_closed_when_not_configured(
+        self, _ensure_payment_scene_available
+    ):
         created = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
         )
@@ -476,7 +501,10 @@ class ProviderOrderApiTests(TestCase):
         )
 
     @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
-    def test_huifu_gateway_failure_is_retryable_with_same_request_identity(self):
+    @patch("orders.services.ensure_provider_order_payment_scene_available")
+    def test_huifu_gateway_failure_is_retryable_with_same_request_identity(
+        self, _ensure_payment_scene_available
+    ):
         created = self.client.post(
             "/api/v1/provider-orders/", self.payload(), content_type="application/json"
         )

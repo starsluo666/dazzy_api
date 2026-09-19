@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from django.conf import settings
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.settings import api_settings
 
@@ -30,3 +30,27 @@ class ApiSecurityDefaultsTests(SimpleTestCase):
     def test_api_documentation_is_not_accessible_outside_debug(self):
         self.assertFalse(settings.DEBUG)
         self.assertIn(self.client.get("/api/docs/").status_code, (401, 403, 404))
+
+
+class PaymentCapabilityTests(SimpleTestCase):
+    @override_settings(DEBUG=False, HUIFU_PAYMENT_ENABLED=False)
+    def test_production_does_not_advertise_unimplemented_payment_paths(self):
+        response = self.client.get("/api/v1/payments/capabilities/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertFalse(data["provider_order"]["mobile_app"]["available"])
+        self.assertFalse(data["activity_publish"]["real"]["available"])
+        self.assertFalse(data["activity_publish"]["mock"]["available"])
+        self.assertFalse(data["activity_participation"]["real"]["available"])
+
+    @override_settings(DEBUG=True, HUIFU_PAYMENT_ENABLED=False)
+    def test_local_environment_advertises_only_mock_payment(self):
+        response = self.client.get("/api/v1/payments/capabilities/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertTrue(data["provider_order"]["mock"]["available"])
+        self.assertTrue(data["activity_publish"]["mock"]["available"])
+        self.assertTrue(data["activity_participation"]["mock"]["available"])
+        self.assertFalse(data["provider_order"]["official_account"]["available"])

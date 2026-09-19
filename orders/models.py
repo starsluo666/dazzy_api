@@ -241,6 +241,22 @@ class ProviderOrderPaymentOrder(models.Model):
     gateway_last_query_status = models.CharField("最近查单状态", max_length=8, blank=True)
     gateway_last_query_digest = models.CharField("最近查单响应摘要", max_length=64, blank=True)
     gateway_last_queried_at = models.DateTimeField("最近查单时间", null=True, blank=True)
+    close_req_date = models.CharField("汇付关单请求日期", max_length=8, blank=True)
+    close_req_seq_id = models.CharField("汇付关单请求流水号", max_length=128, blank=True)
+    close_query_req_date = models.CharField("汇付关单查询日期", max_length=8, blank=True)
+    close_query_req_seq_id = models.CharField(
+        "汇付关单查询流水号", max_length=128, blank=True
+    )
+    gateway_close_status = models.CharField("汇付关单状态", max_length=8, blank=True)
+    gateway_close_response_code = models.CharField(
+        "汇付关单响应码", max_length=32, blank=True
+    )
+    gateway_close_response_digest = models.CharField(
+        "汇付关单响应摘要", max_length=64, blank=True
+    )
+    gateway_close_queried_at = models.DateTimeField(
+        "最近关单查询时间", null=True, blank=True
+    )
     preorder_attempts = models.PositiveSmallIntegerField("预下单尝试次数", default=0)
     preorder_requested_at = models.DateTimeField("预下单请求时间", null=True, blank=True)
     preorder_ready_at = models.DateTimeField("预下单完成时间", null=True, blank=True)
@@ -288,6 +304,16 @@ class ProviderOrderPaymentOrder(models.Model):
                 fields=("req_date", "req_seq_id"),
                 condition=~Q(req_seq_id=""),
                 name="uniq_provider_huifu_request",
+            ),
+            models.UniqueConstraint(
+                fields=("close_req_date", "close_req_seq_id"),
+                condition=~Q(close_req_seq_id=""),
+                name="uniq_provider_huifu_close_request",
+            ),
+            models.UniqueConstraint(
+                fields=("close_query_req_date", "close_query_req_seq_id"),
+                condition=~Q(close_query_req_seq_id=""),
+                name="uniq_provider_huifu_close_query",
             ),
         ]
         verbose_name = "达人订单支付单"
@@ -395,7 +421,20 @@ class ProviderOrderRefundOrder(models.Model):
     status = models.CharField(
         "退款状态", max_length=20, choices=Status, default=Status.PENDING
     )
-    gateway_refund_no = models.CharField("渠道退款号", max_length=64, blank=True)
+    gateway_merchant_id = models.CharField("汇付商户号", max_length=32, blank=True)
+    req_date = models.CharField("汇付退款请求日期", max_length=8, blank=True)
+    req_seq_id = models.CharField("汇付退款请求流水号", max_length=128, blank=True)
+    gateway_refund_no = models.CharField("渠道退款号", max_length=128, blank=True)
+    gateway_status = models.CharField("渠道退款状态", max_length=8, blank=True)
+    gateway_response_code = models.CharField("汇付响应码", max_length=32, blank=True)
+    gateway_response_digest = models.CharField("汇付响应摘要", max_length=64, blank=True)
+    gateway_last_query_status = models.CharField("最近退款查询状态", max_length=8, blank=True)
+    gateway_last_query_digest = models.CharField(
+        "最近退款查询响应摘要", max_length=64, blank=True
+    )
+    gateway_last_queried_at = models.DateTimeField(
+        "最近退款查询时间", null=True, blank=True
+    )
     reason = models.CharField("退款原因", max_length=1000)
     operator = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -444,12 +483,61 @@ class ProviderOrderRefundOrder(models.Model):
                 condition=~Q(gateway_refund_no=""),
                 name="uniq_provider_gateway_refund_no",
             ),
+            models.UniqueConstraint(
+                fields=("req_date", "req_seq_id"),
+                condition=~Q(req_seq_id=""),
+                name="uniq_provider_huifu_refund_request",
+            ),
         ]
         verbose_name = "达人订单退款单"
         verbose_name_plural = verbose_name
 
     def __str__(self):
         return f"{self.refund_no} / {self.order.order_no}"
+
+
+class HuifuRefundNotification(models.Model):
+    class Status(models.TextChoices):
+        RECEIVED = "received", "已接收"
+        PROCESSED = "processed", "已处理"
+
+    event_key = models.CharField("事件幂等键", max_length=64, unique=True)
+    refund_order = models.ForeignKey(
+        ProviderOrderRefundOrder,
+        on_delete=models.PROTECT,
+        related_name="huifu_notifications",
+        verbose_name="退款单",
+    )
+    huifu_id = models.CharField("汇付商户号", max_length=32)
+    req_date = models.CharField("退款请求日期", max_length=8)
+    req_seq_id = models.CharField("退款请求流水号", max_length=128)
+    hf_seq_id = models.CharField("汇付退款全局流水号", max_length=128, blank=True)
+    trans_type = models.CharField("交易类型", max_length=32, blank=True)
+    trans_stat = models.CharField("退款状态", max_length=8, blank=True)
+    ord_amt = models.CharField("退款金额（元）", max_length=16, blank=True)
+    payload_digest = models.CharField("通知报文摘要", max_length=64)
+    signature_verified = models.BooleanField("验签通过", default=False)
+    query_response_digest = models.CharField("退款查询响应摘要", max_length=64, blank=True)
+    status = models.CharField(
+        "处理状态", max_length=16, choices=Status, default=Status.RECEIVED
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "huifu_refund_notification"
+        ordering = ("-received_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("req_date", "req_seq_id"), name="huifu_ref_notify_req_idx"
+            ),
+            models.Index(
+                fields=("status", "-received_at"), name="huifu_ref_notify_status_idx"
+            ),
+        ]
+
+    def __str__(self):
+        return self.event_key
 
 
 def generate_provider_settlement_no():

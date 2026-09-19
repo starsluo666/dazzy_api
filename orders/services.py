@@ -11,13 +11,19 @@ from django.db.models import Avg, Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from config.payment_capabilities import ensure_provider_order_payment_scene_available
 from notifications.models import UserNotification
-from notifications.services import create_notification, create_order_notification
+from notifications.services import (
+    create_notification,
+    create_order_notification,
+    create_provider_new_order_notification,
+)
 
 from providers.models import ProviderProfile, ProviderService
 
 from .models import (
     HuifuPaymentNotification,
+    HuifuRefundNotification,
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
@@ -26,8 +32,10 @@ from .models import (
 from .huifu import (
     HuifuGatewayError,
     HuifuPaymentQueryResult,
+    HuifuRefundQueryResult,
     HuifuPaymentSessionInProgress,
     HuifuPaymentSessionResult,
+    HuifuRefundTerminalError,
     get_huifu_payment_gateway,
 )
 
@@ -38,6 +46,7 @@ TIME_GRAIN_MINUTES = 30
 PAYMENT_LOCK_MINUTES = 15
 PROVIDER_REJECTION_SUPPORT_TIMEOUT = timedelta(minutes=15)
 PAYMENT_SESSION_STALE_AFTER = timedelta(seconds=30)
+HUIFU_CLOSE_MINIMUM_AGE = timedelta(minutes=1)
 
 PAYMENT_SCENE_TRADE_TYPES = {
     "official_account": "T_JSAPI",
@@ -92,6 +101,7 @@ def create_provider_order_huifu_payment_session(
 ):
     """Create or replay one idempotent Huifu aggregate payment session."""
 
+    ensure_provider_order_payment_scene_available(payment_scene)
     gateway = get_huifu_payment_gateway()
     try:
         trade_type = PAYMENT_SCENE_TRADE_TYPES[payment_scene]
@@ -290,6 +300,20 @@ def _apply_huifu_payment_query_success(
     if not gateway_trade_no:
         raise HuifuGatewayError("支付查询未返回汇付全局流水号。")
     channel_trade_type = query.trade_type or payment.trade_type
+    paid_at = _huifu_paid_at(query.end_time or fallback_end_time)
+    if (
+        payment.order.status in (ProviderOrder.Status.CANCELLED, ProviderOrder.Status.REFUNDED)
+        or (
+            payment.order.status == ProviderOrder.Status.PENDING_PAYMENT
+            and payment.order.payment_expires_at <= paid_at
+        )
+    ):
+        return _apply_cancelled_huifu_payment_success(
+            payment=payment,
+            gateway_trade_no=gateway_trade_no,
+            trade_type=channel_trade_type,
+            paid_at=paid_at,
+        )
     result = apply_provider_order_payment_success(
         order_no=payment.order.order_no,
         customer_id=payment.payer_id,
@@ -297,7 +321,7 @@ def _apply_huifu_payment_query_success(
         gateway_trade_no=gateway_trade_no,
         paid_amount=payment.payable_amount,
         signature_verified=True,
-        now=_huifu_paid_at(query.end_time or fallback_end_time),
+        now=paid_at,
     )
     if result[1].status not in (
         ProviderOrderPaymentOrder.Status.PAID,
@@ -306,6 +330,71 @@ def _apply_huifu_payment_query_success(
     ):
         raise HuifuGatewayError("支付成功时间晚于订单失效时间，需要人工核对退款。")
     return result
+
+
+def _apply_cancelled_huifu_payment_success(
+    *,
+    payment: ProviderOrderPaymentOrder,
+    gateway_trade_no: str,
+    trade_type: str,
+    paid_at,
+):
+    """Record financial truth for a cancelled order and reserve a full refund."""
+
+    from taskcenter.services import cancel_provider_order_payment_expiry
+
+    with transaction.atomic():
+        order = ProviderOrder.objects.select_for_update().get(pk=payment.order_id)
+        locked_payment = ProviderOrderPaymentOrder.objects.select_for_update().get(
+            pk=payment.pk
+        )
+        if order.status == ProviderOrder.Status.PENDING_PAYMENT:
+            order.status = ProviderOrder.Status.CANCELLED
+            order.cancelled_at = timezone.now()
+        elif order.status not in (
+            ProviderOrder.Status.CANCELLED,
+            ProviderOrder.Status.REFUNDED,
+        ):
+            raise HuifuGatewayError("已取消支付的订单状态发生变化，需要人工核对。")
+
+        changed = locked_payment.status not in (
+            ProviderOrderPaymentOrder.Status.PAID,
+            ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+            ProviderOrderPaymentOrder.Status.REFUNDED,
+        )
+        if locked_payment.status != ProviderOrderPaymentOrder.Status.REFUNDED:
+            locked_payment.channel = _huifu_payment_channel(trade_type)
+            locked_payment.status = ProviderOrderPaymentOrder.Status.PAID
+            locked_payment.gateway_trade_no = gateway_trade_no
+            locked_payment.paid_at = paid_at
+            locked_payment.closed_at = None
+            locked_payment.save(
+                update_fields=(
+                    "channel",
+                    "status",
+                    "gateway_trade_no",
+                    "paid_at",
+                    "closed_at",
+                    "updated_at",
+                )
+            )
+        if not order.paid_at:
+            order.paid_at = paid_at
+        order.save(
+            update_fields=("status", "cancelled_at", "paid_at", "updated_at")
+        )
+        cancel_provider_order_payment_expiry(order.order_no, "cancel_compensation_paid")
+
+    if locked_payment.status != ProviderOrderPaymentOrder.Status.REFUNDED:
+        create_provider_order_refund(
+            order_no=order.order_no,
+            amount=locked_payment.payable_amount,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference=f"cancel-compensation:{order.order_no}",
+            idempotency_key=f"provider-order-cancel-compensation:{order.order_no}",
+            reason="订单取消后支付成功，系统自动原路退款",
+        )
+    return order, locked_payment, changed
 
 
 def confirm_provider_order_huifu_payment_status(
@@ -355,8 +444,211 @@ def confirm_provider_order_huifu_payment_status(
     }
 
 
+@transaction.atomic
+def cancel_provider_order_with_compensation(*, order_no: str, customer_id: int):
+    """Cancel locally and keep a durable task for any in-flight real payment."""
+
+    from taskcenter.services import (
+        cancel_provider_order_payment_expiry,
+        register_provider_order_cancel_compensation,
+    )
+
+    order = ProviderOrder.objects.select_for_update().get(
+        order_no=order_no,
+        customer_id=customer_id,
+    )
+    if order.status != ProviderOrder.Status.PENDING_PAYMENT:
+        raise ValidationError({"status": "当前阶段暂不支持用户直接取消，请联系客服。"})
+    now = timezone.now()
+    order.status = ProviderOrder.Status.CANCELLED
+    order.cancelled_at = now
+    order.save(update_fields=("status", "cancelled_at", "updated_at"))
+    payment = ProviderOrderPaymentOrder.objects.select_for_update().filter(order=order).first()
+    has_real_payment_request = bool(
+        payment
+        and payment.gateway_merchant_id
+        and payment.req_date
+        and payment.req_seq_id
+    )
+    if payment and payment.status == ProviderOrderPaymentOrder.Status.PENDING_PAYMENT:
+        if has_real_payment_request:
+            register_provider_order_cancel_compensation(order)
+        else:
+            payment.status = ProviderOrderPaymentOrder.Status.CLOSED
+            payment.closed_at = now
+            payment.save(update_fields=("status", "closed_at", "updated_at"))
+    cancel_provider_order_payment_expiry(order_no, "customer_cancelled")
+    return order
+
+
+def _cancel_compensation_refund_state(order_no: str) -> dict | None:
+    refund = ProviderOrderRefundOrder.objects.filter(
+        idempotency_key=f"provider-order-cancel-compensation:{order_no}"
+    ).first()
+    if refund is None:
+        return None
+    state = {
+        ProviderOrderRefundOrder.Status.SUCCEEDED: "refunded",
+        ProviderOrderRefundOrder.Status.FAILED: "refund_failed",
+    }.get(refund.status, "refund_processing")
+    return {
+        "state": state,
+        "order_no": order_no,
+        "refund_no": refund.refund_no,
+        "refund_status": refund.status,
+    }
+
+
+def _mark_cancelled_payment_closed(payment_id: int, *, now):
+    with transaction.atomic():
+        payment = ProviderOrderPaymentOrder.objects.select_for_update().get(pk=payment_id)
+        if payment.status == ProviderOrderPaymentOrder.Status.PENDING_PAYMENT:
+            payment.status = ProviderOrderPaymentOrder.Status.CLOSED
+            payment.closed_at = now
+            payment.save(update_fields=("status", "closed_at", "updated_at"))
+
+
+def _save_huifu_close_result(payment_id: int, result, *, queried: bool):
+    values = {
+        "gateway_close_status": result.trans_stat,
+        "gateway_close_response_code": result.response_code,
+        "gateway_close_response_digest": result.response_digest,
+        "updated_at": timezone.now(),
+    }
+    if queried:
+        values["gateway_close_queried_at"] = timezone.now()
+    ProviderOrderPaymentOrder.objects.filter(pk=payment_id).update(**values)
+
+
+def process_provider_order_cancel_compensation(order_no: str, *, now=None) -> dict:
+    """Query first, then close an unpaid trade or refund a late successful trade."""
+
+    now = now or timezone.now()
+    order = ProviderOrder.objects.select_related("payment_order").filter(
+        order_no=order_no
+    ).first()
+    if order is None:
+        return {"state": "missing", "order_no": order_no}
+    payment = getattr(order, "payment_order", None)
+    if payment is None:
+        return {"state": "not_applicable", "order_no": order_no}
+    if order.status == ProviderOrder.Status.REFUNDED:
+        return {"state": "refunded", "order_no": order_no}
+    if order.status != ProviderOrder.Status.CANCELLED:
+        return {
+            "state": "not_applicable",
+            "order_no": order_no,
+            "order_status": order.status,
+        }
+    refund_state = _cancel_compensation_refund_state(order_no)
+    if refund_state is not None:
+        return refund_state
+    if payment.status in (
+        ProviderOrderPaymentOrder.Status.PAID,
+        ProviderOrderPaymentOrder.Status.PARTIALLY_REFUNDED,
+    ):
+        create_provider_order_refund(
+            order_no=order_no,
+            amount=payment.payable_amount,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference=f"cancel-compensation:{order_no}",
+            idempotency_key=f"provider-order-cancel-compensation:{order_no}",
+            reason="订单取消后支付成功，系统自动原路退款",
+        )
+        return _cancel_compensation_refund_state(order_no)
+    if payment.status == ProviderOrderPaymentOrder.Status.CLOSED:
+        return {"state": "closed", "order_no": order_no}
+    if not payment.gateway_merchant_id or not payment.req_date or not payment.req_seq_id:
+        _mark_cancelled_payment_closed(payment.pk, now=now)
+        return {"state": "closed", "order_no": order_no, "source": "local"}
+
+    query = _query_provider_order_huifu_payment(payment)
+    if query.trans_stat == "S":
+        _apply_huifu_payment_query_success(payment, query)
+        return _cancel_compensation_refund_state(order_no) or {
+            "state": "refund_processing",
+            "order_no": order_no,
+        }
+    if query.trans_stat == "F":
+        _mark_cancelled_payment_closed(payment.pk, now=now)
+        return {"state": "closed", "order_no": order_no, "source": "payment_query"}
+
+    close_eligible_at = (payment.preorder_requested_at or payment.created_at) + (
+        HUIFU_CLOSE_MINIMUM_AGE
+    )
+    if now < close_eligible_at:
+        return {
+            "state": "not_due",
+            "order_no": order_no,
+            "deadline": close_eligible_at,
+        }
+
+    gateway = get_huifu_payment_gateway()
+    with transaction.atomic():
+        locked_payment = ProviderOrderPaymentOrder.objects.select_for_update().get(
+            pk=payment.pk
+        )
+        request_date = timezone.localtime(now).strftime("%Y%m%d")
+        if not locked_payment.close_req_seq_id:
+            locked_payment.close_req_date = request_date
+            locked_payment.close_req_seq_id = f"{locked_payment.payment_no}CLOSE"
+        if not locked_payment.close_query_req_seq_id:
+            locked_payment.close_query_req_date = request_date
+            locked_payment.close_query_req_seq_id = f"{locked_payment.payment_no}CLOSEQ"
+        locked_payment.save(
+            update_fields=(
+                "close_req_date",
+                "close_req_seq_id",
+                "close_query_req_date",
+                "close_query_req_seq_id",
+                "updated_at",
+            )
+        )
+        close_kwargs = {
+            "org_req_date": locked_payment.req_date,
+            "org_req_seq_id": locked_payment.req_seq_id,
+            "org_hf_seq_id": locked_payment.gateway_trade_no,
+        }
+        query_existing_close = bool(locked_payment.gateway_close_status)
+        if query_existing_close:
+            close_req_date = locked_payment.close_query_req_date
+            close_req_seq_id = locked_payment.close_query_req_seq_id
+        else:
+            close_req_date = locked_payment.close_req_date
+            close_req_seq_id = locked_payment.close_req_seq_id
+
+    if query_existing_close:
+        close_result = gateway.query_close(
+            req_date=close_req_date,
+            req_seq_id=close_req_seq_id,
+            **close_kwargs,
+        )
+    else:
+        close_result = gateway.close_payment(
+            req_date=close_req_date,
+            req_seq_id=close_req_seq_id,
+            **close_kwargs,
+        )
+    _save_huifu_close_result(
+        payment.pk,
+        close_result,
+        queried=query_existing_close,
+    )
+    if close_result.trans_stat == "S" or (
+        close_result.trans_stat == "F" and close_result.org_trans_stat == "F"
+    ):
+        _mark_cancelled_payment_closed(payment.pk, now=now)
+        return {"state": "closed", "order_no": order_no, "source": "gateway_close"}
+    return {
+        "state": "processing",
+        "order_no": order_no,
+        "trans_stat": close_result.trans_stat,
+        "org_trans_stat": close_result.org_trans_stat,
+    }
+
+
 def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
-    """Verify, query-confirm and idempotently apply an aggregate payment notification."""
+    """Verify and route aggregate payment/refund notifications."""
 
     gateway = get_huifu_payment_gateway()
     if not resp_data or not sign:
@@ -379,6 +671,7 @@ def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
             "hf_seq_id",
             "trans_stat",
             "trans_amt",
+            "ord_amt",
             "trans_type",
             "notify_type",
             "end_time",
@@ -390,6 +683,11 @@ def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
         raise ValidationError({"notification": "支付通知交易状态无效。"})
 
     payload_digest = sha256(resp_data.encode("utf-8")).hexdigest()
+    if fields["trans_type"] == "TRANS_REFUND":
+        return _process_huifu_refund_notification(
+            fields=fields,
+            payload_digest=payload_digest,
+        )
     event_key = sha256(
         ":".join(
             (
@@ -483,6 +781,83 @@ def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
     return f"RECV_ORD_ID_{fields['req_seq_id']}"
 
 
+def _process_huifu_refund_notification(*, fields: dict, payload_digest: str) -> str:
+    event_key = sha256(
+        ":".join(
+            (
+                "refund",
+                fields["huifu_id"],
+                fields["req_date"],
+                fields["req_seq_id"],
+                fields["hf_seq_id"],
+                fields["trans_stat"],
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    with transaction.atomic():
+        refund = (
+            ProviderOrderRefundOrder.objects.select_for_update()
+            .filter(req_date=fields["req_date"], req_seq_id=fields["req_seq_id"])
+            .first()
+        )
+        if refund is None:
+            raise ValidationError({"notification": "退款通知未匹配到本地退款单。"})
+        if refund.gateway_merchant_id != fields["huifu_id"]:
+            raise ValidationError({"notification": "退款通知商户号与本地退款单不一致。"})
+        if fields["ord_amt"] and (
+            _huifu_amount_to_cents(fields["ord_amt"]) != refund.refund_amount
+        ):
+            raise ValidationError({"notification": "退款通知金额与本地退款单不一致。"})
+        event, _ = HuifuRefundNotification.objects.get_or_create(
+            event_key=event_key,
+            defaults={
+                "refund_order": refund,
+                "huifu_id": fields["huifu_id"],
+                "req_date": fields["req_date"],
+                "req_seq_id": fields["req_seq_id"],
+                "hf_seq_id": fields["hf_seq_id"],
+                "trans_type": fields["trans_type"],
+                "trans_stat": fields["trans_stat"],
+                "ord_amt": fields["ord_amt"],
+                "payload_digest": payload_digest,
+                "signature_verified": True,
+            },
+        )
+        event = HuifuRefundNotification.objects.select_for_update().get(pk=event.pk)
+        if event.payload_digest != payload_digest or event.refund_order_id != refund.pk:
+            raise ValidationError({"notification": "退款通知幂等键冲突。"})
+        if event.status == HuifuRefundNotification.Status.PROCESSED:
+            return f"RECV_ORD_ID_{fields['req_seq_id']}"
+        refund_id = refund.pk
+        fallback_hf_seq_id = refund.gateway_refund_no or fields["hf_seq_id"]
+
+    refund = ProviderOrderRefundOrder.objects.get(pk=refund_id)
+    query = _query_provider_order_huifu_refund(
+        refund,
+        fallback_hf_seq_id=fallback_hf_seq_id,
+    )
+    _apply_huifu_refund_query_result(
+        refund,
+        query,
+        fallback_hf_seq_id=fields["hf_seq_id"],
+    )
+    with transaction.atomic():
+        event = HuifuRefundNotification.objects.select_for_update().get(
+            event_key=event_key
+        )
+        event.query_response_digest = query.response_digest
+        event.status = HuifuRefundNotification.Status.PROCESSED
+        event.processed_at = timezone.now()
+        event.save(
+            update_fields=(
+                "query_response_digest",
+                "status",
+                "processed_at",
+            )
+        )
+    return f"RECV_ORD_ID_{fields['req_seq_id']}"
+
+
 @transaction.atomic
 def apply_provider_order_payment_success(
     *,
@@ -556,6 +931,7 @@ def apply_provider_order_payment_success(
         title="订单支付成功",
         content="订单已进入待接单，达人会在接单时限内处理。",
     )
+    create_provider_new_order_notification(order=order)
     return order, payment, True
 
 
@@ -940,60 +1316,45 @@ def provider_order_refund_can_retry(refund, *, now=None) -> bool:
     )
 
 
-def process_provider_order_refund(refund_no: str, *, now=None):
-    from .payment_gateway import get_provider_order_payment_gateway
+def _complete_provider_order_refund(
+    refund_no: str,
+    *,
+    gateway_refund_no: str,
+    refunded_at,
+):
     from taskcenter.services import (
         mark_provider_order_refund_succeeded,
         reopen_provider_order_settlement,
     )
 
-    now = now or timezone.now()
     with transaction.atomic():
-        refund = ProviderOrderRefundOrder.objects.select_for_update().select_related(
-            "payment_order"
-        ).get(refund_no=refund_no)
-        if refund.status == ProviderOrderRefundOrder.Status.SUCCEEDED:
-            return refund, False
-        if not provider_order_refund_can_retry(refund, now=now):
-            raise ValidationError("退款正在处理中，请勿重复提交。")
-        refund.status = ProviderOrderRefundOrder.Status.PROCESSING
-        refund.failure_reason = ""
-        refund.save(update_fields=("status", "failure_reason", "updated_at"))
-        channel = refund.payment_order.channel
-        amount = refund.refund_amount
-
-    try:
-        result = get_provider_order_payment_gateway(channel).refund(
-            refund_no=refund_no, amount=amount
+        refund_ref = ProviderOrderRefundOrder.objects.only("order_id").get(
+            refund_no=refund_no
         )
-    except Exception as exc:
-        ProviderOrderRefundOrder.objects.filter(
-            refund_no=refund_no,
-            status=ProviderOrderRefundOrder.Status.PROCESSING,
-        ).update(
-            status=ProviderOrderRefundOrder.Status.FAILED,
-            failure_reason=str(exc)[:1000],
-            updated_at=timezone.now(),
-        )
-        raise
-
-    with transaction.atomic():
-        refund_ref = ProviderOrderRefundOrder.objects.only("order_id").get(refund_no=refund_no)
         order = ProviderOrder.objects.select_for_update().select_related(
             "customer", "provider__user", "service__category"
         ).get(pk=refund_ref.order_id)
         payment = ProviderOrderPaymentOrder.objects.select_for_update().get(order=order)
-        refund = ProviderOrderRefundOrder.objects.select_for_update().get(refund_no=refund_no)
+        refund = ProviderOrderRefundOrder.objects.select_for_update().get(
+            refund_no=refund_no
+        )
         if refund.status == ProviderOrderRefundOrder.Status.SUCCEEDED:
             return refund, False
-        now = timezone.now()
         refund.status = ProviderOrderRefundOrder.Status.SUCCEEDED
-        refund.gateway_refund_no = result.gateway_refund_no
-        refund.refunded_at = now
+        refund.gateway_status = "S"
+        refund.gateway_refund_no = gateway_refund_no or refund.gateway_refund_no
+        refund.refunded_at = refunded_at
         refund.failure_reason = ""
-        refund.save(update_fields=(
-            "status", "gateway_refund_no", "refunded_at", "failure_reason", "updated_at",
-        ))
+        refund.save(
+            update_fields=(
+                "status",
+                "gateway_status",
+                "gateway_refund_no",
+                "refunded_at",
+                "failure_reason",
+                "updated_at",
+            )
+        )
         refunded_total = order.refund_orders.filter(
             status=ProviderOrderRefundOrder.Status.SUCCEEDED
         ).aggregate(total=Sum("refund_amount"))["total"] or 0
@@ -1006,10 +1367,11 @@ def process_provider_order_refund(refund_no: str, *, now=None):
 
         from backoffice.models import ProviderOrderAfterSalesCase
 
-        case = ProviderOrderAfterSalesCase.objects.select_for_update().filter(
-            case_no=refund.source_reference,
-            order=order,
-        ).first()
+        case = (
+            ProviderOrderAfterSalesCase.objects.select_for_update()
+            .filter(case_no=refund.source_reference, order=order)
+            .first()
+        )
         if case:
             case.status = ProviderOrderAfterSalesCase.Status.REFUNDED
             case.save(update_fields=("status", "updated_at"))
@@ -1019,13 +1381,15 @@ def process_provider_order_refund(refund_no: str, *, now=None):
             order.status = case.original_order_status
         order.save(update_fields=("status", "updated_at"))
 
-        settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
+        settlement = ProviderOrderSettlement.objects.select_for_update().filter(
+            order=order
+        ).first()
         if settlement:
             amounts = _settlement_amounts(order, settlement.platform_commission_rate)
             _apply_settlement_amounts(settlement, amounts)
             if settlement.refunded_amount >= settlement.paid_amount:
                 settlement.status = ProviderOrderSettlement.Status.CANCELLED
-                settlement.cancelled_at = now
+                settlement.cancelled_at = refunded_at
                 settlement.dispute_reason = ""
                 settlement.save()
             else:
@@ -1048,6 +1412,198 @@ def process_provider_order_refund(refund_no: str, *, now=None):
         )
         mark_provider_order_refund_succeeded(refund.refund_no)
         return refund, True
+
+
+def _huifu_refunded_at(value: str, *, fallback):
+    if not value:
+        return fallback
+    try:
+        parsed = datetime.strptime(value, "%Y%m%d%H%M%S")
+    except (TypeError, ValueError) as exc:
+        raise HuifuGatewayError("退款查询返回的完成时间无效。") from exc
+    return timezone.make_aware(parsed, timezone.get_current_timezone())
+
+
+def _query_provider_order_huifu_refund(
+    refund: ProviderOrderRefundOrder,
+    *,
+    fallback_hf_seq_id: str = "",
+) -> HuifuRefundQueryResult:
+    gateway = get_huifu_payment_gateway()
+    query = gateway.query_refund(
+        req_date=refund.req_date,
+        req_seq_id=refund.req_seq_id,
+        refund_hf_seq_id=refund.gateway_refund_no or fallback_hf_seq_id,
+    )
+    if query.huifu_id != refund.gateway_merchant_id:
+        raise HuifuGatewayError("退款查询返回的商户号与本地退款单不一致。")
+    if query.ord_amt and _huifu_amount_to_cents(query.ord_amt) != refund.refund_amount:
+        raise HuifuGatewayError("退款查询金额与本地退款单不一致。")
+    if query.trans_stat == "S" and not query.ord_amt:
+        raise HuifuGatewayError("退款成功查询未返回退款金额。")
+    if (
+        query.trans_stat == "S"
+        and query.actual_ref_amt
+        and _huifu_amount_to_cents(query.actual_ref_amt) != refund.refund_amount
+    ):
+        raise HuifuGatewayError("退款查询实际退款金额与本地退款单不一致。")
+    queried_at = timezone.now()
+    ProviderOrderRefundOrder.objects.filter(pk=refund.pk).update(
+        gateway_refund_no=query.gateway_refund_no or refund.gateway_refund_no,
+        gateway_status=query.trans_stat,
+        gateway_last_query_status=query.trans_stat,
+        gateway_last_query_digest=query.response_digest,
+        gateway_last_queried_at=queried_at,
+        updated_at=queried_at,
+    )
+    return query
+
+
+def _apply_huifu_refund_query_result(
+    refund: ProviderOrderRefundOrder,
+    query: HuifuRefundQueryResult,
+    *,
+    fallback_hf_seq_id: str = "",
+    now=None,
+    raise_on_failure: bool = False,
+):
+    now = now or timezone.now()
+    if query.trans_stat == "S":
+        return _complete_provider_order_refund(
+            refund.refund_no,
+            gateway_refund_no=(
+                query.gateway_refund_no or fallback_hf_seq_id or refund.gateway_refund_no
+            ),
+            refunded_at=_huifu_refunded_at(query.trans_finish_time, fallback=now),
+        )
+    if query.trans_stat == "F":
+        ProviderOrderRefundOrder.objects.filter(pk=refund.pk).update(
+            status=ProviderOrderRefundOrder.Status.FAILED,
+            gateway_status="F",
+            failure_reason="汇付退款终态失败，请人工核对后重试。",
+            updated_at=now,
+        )
+        if raise_on_failure:
+            raise HuifuRefundTerminalError()
+    return ProviderOrderRefundOrder.objects.get(pk=refund.pk), False
+
+
+def process_provider_order_refund(refund_no: str, *, now=None):
+    from .payment_gateway import get_provider_order_payment_gateway
+
+    now = now or timezone.now()
+    with transaction.atomic():
+        refund = (
+            ProviderOrderRefundOrder.objects.select_for_update()
+            .select_related("payment_order")
+            .get(refund_no=refund_no)
+        )
+        if refund.status == ProviderOrderRefundOrder.Status.SUCCEEDED:
+            return refund, False
+        payment = refund.payment_order
+        channel = payment.channel
+        amount = refund.refund_amount
+        if channel in (
+            ProviderOrderPaymentOrder.Channel.MOCK_WECHAT,
+            ProviderOrderPaymentOrder.Channel.MOCK_ALIPAY,
+        ):
+            if not provider_order_refund_can_retry(refund, now=now):
+                raise ValidationError("退款正在处理中，请勿重复提交。")
+            refund.status = ProviderOrderRefundOrder.Status.PROCESSING
+            refund.failure_reason = ""
+            refund.save(update_fields=("status", "failure_reason", "updated_at"))
+            is_mock = True
+            should_submit = True
+        elif channel in (
+            ProviderOrderPaymentOrder.Channel.WECHAT,
+            ProviderOrderPaymentOrder.Channel.ALIPAY,
+        ):
+            if not payment.gateway_merchant_id or not payment.req_date or not payment.req_seq_id:
+                raise ValidationError("原支付单缺少汇付交易定位信息，禁止自动退款。")
+            refund.req_date = refund.req_date or timezone.localtime(now).strftime("%Y%m%d")
+            refund.req_seq_id = refund.req_seq_id or refund.refund_no
+            refund.gateway_merchant_id = payment.gateway_merchant_id
+            refund.status = ProviderOrderRefundOrder.Status.PROCESSING
+            refund.failure_reason = ""
+            should_submit = not (
+                refund.gateway_response_digest
+                or refund.gateway_status
+                or refund.gateway_refund_no
+                or refund.gateway_last_query_digest
+            )
+            refund.save(
+                update_fields=(
+                    "req_date",
+                    "req_seq_id",
+                    "gateway_merchant_id",
+                    "status",
+                    "failure_reason",
+                    "updated_at",
+                )
+            )
+            is_mock = False
+            request_values = {
+                "req_date": refund.req_date,
+                "req_seq_id": refund.req_seq_id,
+                "org_req_date": payment.req_date,
+                "org_req_seq_id": payment.req_seq_id,
+                "org_hf_seq_id": payment.gateway_trade_no,
+                "remark": refund.reason,
+            }
+        else:
+            raise ValidationError("退款单支付渠道不支持自动退款。")
+
+    if is_mock:
+        try:
+            result = get_provider_order_payment_gateway(channel).refund(
+                refund_no=refund_no,
+                amount=amount,
+            )
+        except Exception as exc:
+            ProviderOrderRefundOrder.objects.filter(
+                refund_no=refund_no,
+                status=ProviderOrderRefundOrder.Status.PROCESSING,
+            ).update(
+                status=ProviderOrderRefundOrder.Status.FAILED,
+                failure_reason=str(exc)[:1000],
+                updated_at=timezone.now(),
+            )
+            raise
+        return _complete_provider_order_refund(
+            refund_no,
+            gateway_refund_no=result.gateway_refund_no,
+            refunded_at=now,
+        )
+
+    gateway = get_huifu_payment_gateway()
+    if gateway.merchant_id != refund.gateway_merchant_id:
+        raise HuifuGatewayError("退款商户配置与原支付单不一致。")
+    fallback_hf_seq_id = refund.gateway_refund_no
+    if should_submit:
+        submitted = gateway.refund_payment(amount=amount, **request_values)
+        if submitted.ord_amt and _huifu_amount_to_cents(submitted.ord_amt) != amount:
+            raise HuifuGatewayError("退款受理金额与本地退款单不一致。")
+        fallback_hf_seq_id = submitted.gateway_refund_no
+        ProviderOrderRefundOrder.objects.filter(pk=refund.pk).update(
+            gateway_refund_no=submitted.gateway_refund_no,
+            gateway_status=submitted.trans_stat or "P",
+            gateway_response_code=submitted.response_code,
+            gateway_response_digest=submitted.response_digest,
+            updated_at=timezone.now(),
+        )
+
+    refund = ProviderOrderRefundOrder.objects.get(pk=refund.pk)
+    query = _query_provider_order_huifu_refund(
+        refund,
+        fallback_hf_seq_id=fallback_hf_seq_id,
+    )
+    return _apply_huifu_refund_query_result(
+        refund,
+        query,
+        fallback_hf_seq_id=fallback_hf_seq_id,
+        now=now,
+        raise_on_failure=True,
+    )
 
 
 def refresh_provider_review_metrics(provider) -> None:

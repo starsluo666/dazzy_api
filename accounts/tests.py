@@ -337,3 +337,50 @@ class AuthenticationApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(limited.status_code, 429)
+
+
+class AccountClosureApiTests(APITestCase):
+    password = "test-pass-123"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            phone="13800000999",
+            password=self.password,
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_account_without_unresolved_business_can_close(self):
+        response = self.client.post(
+            "/api/v1/auth/account/close/",
+            {"current_password": self.password},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_active)
+        self.assertEqual(self.user.account_status, User.AccountStatus.CLOSED)
+
+    def test_open_support_case_blocks_account_closure_with_actionable_reason(self):
+        from supportcases.models import SupportCase
+
+        SupportCase.objects.create(
+            reporter=self.user,
+            case_type=SupportCase.CaseType.CONSULTATION,
+            target_type=SupportCase.TargetType.GENERAL,
+            reason=SupportCase.Reason.ACCOUNT_ISSUE,
+            description="仍在处理中的账号问题",
+        )
+
+        response = self.client.post(
+            "/api/v1/auth/account/close/",
+            {"current_password": self.password},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("未结业务", str(response.data["business"]))
+        self.assertEqual(response.data["blocking_items"][0]["code"], "support_cases")
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_active)
+        self.assertEqual(self.user.account_status, User.AccountStatus.ACTIVE)

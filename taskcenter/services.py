@@ -29,13 +29,22 @@ class TaskExecutionOutcome:
     status: str
     result: dict = field(default_factory=dict)
     available_at: object | None = None
+    last_error: str = ""
 
 
 def task_dedupe_key(task_type: str, business_type: str, business_key: str) -> str:
     return f"{task_type}:{business_type}:{business_key}"
 
 
-def _register_task(*, task_type, business_type, business_key, scheduled_at, payload=None):
+def _register_task(
+    *,
+    task_type,
+    business_type,
+    business_key,
+    scheduled_at,
+    payload=None,
+    max_attempts=None,
+):
     dedupe_key = task_dedupe_key(task_type, business_type, business_key)
     task, created = ScheduledTask.objects.get_or_create(
         dedupe_key=dedupe_key,
@@ -46,6 +55,7 @@ def _register_task(*, task_type, business_type, business_key, scheduled_at, payl
             "payload": payload or {},
             "scheduled_at": scheduled_at,
             "available_at": scheduled_at,
+            **({"max_attempts": max_attempts} if max_attempts is not None else {}),
         },
     )
     if not created and task.status == ScheduledTask.Status.PENDING:
@@ -58,6 +68,9 @@ def _register_task(*, task_type, business_type, business_key, scheduled_at, payl
         if task.payload != next_payload:
             task.payload = next_payload
             changed_fields.append("payload")
+        if max_attempts is not None and task.max_attempts != max_attempts:
+            task.max_attempts = max_attempts
+            changed_fields.append("max_attempts")
         if changed_fields:
             task.save(update_fields=(*changed_fields, "updated_at"))
     return task, created
@@ -132,6 +145,18 @@ def register_provider_order_refund(refund):
             "refund_no": refund.refund_no,
             "order_no": refund.order.order_no,
         },
+        max_attempts=10,
+    )
+
+
+def register_provider_order_cancel_compensation(order):
+    return _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION,
+        business_type="provider_order",
+        business_key=order.order_no,
+        scheduled_at=timezone.now(),
+        payload={"order_no": order.order_no},
+        max_attempts=10,
     )
 
 
@@ -494,6 +519,7 @@ def _requiring_task_synchronization(queryset, *, task_type, deadline_field):
 def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     from backoffice.operation_settings import platform_operation_rules
     from orders.models import ProviderOrder
+    from orders.models import ProviderOrderPaymentOrder
     from orders.models import ProviderOrderRefundOrder
     from orders.models import ProviderOrderSettlement
     from orders.services import ensure_provider_order_settlement
@@ -625,6 +651,27 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
     for refund in refunds:
         _, created = register_provider_order_refund(refund)
         refund_task_created += int(created)
+    cancel_compensation_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION,
+        business_type="provider_order",
+        business_key=OuterRef("order_no"),
+    )
+    cancelled_payments = (
+        ProviderOrder.objects.filter(
+            status=ProviderOrder.Status.CANCELLED,
+            payment_order__status=ProviderOrderPaymentOrder.Status.PENDING_PAYMENT,
+        )
+        .exclude(payment_order__gateway_merchant_id="")
+        .exclude(payment_order__req_date="")
+        .exclude(payment_order__req_seq_id="")
+        .annotate(_has_cancel_compensation=Exists(cancel_compensation_task))
+        .filter(_has_cancel_compensation=False)
+        .order_by("id")[:batch_size]
+    )
+    cancel_compensation_created = 0
+    for order in cancelled_payments:
+        _, created = register_provider_order_cancel_compensation(order)
+        cancel_compensation_created += int(created)
     return {
         "payment_created": payment_created,
         "acceptance_created": acceptance_created,
@@ -633,6 +680,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
         "settlement_created": settlement_created,
         "settlement_task_created": settlement_task_created,
         "refund_task_created": refund_task_created,
+        "cancel_compensation_created": cancel_compensation_created,
     }
 
 
@@ -945,6 +993,7 @@ def _execute_provider_order_settlement(task, now):
 
 
 def _execute_provider_order_refund(task, now):
+    from orders.huifu import HuifuRefundTerminalError
     from orders.models import ProviderOrderRefundOrder
     from orders.services import process_provider_order_refund
 
@@ -954,15 +1003,91 @@ def _execute_provider_order_refund(task, now):
             status=ScheduledTask.Status.CANCELLED,
             result={"state": "missing", "refund_no": task.business_key},
         )
-    refund, changed = process_provider_order_refund(task.business_key, now=now)
+    try:
+        refund, changed = process_provider_order_refund(task.business_key, now=now)
+    except HuifuRefundTerminalError as exc:
+        refund.refresh_from_db()
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.FAILED,
+            result={
+                "state": refund.status,
+                "refund_no": refund.refund_no,
+                "order_no": refund.order.order_no,
+                "changed": False,
+            },
+            last_error=str(exc),
+        )
+    if refund.status == ProviderOrderRefundOrder.Status.PROCESSING:
+        if task.attempt_count >= task.max_attempts:
+            raise ValidationError(
+                "退款持续处于处理中，已停止自动轮询并转人工核对。"
+            )
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={
+                "state": refund.status,
+                "refund_no": refund.refund_no,
+                "order_no": refund.order.order_no,
+                "changed": changed,
+            },
+            available_at=now + timedelta(minutes=1),
+        )
+    task_status = (
+        ScheduledTask.Status.FAILED
+        if refund.status == ProviderOrderRefundOrder.Status.FAILED
+        else ScheduledTask.Status.SUCCEEDED
+    )
     return TaskExecutionOutcome(
-        status=ScheduledTask.Status.SUCCEEDED,
+        status=task_status,
         result={
             "state": refund.status,
             "refund_no": refund.refund_no,
             "order_no": refund.order.order_no,
             "changed": changed,
         },
+        last_error=(refund.failure_reason if task_status == ScheduledTask.Status.FAILED else ""),
+    )
+
+
+def _execute_provider_order_cancel_compensation(task, now):
+    from orders.services import process_provider_order_cancel_compensation
+
+    outcome = process_provider_order_cancel_compensation(task.business_key, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "processing":
+        if task.attempt_count >= task.max_attempts:
+            raise ValidationError(
+                "取消补偿持续处理中，已停止自动操作并转人工核对。"
+            )
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result=outcome,
+            available_at=now + timedelta(minutes=1),
+        )
+    if outcome["state"] == "refund_failed":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.FAILED,
+            result=outcome,
+            last_error="取消后的自动退款失败，请人工核对退款单。",
+        )
+    if outcome["state"] in (
+        "closed",
+        "refund_processing",
+        "refunded",
+    ):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result=outcome,
+        )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.CANCELLED,
+        result=outcome,
     )
 
 
@@ -1224,6 +1349,9 @@ TASK_HANDLERS = {
         _execute_provider_order_confirmation_timeout
     ),
     ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT: _execute_provider_order_settlement,
+    ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION: (
+        _execute_provider_order_cancel_compensation
+    ),
     ScheduledTask.Type.PROVIDER_ORDER_REFUND: _execute_provider_order_refund,
     ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY: (
         _execute_activity_publish_payment_expiry
@@ -1283,7 +1411,7 @@ def _finish_task(task_id: int, outcome: TaskExecutionOutcome, now):
             return task.status
         task.status = outcome.status
         task.result = outcome.result
-        task.last_error = ""
+        task.last_error = outcome.last_error
         if outcome.status == ScheduledTask.Status.PENDING:
             task.available_at = outcome.available_at or now
             task.started_at = None
@@ -1361,6 +1489,8 @@ def process_due_tasks(*, limit=100, task_types=None, now=None) -> dict:
                 result["cancelled"] += 1
             elif final_status == ScheduledTask.Status.PENDING:
                 result["rescheduled"] += 1
+            elif final_status == ScheduledTask.Status.FAILED:
+                result["failed"] += 1
         except Exception as exc:  # Celery must keep processing the remaining batch.
             final_status = _fail_task(task.id, exc, now)
             result["failed" if final_status == ScheduledTask.Status.FAILED else "retried"] += 1

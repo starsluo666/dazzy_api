@@ -72,8 +72,10 @@ def _recommended_providers(params, point, request):
     ).data
 
 
-def _recommended_activities(point):
+def _recommended_activities(params, point):
     activities = upcoming_public_activities()
+    if city_code := params.get("city_code"):
+        activities = activities.filter(city_code=city_code)
     if point:
         activities = activities.annotate(distance=Distance("meeting_point", point))
         activities = activities.order_by("distance", "starts_at", "id")
@@ -102,7 +104,7 @@ class HomeDiscoveryView(APIView):
         }
         loaders = {
             "card_assets": build_home_card_assets,
-            "recommended_activities": lambda: _recommended_activities(point),
+            "recommended_activities": lambda: _recommended_activities(params, point),
             "recommended_providers": lambda: _recommended_providers(params, point, request),
         }
         for section, loader in loaders.items():

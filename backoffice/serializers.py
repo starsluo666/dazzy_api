@@ -1174,7 +1174,10 @@ class ProviderOrderPaymentOrderSerializer(serializers.ModelSerializer):
             "city_code", "city_name", "channel", "channel_label", "status", "status_label",
             "service_fee_amount", "transport_fee_amount", "other_fee_amount",
             "discount_amount", "payable_amount", "gateway_trade_no", "expires_at",
-            "paid_at", "closed_at", "created_at", "updated_at",
+            "req_date", "req_seq_id", "gateway_last_query_status",
+            "gateway_last_queried_at", "gateway_close_status",
+            "gateway_close_response_code", "gateway_close_queried_at", "paid_at",
+            "closed_at", "created_at", "updated_at",
         )
 
 
@@ -1197,8 +1200,10 @@ class ProviderOrderRefundOrderSerializer(serializers.ModelSerializer):
             "service_name", "city_code", "city_name", "source_type", "source_type_label",
             "source_reference", "status", "status_label", "service_fee_refund_amount",
             "transport_fee_refund_amount", "other_fee_refund_amount", "refund_amount",
-            "gateway_refund_no", "reason", "operator_name", "requested_at", "refunded_at",
-            "failure_reason", "created_at", "updated_at",
+            "req_date", "req_seq_id", "gateway_refund_no", "gateway_status",
+            "gateway_response_code", "gateway_last_query_status",
+            "gateway_last_queried_at", "reason", "operator_name", "requested_at",
+            "refunded_at", "failure_reason", "created_at", "updated_at",
         )
 
 

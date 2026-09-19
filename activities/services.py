@@ -6,8 +6,10 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
+from accounts.account_closure import lock_active_user_for_business
 from backoffice.operation_settings import platform_operation_rules
 from config.geospatial import gcj02_to_wgs84
+from config.payment_capabilities import ensure_activity_payment_available
 from notifications.models import UserNotification
 from notifications.services import (
     create_activity_notification,
@@ -30,7 +32,10 @@ from .pricing import calculate_publish_service_fee
 from .serializers import STANDARD_REFUND_SNAPSHOT
 
 
+@transaction.atomic
 def create_activity_draft(*, organizer, validated_data) -> Activity:
+    ensure_activity_payment_available("activity_publish")
+    organizer = lock_active_user_for_business(organizer)
     category = validated_data.pop("category_slug")
     longitude = validated_data.pop("longitude")
     latitude = validated_data.pop("latitude")
@@ -163,6 +168,8 @@ def create_activity_report(*, activity_id, reporter, reason, description):
 
 @transaction.atomic
 def get_or_create_publish_order(*, activity_id: int, user):
+    ensure_activity_payment_available("activity_publish")
+    user = lock_active_user_for_business(user)
     activity = Activity.objects.select_for_update().filter(pk=activity_id, organizer=user).first()
     if not activity:
         raise NotFound("活动草稿不存在。")
@@ -394,6 +401,8 @@ def _validate_participation_eligibility(activity, user, now):
 
 @transaction.atomic
 def get_or_create_participation_order(*, activity_id: int, user, channel: str):
+    ensure_activity_payment_available("activity_participation")
+    user = lock_active_user_for_business(user)
     try:
         activity = Activity.objects.select_for_update().get(pk=activity_id)
     except Activity.DoesNotExist as exc:
