@@ -12,13 +12,25 @@ from rest_framework.views import APIView
 from backoffice.operation_settings import platform_operation_rules
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
+from config.payment_capabilities import ensure_activity_real_payment_available
+from orders.wechat_oauth import (
+    WechatOAuthConfigurationError,
+    build_payment_authorization,
+    get_official_account_openid,
+)
 
+from .huifu import (
+    confirm_activity_huifu_payment_status,
+    create_activity_huifu_payment_session,
+)
 from .models import (
     Activity,
     ActivityAfterSalesCase,
     ActivityCategory,
     ActivityParticipation,
+    ActivityParticipationPaymentOrder,
     ActivityParticipationRefundOrder,
+    ActivityPublishOrder,
 )
 from .selectors import upcoming_public_activities, with_participant_count
 from .services import (
@@ -329,6 +341,71 @@ class ActivityParticipationPaymentView(APIView):
         }})
 
 
+class ActivityParticipationPaymentAuthorizationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        order = ActivityParticipationPaymentOrder.objects.filter(
+            participation__activity_id=pk,
+            payer=request.user,
+            status=ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at", "-id").first()
+        if order is None:
+            raise ValidationError({"order": "活动报名支付单不存在或已失效。"})
+        ensure_activity_real_payment_available("activity_participation")
+        authorization = build_payment_authorization(
+            user_id=request.user.pk,
+            order_no=str(pk),
+            payment_kind="activity_participation",
+        )
+        return Response({"data": authorization})
+
+
+class ActivityParticipationPaymentSessionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
+        if not app_id:
+            raise WechatOAuthConfigurationError()
+        sub_openid = get_official_account_openid(
+            user_id=request.user.pk,
+            app_id=app_id,
+        )
+        result, created = create_activity_huifu_payment_session(
+            payment_kind="activity_participation",
+            activity_id=pk,
+            user_id=request.user.pk,
+            payment_scene="official_account",
+            sub_openid=sub_openid,
+        )
+        return Response(
+            {"data": {"invoke_type": "WECHAT_JSAPI", "pay_info": result.pay_info}},
+            status=201 if created else 200,
+        )
+
+
+class ActivityParticipationPaymentStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        result = confirm_activity_huifu_payment_status(
+            payment_kind="activity_participation",
+            activity_id=pk,
+            user_id=request.user.pk,
+        )
+        order = ActivityParticipationPaymentOrder.objects.filter(
+            participation__activity_id=pk,
+            payer=request.user,
+        ).order_by("-created_at", "-id").first()
+        return Response({"data": {
+            **result,
+            "payment_order": ActivityParticipationPaymentOrderSerializer(order).data,
+            "participation_status": order.participation.status,
+        }})
+
+
 class ActivityAfterSalesView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -392,6 +469,71 @@ class ActivityPublishPaymentView(APIView):
             raise ValidationError("模拟支付仅在本地环境开放。")
         order = simulate_publish_payment(activity_id=pk, user=request.user)
         return Response({"data": ActivityPublishOrderSerializer(order).data})
+
+
+class ActivityPublishPaymentAuthorizationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        order = ActivityPublishOrder.objects.filter(
+            activity_id=pk,
+            payer=request.user,
+            status=ActivityPublishOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at", "-id").first()
+        if order is None:
+            raise ValidationError({"order": "活动发布支付单不存在或已失效。"})
+        ensure_activity_real_payment_available("activity_publish")
+        authorization = build_payment_authorization(
+            user_id=request.user.pk,
+            order_no=str(pk),
+            payment_kind="activity_publish",
+        )
+        return Response({"data": authorization})
+
+
+class ActivityPublishPaymentSessionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
+        if not app_id:
+            raise WechatOAuthConfigurationError()
+        sub_openid = get_official_account_openid(
+            user_id=request.user.pk,
+            app_id=app_id,
+        )
+        result, created = create_activity_huifu_payment_session(
+            payment_kind="activity_publish",
+            activity_id=pk,
+            user_id=request.user.pk,
+            payment_scene="official_account",
+            sub_openid=sub_openid,
+        )
+        return Response(
+            {"data": {"invoke_type": "WECHAT_JSAPI", "pay_info": result.pay_info}},
+            status=201 if created else 200,
+        )
+
+
+class ActivityPublishPaymentStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        result = confirm_activity_huifu_payment_status(
+            payment_kind="activity_publish",
+            activity_id=pk,
+            user_id=request.user.pk,
+        )
+        order = ActivityPublishOrder.objects.filter(
+            activity_id=pk,
+            payer=request.user,
+        ).order_by("-created_at", "-id").first()
+        return Response({"data": {
+            **result,
+            "publish_order": ActivityPublishOrderSerializer(order).data,
+            "activity_status": order.activity.status,
+        }})
 
 
 class ActivityCopySourceView(APIView):

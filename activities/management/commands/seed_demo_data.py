@@ -9,6 +9,7 @@ from accounts.models import User
 from config.geospatial import gcj02_to_wgs84
 from mediafiles.models import MediaAsset
 from providers.models import (
+    ProviderCategoryGrant,
     ProviderLiveLocation,
     ProviderProfile,
     ProviderService,
@@ -26,6 +27,13 @@ PROVIDER_CATEGORIES = (
     ("桌游陪玩", "board-games"),
     ("商务陪同", "business"),
 )
+PROVIDER_PRICE_RANGES = {
+    "travel": (10_000, 50_000, 30_000, 300_000),
+    "billiards": (10_000, 30_000, 20_000, 150_000),
+    "mahjong": (10_000, 30_000, 20_000, 150_000),
+    "board-games": (10_000, 30_000, 15_000, 150_000),
+    "business": (15_000, 80_000, 50_000, 500_000),
+}
 ACTIVITY_CATEGORIES = (
     ("台球", "billiards"),
     ("麻将", "mahjong"),
@@ -63,9 +71,20 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         provider_categories = {}
         for sort_order, (name, slug) in enumerate(PROVIDER_CATEGORIES):
+            hourly_min, hourly_max, per_session_min, per_session_max = (
+                PROVIDER_PRICE_RANGES[slug]
+            )
             provider_categories[slug], _ = ServiceCategory.objects.update_or_create(
                 slug=slug,
-                defaults={"name": name, "sort_order": sort_order, "is_active": True},
+                defaults={
+                    "name": name,
+                    "sort_order": sort_order,
+                    "is_active": True,
+                    "hourly_min_price_amount": hourly_min,
+                    "hourly_max_price_amount": hourly_max,
+                    "per_session_min_price_amount": per_session_min,
+                    "per_session_max_price_amount": per_session_max,
+                },
             )
 
         activity_categories = {}
@@ -102,7 +121,11 @@ class Command(BaseCommand):
                 user=user,
                 defaults={
                     "status": ProviderProfile.Status.APPROVED,
+                    "onboarding_status": ProviderProfile.OnboardingStatus.APPROVED,
                     "identity_status": ProviderProfile.IdentityStatus.VERIFIED,
+                    "application_real_name": nickname,
+                    "application_birth_date": date(2000 + index, 4, 15),
+                    "display_name": nickname,
                     "bio": "认真生活，也认真陪你体验城市里的好时光。",
                     "lifestyle_photo": lifestyle_photo,
                     "service_city_code": "130400",
@@ -132,6 +155,11 @@ class Command(BaseCommand):
                 category=provider_categories[category_slug],
                 billing_type=ProviderService.BillingType.HOURLY,
                 defaults={"price_amount": int(price), "is_active": True},
+            )
+            ProviderCategoryGrant.objects.update_or_create(
+                provider=provider,
+                category=provider_categories[category_slug],
+                defaults={"is_active": True, "revoked_at": None},
             )
             for weekday in range(7):
                 ProviderWeeklyAvailability.objects.update_or_create(
@@ -171,7 +199,11 @@ class Command(BaseCommand):
             user=multi_user,
             defaults={
                 "status": ProviderProfile.Status.APPROVED,
+                "onboarding_status": ProviderProfile.OnboardingStatus.APPROVED,
                 "identity_status": ProviderProfile.IdentityStatus.VERIFIED,
+                "application_real_name": demo["nickname"],
+                "application_birth_date": date(1999, 8, 18),
+                "display_name": demo["nickname"],
                 "bio": "喜欢旅行、桌游与城市探索，可根据你的计划灵活选择服务。",
                 "lifestyle_photo": multi_lifestyle_photo,
                 "service_city_code": "130400",
@@ -209,6 +241,11 @@ class Command(BaseCommand):
                     "description": description,
                     "is_active": True,
                 },
+            )
+            ProviderCategoryGrant.objects.update_or_create(
+                provider=multi_provider,
+                category=provider_categories[category_slug],
+                defaults={"is_active": True, "revoked_at": None},
             )
         for weekday in range(7):
             for starts_at, ends_at in (("09:00", "12:00"), ("13:30", "20:00")):

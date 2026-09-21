@@ -23,17 +23,46 @@ class ServiceCategory(models.Model):
             MaxValueValidator(Decimal("100.00")),
         ],
     )
+    hourly_min_price_amount = models.PositiveBigIntegerField(
+        "按小时最低价格（分）", default=1, validators=[MinValueValidator(1)]
+    )
+    hourly_max_price_amount = models.PositiveBigIntegerField(
+        "按小时最高价格（分）", default=10_000_000, validators=[MinValueValidator(1)]
+    )
+    per_session_min_price_amount = models.PositiveBigIntegerField(
+        "按次最低价格（分）", default=1, validators=[MinValueValidator(1)]
+    )
+    per_session_max_price_amount = models.PositiveBigIntegerField(
+        "按次最高价格（分）", default=10_000_000, validators=[MinValueValidator(1)]
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "provider_service_category"
         ordering = ("sort_order", "id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(hourly_min_price_amount__lte=models.F("hourly_max_price_amount")),
+                name="provider_category_hourly_price_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    per_session_min_price_amount__lte=models.F("per_session_max_price_amount")
+                ),
+                name="provider_category_session_price_range",
+            ),
+        ]
         verbose_name = "达人服务分类"
         verbose_name_plural = verbose_name
 
     def __str__(self) -> str:
         return self.name
+
+    def price_range_for(self, billing_type: str) -> tuple[int, int]:
+        if billing_type == "hourly":
+            return self.hourly_min_price_amount, self.hourly_max_price_amount
+        return self.per_session_min_price_amount, self.per_session_max_price_amount
 
 
 class ProviderProfile(models.Model):
@@ -50,6 +79,12 @@ class ProviderProfile(models.Model):
         VERIFIED = "verified", "已认证"
         REJECTED = "rejected", "认证未通过"
 
+    class OnboardingStatus(models.TextChoices):
+        INCOMPLETE = "incomplete", "待完善"
+        PENDING_REVIEW = "pending_review", "待开通审核"
+        APPROVED = "approved", "已开通"
+        REJECTED = "rejected", "开通审核未通过"
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -57,6 +92,9 @@ class ProviderProfile(models.Model):
         verbose_name="用户",
     )
     status = models.CharField("审核状态", max_length=16, choices=Status, default=Status.DRAFT)
+    application_real_name = models.CharField("申请真实姓名", max_length=50, blank=True)
+    application_birth_date = models.DateField("申请出生日期", null=True, blank=True)
+    display_name = models.CharField("达人名称", max_length=30, blank=True)
     bio = models.TextField("个人简介", blank=True)
     lifestyle_photo = models.ForeignKey(
         "mediafiles.MediaAsset",
@@ -124,6 +162,23 @@ class ProviderProfile(models.Model):
     identity_submitted_at = models.DateTimeField("实名认证提交时间", null=True, blank=True)
     identity_reviewed_at = models.DateTimeField("实名认证审核时间", null=True, blank=True)
     identity_rejection_reason = models.CharField("实名认证驳回原因", max_length=500, blank=True)
+    onboarding_status = models.CharField(
+        "开通审核状态",
+        max_length=24,
+        choices=OnboardingStatus,
+        default=OnboardingStatus.INCOMPLETE,
+    )
+    onboarding_submitted_at = models.DateTimeField("开通审核提交时间", null=True, blank=True)
+    onboarding_reviewed_at = models.DateTimeField("开通审核时间", null=True, blank=True)
+    onboarding_reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_provider_onboardings",
+        null=True,
+        blank=True,
+        verbose_name="开通审核人",
+    )
+    onboarding_rejection_reason = models.CharField("开通审核驳回原因", max_length=500, blank=True)
     is_accepting_orders = models.BooleanField("已开启接单", default=False)
     admin_order_restricted = models.BooleanField("后台限制接单", default=False)
     admin_restriction_reason = models.CharField("后台限制原因", max_length=500, blank=True)
@@ -149,7 +204,8 @@ class ProviderProfile(models.Model):
     @property
     def is_profile_complete(self) -> bool:
         return bool(
-            self.bio.strip()
+            self.display_name.strip()
+            and self.bio.strip()
             and self.lifestyle_photo_id
             and self.service_city_code
             and self.service_city_name
@@ -158,6 +214,46 @@ class ProviderProfile(models.Model):
     @property
     def has_verified_identity(self) -> bool:
         return self.identity_status == self.IdentityStatus.VERIFIED
+
+    @property
+    def public_display_name(self) -> str:
+        return self.display_name.strip() or self.user.nickname
+
+
+class ProviderCategoryGrant(models.Model):
+    provider = models.ForeignKey(
+        ProviderProfile,
+        on_delete=models.CASCADE,
+        related_name="category_grants",
+        verbose_name="达人",
+    )
+    category = models.ForeignKey(
+        ServiceCategory,
+        on_delete=models.PROTECT,
+        related_name="provider_grants",
+        verbose_name="服务分类",
+    )
+    is_active = models.BooleanField("有效", default=True)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="granted_provider_categories",
+        null=True,
+        blank=True,
+        verbose_name="授权人",
+    )
+    granted_at = models.DateTimeField("授权时间", auto_now_add=True)
+    revoked_at = models.DateTimeField("撤销时间", null=True, blank=True)
+
+    class Meta:
+        db_table = "provider_category_grant"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("provider", "category"), name="uniq_provider_category_grant"
+            )
+        ]
+        verbose_name = "达人服务分类授权"
+        verbose_name_plural = verbose_name
 
 
 class ProviderLiveLocation(models.Model):
@@ -237,6 +333,127 @@ class ProviderService(models.Model):
 
     def __str__(self) -> str:
         return f"{self.provider} - {self.category}"
+
+
+class ProviderProfileRevision(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "待审核"
+        APPROVED = "approved", "已通过"
+        REJECTED = "rejected", "已驳回"
+
+    provider = models.ForeignKey(
+        ProviderProfile,
+        on_delete=models.CASCADE,
+        related_name="profile_revisions",
+        verbose_name="达人",
+    )
+    display_name = models.CharField("达人名称", max_length=30)
+    bio = models.TextField("个人简介")
+    lifestyle_photo = models.ForeignKey(
+        "mediafiles.MediaAsset",
+        on_delete=models.PROTECT,
+        related_name="provider_profile_revisions",
+        verbose_name="生活照",
+    )
+    service_city_code = models.CharField("服务城市编码", max_length=20)
+    service_city_name = models.CharField("服务城市", max_length=50)
+    max_service_radius_km = models.PositiveSmallIntegerField(
+        "最大服务半径（公里）",
+        default=10,
+        validators=[MinValueValidator(10), MaxValueValidator(70)],
+    )
+    status = models.CharField("审核状态", max_length=16, choices=Status, default=Status.PENDING)
+    submitted_at = models.DateTimeField("提交时间", auto_now_add=True)
+    reviewed_at = models.DateTimeField("审核时间", null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_provider_profile_revisions",
+        null=True,
+        blank=True,
+    )
+    rejection_reason = models.CharField("驳回原因", max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_profile_revision"
+        ordering = ("-submitted_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("provider",),
+                condition=models.Q(status="pending"),
+                name="uniq_pending_provider_profile_revision",
+            )
+        ]
+        verbose_name = "达人资料修订"
+        verbose_name_plural = verbose_name
+
+
+class ProviderServiceRevision(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "待审核"
+        APPROVED = "approved", "已通过"
+        REJECTED = "rejected", "已驳回"
+
+    class Action(models.TextChoices):
+        CREATE = "create", "新增"
+        UPDATE = "update", "修改"
+        REACTIVATE = "reactivate", "重新上架"
+
+    provider = models.ForeignKey(
+        ProviderProfile,
+        on_delete=models.CASCADE,
+        related_name="service_revisions",
+        verbose_name="达人",
+    )
+    service = models.ForeignKey(
+        ProviderService,
+        on_delete=models.SET_NULL,
+        related_name="revisions",
+        null=True,
+        blank=True,
+        verbose_name="原服务",
+    )
+    category = models.ForeignKey(
+        ServiceCategory,
+        on_delete=models.PROTECT,
+        related_name="provider_service_revisions",
+        verbose_name="分类",
+    )
+    action = models.CharField("变更类型", max_length=16, choices=Action)
+    billing_type = models.CharField("计费方式", max_length=16, choices=ProviderService.BillingType)
+    price_amount = models.PositiveBigIntegerField("价格（分）", validators=[MinValueValidator(1)])
+    estimated_duration_minutes = models.PositiveIntegerField(
+        "预计服务时长（分钟）", null=True, blank=True
+    )
+    description = models.TextField("服务说明", blank=True)
+    status = models.CharField("审核状态", max_length=16, choices=Status, default=Status.PENDING)
+    submitted_at = models.DateTimeField("提交时间", auto_now_add=True)
+    reviewed_at = models.DateTimeField("审核时间", null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_provider_service_revisions",
+        null=True,
+        blank=True,
+    )
+    rejection_reason = models.CharField("驳回原因", max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_service_revision"
+        ordering = ("-submitted_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("provider", "category", "billing_type"),
+                condition=models.Q(status="pending"),
+                name="uniq_pending_provider_service_revision",
+            )
+        ]
+        verbose_name = "达人服务修订"
+        verbose_name_plural = verbose_name
 
 
 class ProviderWeeklyAvailability(models.Model):

@@ -57,7 +57,9 @@ class ProviderOrderApiTests(TestCase):
         self.provider = ProviderProfile.objects.create(
             user=self.provider_user,
             status=ProviderProfile.Status.APPROVED,
+            onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
             identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            display_name="晓晓",
             is_accepting_orders=True,
             lifestyle_photo=lifestyle_photo,
             service_city_code="130400",

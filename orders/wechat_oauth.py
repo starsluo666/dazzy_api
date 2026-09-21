@@ -18,6 +18,11 @@ from .models import ProviderOrder
 WECHAT_OAUTH_STATE_SALT = "dazzy.payments.wechat-official-oauth"
 WECHAT_OAUTH_AUTHORIZE_URL = "https://open.weixin.qq.com/connect/oauth2/authorize"
 WECHAT_OAUTH_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
+PAYMENT_RETURN_TARGETS = {
+    "provider_order": ("/pages/booking/payment", "orderNo"),
+    "activity_publish": ("/pages/activities/publish-payment", "id"),
+    "activity_participation": ("/pages/activities/participation-payment", "id"),
+}
 
 
 class WechatOAuthConfigurationError(APIException):
@@ -80,14 +85,22 @@ def get_official_account_openid(*, user_id: int, app_id: str) -> str:
     )
 
 
-def build_payment_authorization(*, user_id: int, order_no: str) -> dict:
+def build_payment_authorization(
+    *, user_id: int, order_no: str, payment_kind: str = "provider_order"
+) -> dict:
     config = WechatOAuthConfig.from_settings()
     config.validate(require_secret=False)
+    if payment_kind not in PAYMENT_RETURN_TARGETS:
+        raise ValidationError({"authorization": "微信授权支付类型无效。"})
     openid = get_official_account_openid(user_id=user_id, app_id=config.app_id)
     if openid:
         return {"authorized": True, "authorize_url": ""}
     state = signing.dumps(
-        {"user_id": user_id, "order_no": order_no},
+        {
+            "user_id": user_id,
+            "order_no": order_no,
+            "payment_kind": payment_kind,
+        },
         key=settings.SECRET_KEY,
         salt=WECHAT_OAUTH_STATE_SALT,
         compress=True,
@@ -135,19 +148,58 @@ def _exchange_code(*, config: WechatOAuthConfig, code: str) -> tuple[str, str]:
     return openid, unionid
 
 
-def _h5_payment_return_url(*, base_url: str, order_no: str) -> str:
+def _h5_payment_return_url(
+    *, base_url: str, order_no: str, payment_kind: str = "provider_order"
+) -> str:
     parsed = urlsplit(base_url)
+    try:
+        return_path, identifier_name = PAYMENT_RETURN_TARGETS[payment_kind]
+    except KeyError as exc:
+        raise ValidationError({"authorization": "微信授权支付类型无效。"}) from exc
     if parsed.fragment:
-        fragment_path, separator, fragment_query = parsed.fragment.partition("?")
+        _fragment_path, separator, fragment_query = parsed.fragment.partition("?")
         params = dict(parse_qsl(fragment_query if separator else "", keep_blank_values=True))
-        params.update({"orderNo": order_no, "wechatAuthorized": "1"})
-        fragment = f"{fragment_path}?{urlencode(params)}"
+        params.update({identifier_name: order_no, "wechatAuthorized": "1"})
+        fragment = f"{return_path}?{urlencode(params)}"
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, fragment))
     params = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    params.update({"orderNo": order_no, "wechatAuthorized": "1"})
+    params.update({identifier_name: order_no, "wechatAuthorized": "1"})
     return urlunsplit(
         (parsed.scheme, parsed.netloc, parsed.path, urlencode(params), parsed.fragment)
     )
+
+
+def _payment_authorization_business_exists(
+    *, payment_kind: str, order_no: str, user_id: int
+) -> bool:
+    now = timezone.now()
+    if payment_kind == "provider_order":
+        return ProviderOrder.objects.filter(
+            order_no=order_no,
+            customer_id=user_id,
+            status=ProviderOrder.Status.PENDING_PAYMENT,
+            payment_expires_at__gt=now,
+        ).exists()
+    from activities.models import (
+        ActivityParticipationPaymentOrder,
+        ActivityPublishOrder,
+    )
+
+    if payment_kind == "activity_publish":
+        return ActivityPublishOrder.objects.filter(
+            activity_id=order_no,
+            payer_id=user_id,
+            status=ActivityPublishOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=now,
+        ).exists()
+    if payment_kind == "activity_participation":
+        return ActivityParticipationPaymentOrder.objects.filter(
+            participation__activity_id=order_no,
+            payer_id=user_id,
+            status=ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=now,
+        ).exists()
+    return False
 
 
 def complete_payment_authorization(*, code: str, state: str) -> str:
@@ -168,14 +220,13 @@ def complete_payment_authorization(*, code: str, state: str) -> str:
         raise ValidationError({"authorization": "微信授权状态格式无效。"})
     user_id = context.get("user_id")
     order_no = str(context.get("order_no", ""))
+    payment_kind = str(context.get("payment_kind", "provider_order"))
     user = User.objects.filter(pk=user_id, is_active=True).first()
-    order = ProviderOrder.objects.filter(
+    if user is None or not _payment_authorization_business_exists(
+        payment_kind=payment_kind,
         order_no=order_no,
-        customer_id=user_id,
-        status=ProviderOrder.Status.PENDING_PAYMENT,
-        payment_expires_at__gt=timezone.now(),
-    ).first()
-    if user is None or order is None:
+        user_id=user_id,
+    ):
         raise ValidationError({"authorization": "待支付订单不存在或已失效。"})
 
     openid, unionid = _exchange_code(config=config, code=code)
@@ -192,4 +243,8 @@ def complete_payment_authorization(*, code: str, state: str) -> str:
             )
     except IntegrityError as exc:
         raise ValidationError({"authorization": "该微信身份已绑定其他账号。"}) from exc
-    return _h5_payment_return_url(base_url=config.h5_payment_url, order_no=order_no)
+    return _h5_payment_return_url(
+        base_url=config.h5_payment_url,
+        order_no=order_no,
+        payment_kind=payment_kind,
+    )

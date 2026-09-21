@@ -38,7 +38,15 @@ from orders.models import (
     ProviderOrderSettlement,
 )
 from orders.services import create_provider_order_refund, refresh_provider_review_metrics
-from providers.models import ProviderLiveLocation, ProviderProfile
+from providers.models import (
+    ProviderCategoryGrant,
+    ProviderLiveLocation,
+    ProviderProfile,
+    ProviderProfileRevision,
+    ProviderService,
+    ProviderServiceRevision,
+    ServiceCategory,
+)
 from taskcenter.services import (
     cancel_provider_order_settlement,
     cancel_provider_order_confirmation_timeout,
@@ -494,7 +502,9 @@ def review_activity_report(*, case_no, action, result_note, actor, access, reque
 
 
 @transaction.atomic
-def review_provider_application(*, profile_id, decision, reason, actor, access, request):
+def review_provider_application(
+    *, profile_id, decision, reason, allowed_category_ids, actor, access, request
+):
     queryset = ProviderProfile.objects.select_for_update().select_related("user")
     if not access.all_data:
         queryset = queryset.filter(service_city_code__in=access.city_codes)
@@ -502,6 +512,17 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
     if profile.status != ProviderProfile.Status.PENDING:
         raise ValidationError("仅待审核申请可以执行审核。")
     before = {"status": profile.status, "rejection_reason": profile.rejection_reason}
+    categories = []
+    if decision == "approve":
+        categories = list(
+            ServiceCategory.objects.filter(
+                id__in=set(allowed_category_ids), is_active=True
+            ).order_by("id")
+        )
+        if len(categories) != len(set(allowed_category_ids)):
+            raise ValidationError(
+                {"allowed_category_ids": "所选分类中包含不存在或已停用的分类。"}
+            )
     profile.status = (
         ProviderProfile.Status.APPROVED
         if decision == "approve"
@@ -511,6 +532,22 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
     profile.rejection_reason = reason.strip() if decision == "reject" else ""
     if decision == "approve":
         profile.is_accepting_orders = False
+        now = timezone.now()
+        selected_ids = {category.id for category in categories}
+        ProviderCategoryGrant.objects.filter(provider=profile).exclude(
+            category_id__in=selected_ids
+        ).update(is_active=False, revoked_at=now)
+        for category in categories:
+            grant, _ = ProviderCategoryGrant.objects.get_or_create(
+                provider=profile,
+                category=category,
+                defaults={"granted_by": actor},
+            )
+            if not grant.is_active or grant.granted_by_id != actor.pk:
+                grant.is_active = True
+                grant.granted_by = actor
+                grant.revoked_at = None
+                grant.save(update_fields=("is_active", "granted_by", "revoked_at"))
     profile.save(
         update_fields=(
             "status",
@@ -528,7 +565,11 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
         target_type="provider_profile",
         target_id=str(profile.id),
         before=before,
-        after={"status": profile.status, "rejection_reason": profile.rejection_reason},
+        after={
+            "status": profile.status,
+            "rejection_reason": profile.rejection_reason,
+            "allowed_category_ids": [category.id for category in categories],
+        },
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
     )
@@ -548,6 +589,253 @@ def review_provider_application(*, profile_id, decision, reason, actor, access, 
     return profile
 
 
+def _validate_service_revision_for_approval(revision):
+    if not revision.category.is_active:
+        raise ValidationError({"decision": f"服务分类“{revision.category.name}”已停用。"})
+    if not ProviderCategoryGrant.objects.filter(
+        provider=revision.provider,
+        category=revision.category,
+        is_active=True,
+    ).exists():
+        raise ValidationError({"decision": f"达人已无“{revision.category.name}”分类权限。"})
+    minimum, maximum = revision.category.price_range_for(revision.billing_type)
+    if not minimum <= revision.price_amount <= maximum:
+        raise ValidationError(
+            {"decision": f"“{revision.category.name}”价格已不在当前允许区间内。"}
+        )
+
+
+def _apply_service_revision(revision, *, actor, now):
+    _validate_service_revision_for_approval(revision)
+    service = revision.service
+    if service is None:
+        service, _ = ProviderService.objects.update_or_create(
+            provider=revision.provider,
+            category=revision.category,
+            billing_type=revision.billing_type,
+            defaults={
+                "price_amount": revision.price_amount,
+                "estimated_duration_minutes": revision.estimated_duration_minutes,
+                "description": revision.description,
+                "is_active": True,
+            },
+        )
+        revision.service = service
+    else:
+        service.category = revision.category
+        service.billing_type = revision.billing_type
+        service.price_amount = revision.price_amount
+        service.estimated_duration_minutes = revision.estimated_duration_minutes
+        service.description = revision.description
+        service.is_active = True
+        service.save()
+    revision.status = ProviderServiceRevision.Status.APPROVED
+    revision.reviewed_at = now
+    revision.reviewed_by = actor
+    revision.rejection_reason = ""
+    revision.save(
+        update_fields=(
+            "service", "status", "reviewed_at", "reviewed_by",
+            "rejection_reason", "updated_at",
+        )
+    )
+    return service
+
+
+@transaction.atomic
+def review_provider_onboarding(*, profile_id, decision, reason, actor, access, request):
+    queryset = ProviderProfile.objects.select_for_update().select_related("user")
+    if not access.all_data:
+        queryset = queryset.filter(service_city_code__in=access.city_codes)
+    profile = get_object_or_404(queryset, id=profile_id)
+    if profile.onboarding_status != ProviderProfile.OnboardingStatus.PENDING_REVIEW:
+        raise ValidationError("仅待开通审核的达人可以执行该操作。")
+    profile_revision = profile.profile_revisions.select_for_update().filter(
+        status=ProviderProfileRevision.Status.PENDING
+    ).select_related("lifestyle_photo").first()
+    service_revisions = list(
+        profile.service_revisions.select_for_update(of=("self",)).filter(
+            status=ProviderServiceRevision.Status.PENDING
+        ).select_related("category", "service")
+    )
+    if not profile_revision or not service_revisions or profile.identity_status != ProviderProfile.IdentityStatus.PENDING:
+        raise ValidationError("达人提交资料不完整，暂不能完成开通审核。")
+    now = timezone.now()
+    before = {"onboarding_status": profile.onboarding_status}
+    if decision == "approve":
+        if (
+            profile.application_real_name
+            and profile.application_real_name.strip() != profile.identity_real_name.strip()
+        ):
+            raise ValidationError({"decision": "实名认证姓名与入驻申请姓名不一致。"})
+        profile.display_name = profile_revision.display_name
+        profile.bio = profile_revision.bio
+        profile.lifestyle_photo = profile_revision.lifestyle_photo
+        profile.service_city_code = profile_revision.service_city_code
+        profile.service_city_name = profile_revision.service_city_name
+        profile.max_service_radius_km = profile_revision.max_service_radius_km
+        profile.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+        profile.identity_rejection_reason = ""
+        profile.identity_reviewed_at = now
+        for service_revision in service_revisions:
+            _apply_service_revision(service_revision, actor=actor, now=now)
+        profile_revision.status = ProviderProfileRevision.Status.APPROVED
+        profile_revision.rejection_reason = ""
+        profile.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
+        profile.onboarding_rejection_reason = ""
+    else:
+        rejection = reason.strip()
+        profile.identity_status = ProviderProfile.IdentityStatus.REJECTED
+        profile.identity_rejection_reason = rejection
+        profile.identity_reviewed_at = now
+        profile_revision.status = ProviderProfileRevision.Status.REJECTED
+        profile_revision.rejection_reason = rejection
+        for service_revision in service_revisions:
+            service_revision.status = ProviderServiceRevision.Status.REJECTED
+            service_revision.rejection_reason = rejection
+            service_revision.reviewed_at = now
+            service_revision.reviewed_by = actor
+            service_revision.save(
+                update_fields=(
+                    "status", "rejection_reason", "reviewed_at", "reviewed_by", "updated_at"
+                )
+            )
+        profile.onboarding_status = ProviderProfile.OnboardingStatus.REJECTED
+        profile.onboarding_rejection_reason = rejection
+    profile_revision.reviewed_at = now
+    profile_revision.reviewed_by = actor
+    profile_revision.save(
+        update_fields=("status", "rejection_reason", "reviewed_at", "reviewed_by", "updated_at")
+    )
+    profile.onboarding_reviewed_at = now
+    profile.onboarding_reviewed_by = actor
+    profile.is_accepting_orders = False
+    profile.save()
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"provider.onboarding.{decision}",
+        target_type="provider_profile",
+        target_id=str(profile.id),
+        before=before,
+        after={"onboarding_status": profile.onboarding_status},
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    create_system_notification(
+        recipient=profile.user,
+        event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+        title="达人开通审核已通过" if decision == "approve" else "达人开通审核未通过",
+        content=(
+            "你的实名认证、达人资料和服务配置已通过审核，现在可以上线接单。"
+            if decision == "approve"
+            else f"达人开通审核未通过：{profile.onboarding_rejection_reason}。请修改后重新提交。"
+        ),
+        dedupe_key=f"provider-onboarding:{profile.pk}:{decision}:{now.isoformat()}",
+    )
+    return profile
+
+
+@transaction.atomic
+def review_provider_profile_revision(*, revision_id, decision, reason, actor, access, request):
+    queryset = ProviderProfileRevision.objects.select_for_update().select_related(
+        "provider__user", "lifestyle_photo"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
+    revision = get_object_or_404(queryset, id=revision_id)
+    if revision.status != ProviderProfileRevision.Status.PENDING:
+        raise ValidationError("仅待审核资料变更可以执行该操作。")
+    if revision.provider.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED:
+        raise ValidationError("首次开通资料必须通过综合开通审核处理。")
+    now = timezone.now()
+    if decision == "approve":
+        profile = revision.provider
+        for field in (
+            "display_name", "bio", "lifestyle_photo", "service_city_code",
+            "service_city_name", "max_service_radius_km",
+        ):
+            setattr(profile, field, getattr(revision, field))
+        profile.save()
+    revision.status = (
+        ProviderProfileRevision.Status.APPROVED
+        if decision == "approve" else ProviderProfileRevision.Status.REJECTED
+    )
+    revision.rejection_reason = reason.strip() if decision == "reject" else ""
+    revision.reviewed_at = now
+    revision.reviewed_by = actor
+    revision.save()
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"provider.profile_revision.{decision}",
+        target_type="provider_profile_revision",
+        target_id=str(revision.id),
+        before={"status": "pending"},
+        after={"status": revision.status, "rejection_reason": revision.rejection_reason},
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    create_system_notification(
+        recipient=revision.provider.user,
+        event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+        title="达人资料变更已通过" if decision == "approve" else "达人资料变更未通过",
+        content=(
+            "你提交的达人资料已审核通过并正式生效。"
+            if decision == "approve"
+            else f"达人资料变更未通过：{revision.rejection_reason}。"
+        ),
+        dedupe_key=f"provider-profile-revision:{revision.pk}:{decision}:{now.isoformat()}",
+    )
+    return revision
+
+
+@transaction.atomic
+def review_provider_service_revision(*, revision_id, decision, reason, actor, access, request):
+    queryset = ProviderServiceRevision.objects.select_for_update(of=("self",)).select_related(
+        "provider__user", "category", "service"
+    )
+    if not access.all_data:
+        queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
+    revision = get_object_or_404(queryset, id=revision_id)
+    if revision.status != ProviderServiceRevision.Status.PENDING:
+        raise ValidationError("仅待审核服务变更可以执行该操作。")
+    if revision.provider.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED:
+        raise ValidationError("首次服务配置必须通过综合开通审核处理。")
+    now = timezone.now()
+    if decision == "approve":
+        _apply_service_revision(revision, actor=actor, now=now)
+    else:
+        revision.status = ProviderServiceRevision.Status.REJECTED
+        revision.rejection_reason = reason.strip()
+        revision.reviewed_at = now
+        revision.reviewed_by = actor
+        revision.save()
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action=f"provider.service_revision.{decision}",
+        target_type="provider_service_revision",
+        target_id=str(revision.id),
+        before={"status": "pending"},
+        after={"status": revision.status, "rejection_reason": revision.rejection_reason},
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    create_system_notification(
+        recipient=revision.provider.user,
+        event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
+        title="达人服务变更已通过" if decision == "approve" else "达人服务变更未通过",
+        content=(
+            f"你提交的“{revision.category.name}”服务变更已审核通过并正式生效。"
+            if decision == "approve"
+            else f"“{revision.category.name}”服务变更未通过：{revision.rejection_reason}。"
+        ),
+        dedupe_key=f"provider-service-revision:{revision.pk}:{decision}:{now.isoformat()}",
+    )
+    return revision
+
+
 @transaction.atomic
 def review_provider_identity(*, profile_id, decision, reason, actor, access, request):
     queryset = ProviderProfile.objects.select_for_update().select_related("user")
@@ -556,6 +844,8 @@ def review_provider_identity(*, profile_id, decision, reason, actor, access, req
     profile = get_object_or_404(queryset, id=profile_id)
     if profile.status != ProviderProfile.Status.APPROVED:
         raise ValidationError("仅入驻申请已通过的达人可以审核实名认证。")
+    if profile.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED:
+        raise ValidationError("首次实名认证请在达人综合开通审核中处理。")
     if profile.identity_status != ProviderProfile.IdentityStatus.PENDING:
         raise ValidationError("仅认证中的实名认证可以执行审核。")
     before = {

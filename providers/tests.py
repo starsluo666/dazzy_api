@@ -1,5 +1,5 @@
 import uuid
-from datetime import time, timedelta
+from datetime import date, time, timedelta
 from decimal import Decimal
 
 from django.contrib.gis.geos import Point
@@ -14,21 +14,32 @@ from orders.models import ProviderOrder, ProviderOrderReview, ProviderOrderSettl
 
 from .models import (
     ProviderLiveLocation,
+    ProviderCategoryGrant,
     ProviderProfile,
+    ProviderProfileRevision,
     ProviderService,
+    ProviderServiceRevision,
     ProviderWeeklyAvailability,
     ServiceCategory,
 )
 
 
-def create_live_location(provider, *, received_at=None, accuracy_m="12.50"):
+def create_live_location(
+    provider,
+    *,
+    received_at=None,
+    accuracy_m="12.50",
+    source_longitude="116.4039810",
+    source_latitude="39.9150010",
+    position=None,
+):
     now = received_at or timezone.now()
     return ProviderLiveLocation.objects.create(
         provider=provider,
         session_id=uuid.uuid4(),
-        source_longitude=Decimal("116.4039810"),
-        source_latitude=Decimal("39.9150010"),
-        position=Point(116.397755, 39.913873, srid=4326),
+        source_longitude=Decimal(source_longitude),
+        source_latitude=Decimal(source_latitude),
+        position=position or Point(116.397755, 39.913873, srid=4326),
         accuracy_m=Decimal(accuracy_m),
         located_at=now,
         received_at=now,
@@ -45,6 +56,8 @@ def make_provider_eligible(provider):
             object_key=f"public/provider-photos/{provider.user.public_id}/{provider.pk}.webp",
         )
     provider.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+    provider.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
+    provider.display_name = provider.display_name or provider.user.nickname
     provider.bio = provider.bio or "这是已经完成实名认证和公开资料的达人简介。"
     provider.service_city_code = provider.service_city_code or "130400"
     provider.service_city_name = provider.service_city_name or "邯郸市"
@@ -136,6 +149,65 @@ class ProviderModelTests(TestCase):
         setting.save(update_fields=("location_timeout_minutes", "updated_at"))
         no_expiry_response = self.client.get("/api/v1/providers/")
         self.assertTrue(no_expiry_response.json()["data"]["items"][0]["is_online"])
+
+    def test_provider_list_excludes_provider_outside_own_service_radius(self):
+        category = ServiceCategory.objects.create(name="桌游陪玩", slug="radius-filter")
+        nearby_user = User.objects.create_user(
+            phone="13800000031", password="test-password", nickname="附近达人"
+        )
+        nearby = ProviderProfile.objects.create(
+            user=nearby_user,
+            status=ProviderProfile.Status.APPROVED,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+            max_service_radius_km=10,
+        )
+        make_provider_eligible(nearby)
+        create_live_location(
+            nearby,
+            source_longitude="114.5240070",
+            source_latitude="36.6074460",
+            position=Point(114.518, 36.607, srid=4326),
+        )
+        ProviderService.objects.create(
+            provider=nearby,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=15800,
+        )
+
+        distant_user = User.objects.create_user(
+            phone="13800000032", password="test-password", nickname="远方达人"
+        )
+        distant = ProviderProfile.objects.create(
+            user=distant_user,
+            status=ProviderProfile.Status.APPROVED,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+            max_service_radius_km=70,
+        )
+        make_provider_eligible(distant)
+        create_live_location(distant)
+        ProviderService.objects.create(
+            provider=distant,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=16800,
+        )
+
+        response = self.client.get(
+            "/api/v1/providers/",
+            {
+                "city_code": "130400",
+                "longitude": "114.5240070",
+                "latitude": "36.6074460",
+                "ordering": "distance",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["data"]["items"]
+        self.assertEqual([item["nickname"] for item in items], ["附近达人"])
 
     def test_provider_list_supports_advanced_filters(self):
         user = User.objects.create_user(
@@ -365,6 +437,15 @@ class ProviderSelfManagementTests(TestCase):
         draft = self.client.patch(
             "/api/v1/providers/me/application/",
             {
+                "application_real_name": "张小雨",
+                "application_birth_date": "1998-06-18",
+                "lifestyle_photo_id": str(MediaAsset.objects.create(
+                    owner=self.user,
+                    scope=MediaAsset.Scope.PUBLIC,
+                    category=MediaAsset.Category.PROVIDER_PHOTO,
+                    status=MediaAsset.Status.UPLOADED,
+                    object_key=f"public/provider-photos/{self.user.public_id}/application.webp",
+                ).id),
                 "bio": "我熟悉本地路线，也喜欢摄影和旅行。",
                 "service_city_code": "110100",
                 "service_city_name": "北京市",
@@ -392,7 +473,7 @@ class ProviderSelfManagementTests(TestCase):
         )
         self.assertEqual(locked.status_code, 400)
 
-    def test_provider_application_does_not_require_lifestyle_photo_or_identity(self):
+    def test_provider_application_requires_real_name_birth_date_and_lifestyle_photo(self):
         self.client.patch(
             "/api/v1/providers/me/application/",
             {
@@ -409,8 +490,8 @@ class ProviderSelfManagementTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(submitted.status_code, 200)
-        self.assertEqual(submitted.json()["data"]["status"], ProviderProfile.Status.PENDING)
+        self.assertEqual(submitted.status_code, 400)
+        self.assertIn("真实姓名", str(submitted.data))
 
     def test_provider_profile_rejects_another_users_lifestyle_photo(self):
         ProviderProfile.objects.create(user=self.user, status=ProviderProfile.Status.APPROVED)
@@ -488,7 +569,9 @@ class ProviderSelfManagementTests(TestCase):
             status=MediaAsset.Status.UPLOADED,
             object_key=f"public/provider-photos/{self.user.public_id}/unverified.webp",
         )
-        profile.save(update_fields=("lifestyle_photo", "updated_at"))
+        profile.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
+        profile.display_name = self.user.nickname
+        profile.save(update_fields=("lifestyle_photo", "onboarding_status", "display_name", "updated_at"))
         category = ServiceCategory.objects.create(
             name="未实名接单测试",
             slug="unverified-online",
@@ -531,8 +614,13 @@ class ProviderSelfManagementTests(TestCase):
         self.assertEqual(too_large.status_code, 400)
 
     def test_approved_provider_can_manage_own_services(self):
-        ProviderProfile.objects.create(user=self.user, status=ProviderProfile.Status.APPROVED)
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+        )
         category = ServiceCategory.objects.create(name="城市漫游", slug="city-walk-manage")
+        ProviderCategoryGrant.objects.create(provider=profile, category=category)
         created = self.client.post(
             "/api/v1/providers/me/services/",
             {
@@ -546,19 +634,118 @@ class ProviderSelfManagementTests(TestCase):
             format="json",
         )
         self.assertEqual(created.status_code, 201)
-        service_id = created.json()["data"]["id"]
+        self.assertIsNone(created.json()["data"]["id"])
+        self.assertEqual(created.json()["data"]["review_status"], "pending")
+        self.assertFalse(ProviderService.objects.filter(provider=profile).exists())
+        ProviderServiceRevision.objects.filter(provider=profile).update(
+            status=ProviderServiceRevision.Status.REJECTED
+        )
+        service = ProviderService.objects.create(
+            provider=profile,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=12800,
+        )
 
         updated = self.client.patch(
-            f"/api/v1/providers/me/services/{service_id}/",
+            f"/api/v1/providers/me/services/{service.id}/",
             {"price_amount": 15800},
             format="json",
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["data"]["price_amount"], 15800)
 
-        disabled = self.client.delete(f"/api/v1/providers/me/services/{service_id}/")
+        self.assertEqual(updated.json()["data"]["review_status"], "pending")
+        service.refresh_from_db()
+        self.assertEqual(service.price_amount, 12800)
+        disabled = self.client.delete(f"/api/v1/providers/me/services/{service.id}/")
         self.assertEqual(disabled.status_code, 204)
-        self.assertFalse(ProviderService.objects.get(id=service_id).is_active)
+        self.assertFalse(ProviderService.objects.get(id=service.id).is_active)
+
+    def test_service_submission_requires_grant_and_enforces_billing_price_range(self):
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+        )
+        category = ServiceCategory.objects.create(
+            name="限价服务",
+            slug="bounded-price-service",
+            hourly_min_price_amount=10000,
+            hourly_max_price_amount=20000,
+            per_session_min_price_amount=30000,
+            per_session_max_price_amount=50000,
+        )
+        payload = {
+            "category_id": category.id,
+            "billing_type": ProviderService.BillingType.HOURLY,
+            "price_amount": 15000,
+            "estimated_duration_minutes": 120,
+            "description": "价格区间测试服务",
+        }
+
+        no_grant = self.client.post("/api/v1/providers/me/services/", payload, format="json")
+        self.assertEqual(no_grant.status_code, 400)
+        ProviderCategoryGrant.objects.create(provider=profile, category=category)
+        below_range = self.client.post(
+            "/api/v1/providers/me/services/",
+            {**payload, "price_amount": 9999},
+            format="json",
+        )
+        accepted = self.client.post(
+            "/api/v1/providers/me/services/",
+            {**payload, "price_amount": 10000},
+            format="json",
+        )
+
+        self.assertEqual(below_range.status_code, 400)
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(accepted.json()["data"]["review_status"], "pending")
+
+    def test_profile_change_stays_pending_without_changing_public_profile(self):
+        photo = MediaAsset.objects.create(
+            owner=self.user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{self.user.public_id}/profile-review.webp",
+        )
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+            display_name="旧达人名",
+            bio="这是当前已经审核通过并公开展示的达人简介。",
+            lifestyle_photo=photo,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+
+        response = self.client.patch(
+            "/api/v1/providers/me/profile/",
+            {
+                "display_name": "新达人名",
+                "bio": "这是等待后台审核通过后才能生效的新达人简介。",
+                "lifestyle_photo_id": str(photo.id),
+                "service_city_code": "110100",
+                "service_city_name": "北京市",
+                "max_service_radius_km": 20,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["review_status"], "pending")
+        profile.refresh_from_db()
+        self.assertEqual(profile.display_name, "旧达人名")
+        self.assertEqual(profile.service_city_name, "邯郸市")
+        self.assertTrue(
+            ProviderProfileRevision.objects.filter(
+                provider=profile,
+                status=ProviderProfileRevision.Status.PENDING,
+                display_name="新达人名",
+            ).exists()
+        )
 
     def test_unapproved_user_cannot_manage_services(self):
         ProviderProfile.objects.create(user=self.user, status=ProviderProfile.Status.PENDING)
@@ -655,9 +842,9 @@ class ProviderSelfManagementTests(TestCase):
         started = self.client.post(
             "/api/v1/providers/me/online/start/",
             {
-                "longitude": "114.5389610",
-                "latitude": "36.6256570",
-                "accuracy_m": "18.50",
+                "longitude": "114.538961012345",
+                "latitude": "36.625657049876",
+                "accuracy_m": "18.5051",
             },
             format="json",
         )
@@ -667,6 +854,8 @@ class ProviderSelfManagementTests(TestCase):
         provider.refresh_from_db()
         self.assertTrue(provider.is_accepting_orders)
         self.assertEqual(provider.live_location.source_longitude, Decimal("114.5389610"))
+        self.assertEqual(provider.live_location.source_latitude, Decimal("36.6256570"))
+        self.assertEqual(provider.live_location.accuracy_m, Decimal("18.51"))
 
         workbench = self.client.get("/api/v1/providers/me/workbench/")
         self.assertEqual(workbench.status_code, 200)
@@ -685,16 +874,18 @@ class ProviderSelfManagementTests(TestCase):
             "/api/v1/providers/me/online/location/",
             {
                 "session_id": session_id,
-                "longitude": "114.5399610",
-                "latitude": "36.6266570",
-                "accuracy_m": "15.00",
+                "longitude": "114.539961056789",
+                "latitude": "36.626657043210",
+                "accuracy_m": "15.0049",
             },
             format="json",
         )
         self.assertEqual(updated.status_code, 200)
         self.assertTrue(updated.json()["data"]["is_online"])
         provider.live_location.refresh_from_db()
-        self.assertEqual(provider.live_location.source_longitude, Decimal("114.5399610"))
+        self.assertEqual(provider.live_location.source_longitude, Decimal("114.5399611"))
+        self.assertEqual(provider.live_location.source_latitude, Decimal("36.6266570"))
+        self.assertEqual(provider.live_location.accuracy_m, Decimal("15.00"))
 
         stopped = self.client.post("/api/v1/providers/me/online/stop/", {}, format="json")
         self.assertEqual(stopped.status_code, 200)

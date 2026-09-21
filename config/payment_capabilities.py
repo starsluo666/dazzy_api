@@ -42,8 +42,12 @@ def payment_capabilities() -> dict[str, object]:
                 "reason": "" if mock_available else "活动发布真实支付尚未开放。",
             },
             "real": {
-                "available": False,
-                "reason": "活动发布真实支付尚未开放。",
+                "available": official_account_available,
+                "reason": (
+                    ""
+                    if official_account_available
+                    else "活动发布真实支付尚未开放。"
+                ),
             },
         },
         "activity_participation": {
@@ -52,8 +56,12 @@ def payment_capabilities() -> dict[str, object]:
                 "reason": "" if mock_available else "活动报名真实支付尚未开放。",
             },
             "real": {
-                "available": False,
-                "reason": "活动报名真实支付尚未开放。",
+                "available": official_account_available,
+                "reason": (
+                    ""
+                    if official_account_available
+                    else "活动报名真实支付尚未开放。"
+                ),
             },
         },
     }
@@ -71,3 +79,10 @@ def ensure_activity_payment_available(capability: str) -> None:
     if item["mock"]["available"] or item["real"]["available"]:
         return
     raise ValidationError({"payment": item["real"]["reason"]})
+
+
+def ensure_activity_real_payment_available(capability: str) -> None:
+    item = payment_capabilities()[capability]["real"]
+    if item["available"]:
+        return
+    raise ValidationError({"payment": item["reason"]})

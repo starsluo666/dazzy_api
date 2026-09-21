@@ -1,6 +1,5 @@
 from datetime import date, time, timedelta
 
-from django.contrib.gis.db.models.functions import Distance
 from django.db import transaction
 from django.db.models import BooleanField, Case, Count, F, Min, Q, Sum, Value, When
 from django.db.models.functions import TruncDate
@@ -18,13 +17,15 @@ from config.geospatial import gcj02_to_wgs84
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrder, ProviderOrderReview, ProviderOrderSettlement
 
-from .selectors import public_providers
+from .selectors import public_providers, within_service_radius
 from .availability import _blocking_orders, _local_datetime, build_availability
 from .models import (
     ProviderDateAvailability,
     ProviderDateClosure,
     ProviderProfile,
+    ProviderProfileRevision,
     ProviderService,
+    ProviderServiceRevision,
     ProviderWeeklyAvailability,
     ServiceCategory,
 )
@@ -56,12 +57,15 @@ from .presence import (
 )
 from .services import (
     create_provider_schedule_periods,
+    disable_provider_service,
     save_provider_application,
     save_provider_identity,
     start_provider_online,
     stop_provider_online,
     submit_provider_application,
     submit_provider_identity,
+    submit_provider_profile_revision,
+    submit_provider_service_revision,
     update_provider_live_location,
     provider_profile_blockers,
 )
@@ -111,7 +115,8 @@ class ProviderListView(APIView):
             queryset = queryset.filter(service_city_code=city_code)
         if keyword := params.get("keyword"):
             queryset = queryset.filter(
-                Q(user__nickname__icontains=keyword)
+                Q(display_name__icontains=keyword)
+                | Q(user__nickname__icontains=keyword)
                 | Q(bio__icontains=keyword)
                 | Q(services__category__name__icontains=keyword)
             )
@@ -124,7 +129,7 @@ class ProviderListView(APIView):
 
         if "longitude" in params:
             point = gcj02_to_wgs84(params["longitude"], params["latitude"])
-            queryset = queryset.annotate(distance=Distance("live_location__position", point))
+            queryset = within_service_radius(queryset, point)
 
         ordering = params["ordering"]
         if ordering == "distance":
@@ -243,11 +248,19 @@ class ProviderAvailabilityView(APIView):
 
 
 class ServiceCategoryListView(APIView):
-    authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
         categories = ServiceCategory.objects.filter(is_active=True).order_by("sort_order", "id")
+        if request.user.is_authenticated:
+            profile = ProviderProfile.objects.filter(
+                user=request.user, status=ProviderProfile.Status.APPROVED
+            ).first()
+            if profile:
+                categories = categories.filter(
+                    provider_grants__provider=profile,
+                    provider_grants__is_active=True,
+                )
         return Response({"data": {"items": ServiceCategorySerializer(categories, many=True).data}})
 
 
@@ -256,7 +269,10 @@ class CurrentProviderApplicationView(APIView):
 
     def get(self, request):
         profile = ProviderProfile.objects.filter(user=request.user).first()
-        return Response({"data": ProviderApplicationSerializer(profile).data if profile else None})
+        return Response({
+            "data": ProviderApplicationSerializer(profile, context={"request": request}).data
+            if profile else None
+        })
 
     def patch(self, request):
         current = ProviderProfile.objects.filter(user=request.user).first()
@@ -265,7 +281,9 @@ class CurrentProviderApplicationView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         profile = save_provider_application(user=request.user, data=serializer.validated_data)
-        return Response({"data": ProviderApplicationSerializer(profile).data})
+        return Response({
+            "data": ProviderApplicationSerializer(profile, context={"request": request}).data
+        })
 
 
 class CurrentProviderApplicationSubmitView(APIView):
@@ -275,7 +293,9 @@ class CurrentProviderApplicationSubmitView(APIView):
         serializer = ProviderApplicationSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = submit_provider_application(user=request.user)
-        return Response({"data": ProviderApplicationSerializer(profile).data})
+        return Response({
+            "data": ProviderApplicationSerializer(profile, context={"request": request}).data
+        })
 
 
 class CurrentProviderProfileView(APIView):
@@ -283,8 +303,16 @@ class CurrentProviderProfileView(APIView):
 
     def get(self, request):
         profile = current_approved_provider(request)
+        revision = profile.profile_revisions.filter(
+            status__in=(
+                ProviderProfileRevision.Status.PENDING,
+                ProviderProfileRevision.Status.REJECTED,
+            )
+        ).select_related("lifestyle_photo").first()
         return Response(
-            {"data": ProviderProfileManageSerializer(profile, context={"request": request}).data}
+            {"data": ProviderProfileManageSerializer(
+                revision or profile, context={"request": request}
+            ).data}
         )
 
     def patch(self, request):
@@ -293,8 +321,14 @@ class CurrentProviderProfileView(APIView):
             profile, data=request.data, partial=True, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response({"data": serializer.data})
+        revision = submit_provider_profile_revision(
+            provider=profile, data=dict(serializer.validated_data)
+        )
+        return Response({
+            "data": ProviderProfileManageSerializer(
+                revision, context={"request": request}
+            ).data
+        })
 
 
 class CurrentProviderIdentityView(APIView):
@@ -332,6 +366,32 @@ class CurrentProviderIdentitySubmitView(APIView):
         )
 
 
+def _managed_service_item(*, service=None, revision=None):
+    source = revision or service
+    category = source.category
+    return {
+        "id": service.id if service else None,
+        "revision_id": revision.id if revision else None,
+        "category_id": category.id,
+        "category": category.name,
+        "category_slug": category.slug,
+        "billing_type": source.billing_type,
+        "price_amount": source.price_amount,
+        "estimated_duration_minutes": source.estimated_duration_minutes,
+        "description": source.description,
+        "is_active": service.is_active if service else False,
+        "review_status": revision.status if revision else "approved",
+        "review_action": revision.action if revision else "",
+        "review_rejection_reason": revision.rejection_reason if revision else "",
+        "hourly_min_price_amount": category.hourly_min_price_amount,
+        "hourly_max_price_amount": category.hourly_max_price_amount,
+        "per_session_min_price_amount": category.per_session_min_price_amount,
+        "per_session_max_price_amount": category.per_session_max_price_amount,
+        "created_at": source.created_at,
+        "updated_at": source.updated_at,
+    }
+
+
 class CurrentProviderServiceListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -342,18 +402,39 @@ class CurrentProviderServiceListCreateView(APIView):
         return profile
 
     def get(self, request):
-        services = self.provider(request).services.select_related("category").order_by("id")
-        return Response(
-            {"data": {"items": ProviderServiceManageSerializer(services, many=True).data}}
+        provider = self.provider(request)
+        services = list(provider.services.select_related("category").order_by("id"))
+        revisions = list(
+            provider.service_revisions.filter(
+                status__in=(
+                    ProviderServiceRevision.Status.PENDING,
+                    ProviderServiceRevision.Status.REJECTED,
+                )
+            ).select_related("category", "service").order_by("-submitted_at", "-id")
         )
+        latest = {}
+        for revision in revisions:
+            key = revision.service_id or (revision.category_id, revision.billing_type)
+            latest.setdefault(key, revision)
+        items = []
+        for service in services:
+            items.append(_managed_service_item(service=service, revision=latest.pop(service.id, None)))
+        for revision in latest.values():
+            if revision.service_id is None:
+                items.append(_managed_service_item(revision=revision))
+        return Response({"data": {"items": items}})
 
     def post(self, request):
         provider = self.provider(request)
-        serializer = ProviderServiceManageSerializer(data=request.data)
+        serializer = ProviderServiceManageSerializer(
+            data=request.data, context={"provider": provider}
+        )
         serializer.is_valid(raise_exception=True)
-        service = serializer.save(provider=provider)
+        revision = submit_provider_service_revision(
+            provider=provider, data=dict(serializer.validated_data)
+        )
         return Response(
-            {"data": ProviderServiceManageSerializer(service).data}, status=status.HTTP_201_CREATED
+            {"data": _managed_service_item(revision=revision)}, status=status.HTTP_201_CREATED
         )
 
 
@@ -370,15 +451,23 @@ class CurrentProviderServiceDetailView(APIView):
 
     def patch(self, request, service_id):
         service = self.get_object(request, service_id)
-        serializer = ProviderServiceManageSerializer(service, data=request.data, partial=True)
+        serializer = ProviderServiceManageSerializer(
+            service,
+            data=request.data,
+            partial=True,
+            context={"provider": service.provider},
+        )
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response({"data": serializer.data})
+        revision = submit_provider_service_revision(
+            provider=service.provider,
+            service=service,
+            data=dict(serializer.validated_data),
+        )
+        return Response({"data": _managed_service_item(service=service, revision=revision)})
 
     def delete(self, request, service_id):
         service = self.get_object(request, service_id)
-        service.is_active = False
-        service.save(update_fields=("is_active", "updated_at"))
+        disable_provider_service(provider=service.provider, service=service)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -394,6 +483,10 @@ class CurrentProviderWorkbenchView(APIView):
 
     def get(self, request):
         provider = current_approved_provider(request)
+        latest_profile_revision = provider.profile_revisions.order_by("-submitted_at", "-id").first()
+        pending_service_revision_count = provider.service_revisions.filter(
+            status=ProviderServiceRevision.Status.PENDING
+        ).count()
         location = get_provider_live_location(provider)
         today = timezone.localdate()
         day_start = _local_datetime(today, time.min)
@@ -486,7 +579,7 @@ class CurrentProviderWorkbenchView(APIView):
         return Response(
             {
                 "data": {
-                    "nickname": provider.user.nickname,
+                    "nickname": provider.public_display_name,
                     "avatar_url": build_media_url(provider.user.avatar_object_key),
                     "is_accepting_orders": provider.is_accepting_orders,
                     "is_online": provider_is_online(provider),
@@ -497,6 +590,13 @@ class CurrentProviderWorkbenchView(APIView):
                     "admin_restriction_reason": provider.admin_restriction_reason,
                     "identity_status": provider.identity_status,
                     "identity_status_label": provider.get_identity_status_display(),
+                    "onboarding_status": provider.onboarding_status,
+                    "onboarding_status_label": provider.get_onboarding_status_display(),
+                    "onboarding_rejection_reason": provider.onboarding_rejection_reason,
+                    "profile_review_status": (
+                        latest_profile_revision.status if latest_profile_revision else "not_submitted"
+                    ),
+                    "pending_service_revision_count": pending_service_revision_count,
                     "is_profile_complete": provider.is_profile_complete,
                     "can_accept_orders": not provider_profile_blockers(provider),
                     "onboarding_blockers": provider_profile_blockers(provider),

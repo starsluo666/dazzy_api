@@ -130,7 +130,7 @@ class ProviderOrderListCreateView(APIView):
                 customer=customer,
                 provider=provider,
                 service=service,
-                provider_name_snapshot=provider.user.nickname,
+                provider_name_snapshot=provider.public_display_name,
                 service_name_snapshot=service.category.name,
                 billing_type_snapshot=service.billing_type,
                 unit_price_amount=service.price_amount,

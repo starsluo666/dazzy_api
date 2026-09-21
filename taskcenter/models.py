@@ -39,9 +39,21 @@ class ScheduledTask(models.Model):
             "activity_participation_payment_expiry",
             "活动报名支付超时",
         )
+        ACTIVITY_PUBLISH_CANCEL_COMPENSATION = (
+            "activity_publish_cancel_compensation",
+            "活动发布取消支付补偿",
+        )
+        ACTIVITY_PARTICIPATION_CANCEL_COMPENSATION = (
+            "activity_participation_cancel_compensation",
+            "活动报名取消支付补偿",
+        )
         ACTIVITY_PARTICIPATION_REFUND = (
             "activity_participation_refund",
             "活动报名退款",
+        )
+        ACTIVITY_PUBLISH_REFUND = (
+            "activity_publish_refund",
+            "活动发布退款",
         )
         ACTIVITY_FORMATION_DEADLINE = (
             "activity_formation_deadline",

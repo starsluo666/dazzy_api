@@ -38,6 +38,7 @@ def online_provider_query(now=None) -> Q:
     rules = operation_rules()
     query = Q(
         status=ProviderProfile.Status.APPROVED,
+        onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
         identity_status=ProviderProfile.IdentityStatus.VERIFIED,
         lifestyle_photo__isnull=False,
         is_accepting_orders=True,
@@ -64,6 +65,7 @@ def get_provider_live_location(provider: ProviderProfile) -> ProviderLiveLocatio
 def provider_is_online(provider: ProviderProfile, now=None) -> bool:
     if (
         provider.status != ProviderProfile.Status.APPROVED
+        or provider.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED
         or not provider.has_verified_identity
         or not provider.is_profile_complete
         or not provider.is_accepting_orders

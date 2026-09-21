@@ -13,6 +13,7 @@ from accounts.models import User
 from activities.models import (
     Activity,
     ActivityCategory,
+    ActivityHuifuPaymentOrder,
     ActivityParticipation,
     ActivityParticipationPaymentOrder,
     ActivityParticipationRefundOrder,
@@ -1224,6 +1225,26 @@ class ActivityTaskCenterTests(TestCase):
             pricing_snapshot={"platform_service_fee_rate": "0.10"},
             expires_at=now + timedelta(minutes=30),
         )
+        cancelled_publish_order = ActivityPublishOrder.objects.create(
+            order_no="TASK-ACTIVITY-PUBLISH-CANCELLED",
+            activity=activity,
+            payer=self.organizer,
+            aa_principal_amount=4800,
+            platform_service_fee_amount=480,
+            payable_amount=5280,
+            pricing_snapshot={"platform_service_fee_rate": "0.10"},
+            status=ActivityPublishOrder.Status.CANCELLED,
+            expires_at=now - timedelta(minutes=1),
+            closed_at=now,
+        )
+        ActivityHuifuPaymentOrder.objects.create(
+            publish_order=cancelled_publish_order,
+            preorder_status=ActivityHuifuPaymentOrder.PreorderStatus.READY,
+            gateway_merchant_id="6666000000000000",
+            req_date="20260919",
+            req_seq_id=cancelled_publish_order.order_no,
+            trade_type="T_JSAPI",
+        )
         participation = self.add_paid_participant(activity, now=now)
         payment = participation.payment_orders.get()
         refund = ActivityParticipationRefundOrder.objects.create(
@@ -1245,6 +1266,7 @@ class ActivityTaskCenterTests(TestCase):
         second = synchronize_activity_tasks()
 
         self.assertEqual(first["publish_payment_created"], 1)
+        self.assertEqual(first["publish_cancel_compensation_created"], 1)
         self.assertEqual(first["refund_task_created"], 1)
         self.assertEqual(sum(second.values()), 0)
         self.assertTrue(
@@ -1257,5 +1279,11 @@ class ActivityTaskCenterTests(TestCase):
             ScheduledTask.objects.filter(
                 task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
                 business_key=refund.refund_no,
+            ).exists()
+        )
+        self.assertTrue(
+            ScheduledTask.objects.filter(
+                task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_CANCEL_COMPENSATION,
+                business_key=cancelled_publish_order.order_no,
             ).exists()
         )

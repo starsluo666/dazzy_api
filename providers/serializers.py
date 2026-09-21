@@ -7,7 +7,14 @@ from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 from orders.models import ProviderOrderReview
 
-from .models import ProviderProfile, ProviderService, ServiceCategory
+from .models import (
+    ProviderCategoryGrant,
+    ProviderProfile,
+    ProviderProfileRevision,
+    ProviderService,
+    ProviderServiceRevision,
+    ServiceCategory,
+)
 from .presence import MAX_LOCATION_ACCURACY_M, provider_is_online
 
 
@@ -75,17 +82,36 @@ class PublicProviderReviewSerializer(serializers.ModelSerializer):
 class ServiceCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ServiceCategory
-        fields = ("id", "name", "slug")
+        fields = (
+            "id", "name", "slug", "hourly_min_price_amount", "hourly_max_price_amount",
+            "per_session_min_price_amount", "per_session_max_price_amount",
+        )
 
 
 class ProviderApplicationSerializer(serializers.ModelSerializer):
     gender = serializers.CharField(source="user.gender", read_only=True)
+    lifestyle_photo_id = serializers.PrimaryKeyRelatedField(
+        source="lifestyle_photo",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        allow_null=True,
+        required=False,
+    )
+    lifestyle_photo_url = serializers.SerializerMethodField()
+    age = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderProfile
         fields = (
             "status",
             "gender",
+            "application_real_name",
+            "application_birth_date",
+            "age",
+            "lifestyle_photo_id",
+            "lifestyle_photo_url",
             "bio",
             "service_city_code",
             "service_city_name",
@@ -100,12 +126,45 @@ class ProviderApplicationSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "status",
             "gender",
+            "age",
+            "lifestyle_photo_url",
             "agreement_accepted_at",
             "submitted_at",
             "reviewed_at",
             "rejection_reason",
             "updated_at",
         )
+
+    def validate_application_real_name(self, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise serializers.ValidationError("请输入真实姓名。")
+        return value
+
+    def validate_application_birth_date(self, value):
+        today = timezone.localdate()
+        age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
+        if age < 18:
+            raise serializers.ValidationError("申请达人需年满18周岁。")
+        if age > 100:
+            raise serializers.ValidationError("请输入有效的出生日期。")
+        return value
+
+    def validate_lifestyle_photo_id(self, value):
+        request = self.context.get("request")
+        if value and (request is None or value.owner_id != request.user.pk):
+            raise serializers.ValidationError("生活照不存在或无权使用。")
+        return value
+
+    def get_lifestyle_photo_url(self, obj) -> str | None:
+        return build_media_url(obj.lifestyle_photo.object_key) if obj.lifestyle_photo_id else None
+
+    def get_age(self, obj) -> int | None:
+        value = obj.application_birth_date
+        if not value:
+            return None
+        today = timezone.localdate()
+        return today.year - value.year - ((today.month, today.day) < (value.month, value.day))
 
     def validate_bio(self, value: str) -> str:
         value = value.strip()
@@ -133,11 +192,14 @@ class ProviderProfileManageSerializer(serializers.ModelSerializer):
         required=False,
     )
     lifestyle_photo_url = serializers.SerializerMethodField()
-    is_profile_complete = serializers.BooleanField(read_only=True)
+    is_profile_complete = serializers.SerializerMethodField()
+    review_status = serializers.SerializerMethodField()
+    review_rejection_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderProfile
         fields = (
+            "display_name",
             "bio",
             "lifestyle_photo_id",
             "lifestyle_photo_url",
@@ -145,9 +207,20 @@ class ProviderProfileManageSerializer(serializers.ModelSerializer):
             "service_city_name",
             "max_service_radius_km",
             "is_profile_complete",
+            "review_status",
+            "review_rejection_reason",
             "updated_at",
         )
-        read_only_fields = ("lifestyle_photo_url", "is_profile_complete", "updated_at")
+        read_only_fields = (
+            "lifestyle_photo_url", "is_profile_complete", "review_status",
+            "review_rejection_reason", "updated_at",
+        )
+
+    def validate_display_name(self, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise serializers.ValidationError("达人名称至少填写2个字。")
+        return value
 
     def validate_bio(self, value: str) -> str:
         value = value.strip()
@@ -165,6 +238,23 @@ class ProviderProfileManageSerializer(serializers.ModelSerializer):
         if not obj.lifestyle_photo_id:
             return None
         return build_media_url(obj.lifestyle_photo.object_key)
+
+    def get_is_profile_complete(self, obj) -> bool:
+        return bool(
+            obj.display_name.strip()
+            and obj.bio.strip()
+            and obj.lifestyle_photo_id
+            and obj.service_city_code
+            and obj.service_city_name
+        )
+
+    def get_review_status(self, obj) -> str:
+        if isinstance(obj, ProviderProfileRevision):
+            return obj.status
+        return "approved" if obj.onboarding_status == ProviderProfile.OnboardingStatus.APPROVED else "not_submitted"
+
+    def get_review_rejection_reason(self, obj) -> str:
+        return obj.rejection_reason if isinstance(obj, ProviderProfileRevision) else ""
 
 
 class ProviderIdentitySerializer(serializers.ModelSerializer):
@@ -290,6 +380,7 @@ class ProviderServiceManageSerializer(serializers.ModelSerializer):
         duration = attrs.get(
             "estimated_duration_minutes", getattr(self.instance, "estimated_duration_minutes", None)
         )
+        provider = self.context.get("provider")
         if attrs.get("is_active") is True and category and not category.is_active:
             raise serializers.ValidationError(
                 {"is_active": "该服务分类已停用，暂时不能上架服务。"}
@@ -298,6 +389,26 @@ class ProviderServiceManageSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"estimated_duration_minutes": "按次服务必须填写预计服务时长。"}
             )
+        if provider and category and not ProviderCategoryGrant.objects.filter(
+            provider=provider, category=category, is_active=True
+        ).exists():
+            raise serializers.ValidationError({"category_id": "你尚未获得该服务分类的经营权限。"})
+        if provider and category and billing_type and self.instance:
+            if ProviderService.objects.filter(
+                provider=provider,
+                category=category,
+                billing_type=billing_type,
+            ).exclude(pk=self.instance.pk).exists():
+                raise serializers.ValidationError(
+                    {"category_id": "相同分类和计费方式的服务已经存在。"}
+                )
+        price_amount = attrs.get("price_amount", getattr(self.instance, "price_amount", None))
+        if category and billing_type and price_amount is not None:
+            minimum, maximum = category.price_range_for(billing_type)
+            if not minimum <= price_amount <= maximum:
+                raise serializers.ValidationError(
+                    {"price_amount": f"价格须在{minimum / 100:g}元至{maximum / 100:g}元之间。"}
+                )
         return attrs
 
 
@@ -331,26 +442,33 @@ class ProviderDateClosureSerializer(serializers.Serializer):
     is_closed = serializers.BooleanField()
 
 
+class RoundedDecimalInputField(serializers.DecimalField):
+    """Accept device precision beyond storage scale and round it during parsing."""
+
+    def validate_precision(self, value):
+        return value
+
+
 class ProviderLiveLocationInputSerializer(serializers.Serializer):
-    longitude = serializers.DecimalField(
+    longitude = RoundedDecimalInputField(
         max_digits=10,
         decimal_places=7,
         min_value=Decimal("-180"),
         max_value=Decimal("180"),
     )
-    latitude = serializers.DecimalField(
+    latitude = RoundedDecimalInputField(
         max_digits=10,
         decimal_places=7,
         min_value=Decimal("-90"),
         max_value=Decimal("90"),
     )
-    accuracy_m = serializers.DecimalField(
+    accuracy_m = RoundedDecimalInputField(
         max_digits=8,
         decimal_places=2,
         min_value=Decimal("0"),
         max_value=MAX_LOCATION_ACCURACY_M,
     )
-    speed_mps = serializers.DecimalField(
+    speed_mps = RoundedDecimalInputField(
         required=False,
         allow_null=True,
         max_digits=8,
@@ -383,8 +501,8 @@ class ProviderServiceSummarySerializer(serializers.ModelSerializer):
 
 class ProviderListItemSerializer(serializers.ModelSerializer):
     public_id = serializers.UUIDField(source="user.public_id")
-    nickname = serializers.CharField(source="user.nickname")
-    birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
+    nickname = serializers.CharField(source="public_display_name")
+    birth_date = serializers.SerializerMethodField()
     avatar_url = serializers.SerializerMethodField()
     verified = serializers.SerializerMethodField()
     is_online = serializers.SerializerMethodField()
@@ -412,6 +530,9 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
     def get_avatar_url(self, obj) -> str | None:
         return build_media_url(obj.user.avatar_object_key)
 
+    def get_birth_date(self, obj):
+        return obj.application_birth_date or obj.user.birth_date
+
     def get_verified(self, obj) -> bool:
         return obj.identity_status == obj.IdentityStatus.VERIFIED
 
@@ -426,7 +547,6 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
 
 class ProviderDetailSerializer(ProviderListItemSerializer):
     gender = serializers.CharField(source="user.gender")
-    birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
     lifestyle_photo_url = serializers.SerializerMethodField()
     credit_score = serializers.IntegerField()
     max_service_radius_km = serializers.IntegerField()

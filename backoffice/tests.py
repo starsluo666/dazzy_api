@@ -37,9 +37,12 @@ from orders.services import (
     create_provider_order_refund,
 )
 from providers.models import (
+    ProviderCategoryGrant,
     ProviderLiveLocation,
     ProviderProfile,
+    ProviderProfileRevision,
     ProviderService,
+    ProviderServiceRevision,
     ProviderWeeklyAvailability,
     ServiceCategory,
 )
@@ -132,6 +135,9 @@ class BackofficeProviderReviewTests(APITestCase):
         cls.handan = ProviderProfile.objects.create(
             user=cls.handan_user,
             status=ProviderProfile.Status.PENDING,
+            application_real_name="张三",
+            application_birth_date=datetime(1998, 6, 18).date(),
+            display_name="邯郸达人",
             identity_status=ProviderProfile.IdentityStatus.VERIFIED,
             lifestyle_photo=cls.handan_lifestyle_photo,
             service_city_code="130400",
@@ -141,6 +147,9 @@ class BackofficeProviderReviewTests(APITestCase):
         cls.beijing = ProviderProfile.objects.create(
             user=cls.beijing_user,
             status=ProviderProfile.Status.PENDING,
+            application_real_name="李四",
+            application_birth_date=datetime(1997, 5, 1).date(),
+            display_name="北京达人",
             service_city_code="110100",
             service_city_name="北京市",
             bio="这是另一个城市的达人申请资料内容。",
@@ -243,12 +252,19 @@ class BackofficeProviderReviewTests(APITestCase):
     def test_approve_writes_audit_log(self):
         response = self.client.post(
             reverse("backoffice-provider-application-review", args=(self.handan.id,)),
-            {"decision": "approve"},
+            {"decision": "approve", "allowed_category_ids": [self.order_category.id]},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.handan.refresh_from_db()
         self.assertEqual(self.handan.status, ProviderProfile.Status.APPROVED)
+        self.assertTrue(
+            ProviderCategoryGrant.objects.filter(
+                provider=self.handan,
+                category=self.order_category,
+                is_active=True,
+            ).exists()
+        )
         audit = AdminAuditLog.objects.get(target_id=str(self.handan.id))
         self.assertEqual(audit.action, "provider.application.approve")
         self.assertEqual(audit.organization, self.organization)
@@ -270,7 +286,7 @@ class BackofficeProviderReviewTests(APITestCase):
     def test_out_of_scope_review_is_rejected(self):
         response = self.client.post(
             reverse("backoffice-provider-application-review", args=(self.beijing.id,)),
-            {"decision": "approve"},
+            {"decision": "approve", "allowed_category_ids": [self.order_category.id]},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -289,7 +305,7 @@ class BackofficeProviderReviewTests(APITestCase):
 
         response = self.client.post(
             reverse("backoffice-provider-application-review", args=(profile.id,)),
-            {"decision": "approve"},
+            {"decision": "approve", "allowed_category_ids": [self.order_category.id]},
             format="json",
         )
 
@@ -318,7 +334,7 @@ class BackofficeProviderReviewTests(APITestCase):
 
         response = self.client.post(
             reverse("backoffice-provider-application-review", args=(profile.id,)),
-            {"decision": "approve"},
+            {"decision": "approve", "allowed_category_ids": [self.order_category.id]},
             format="json",
         )
 
@@ -339,6 +355,7 @@ class BackofficeProviderReviewTests(APITestCase):
             for side in ("front", "back", "face")
         ]
         self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
         self.handan.identity_status = ProviderProfile.IdentityStatus.PENDING
         self.handan.identity_real_name = "张三"
         self.handan.identity_number_masked = "1304**********1234"
@@ -377,12 +394,14 @@ class BackofficeProviderReviewTests(APITestCase):
 
     def test_rejected_provider_identity_stops_accepting_orders(self):
         self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
         self.handan.identity_status = ProviderProfile.IdentityStatus.PENDING
         self.handan.is_accepting_orders = True
         self.handan.identity_submitted_at = timezone.now()
         self.handan.save(
             update_fields=(
                 "status",
+                "onboarding_status",
                 "identity_status",
                 "is_accepting_orders",
                 "identity_submitted_at",
@@ -404,6 +423,79 @@ class BackofficeProviderReviewTests(APITestCase):
         )
         self.assertEqual(self.handan.identity_rejection_reason, "证件照片文字不清晰")
         self.assertFalse(self.handan.is_accepting_orders)
+
+    def test_approved_profile_and_service_changes_only_apply_after_review(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
+        self.handan.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+        self.handan.save()
+        ProviderCategoryGrant.objects.create(
+            provider=self.handan,
+            category=self.order_category,
+            granted_by=self.admin_user,
+        )
+        service = ProviderService.objects.create(
+            provider=self.handan,
+            category=self.order_category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=12000,
+            description="原服务说明",
+        )
+        provider_client = self.client_class()
+        provider_client.force_authenticate(self.handan_user)
+        profile_response = provider_client.patch(
+            "/api/v1/providers/me/profile/",
+            {
+                "display_name": "审核后的达人名",
+                "bio": "这是提交后台审核的新版达人简介内容。",
+                "lifestyle_photo_id": str(self.handan_lifestyle_photo.id),
+                "service_city_code": "130400",
+                "service_city_name": "邯郸市",
+                "max_service_radius_km": 30,
+            },
+            format="json",
+        )
+        service_response = provider_client.patch(
+            f"/api/v1/providers/me/services/{service.id}/",
+            {"price_amount": 18000, "description": "审核后的服务说明"},
+            format="json",
+        )
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(service_response.status_code, status.HTTP_200_OK)
+        self.handan.refresh_from_db()
+        service.refresh_from_db()
+        self.assertNotEqual(self.handan.display_name, "审核后的达人名")
+        self.assertEqual(service.price_amount, 12000)
+
+        profile_revision = ProviderProfileRevision.objects.get(
+            provider=self.handan, status=ProviderProfileRevision.Status.PENDING
+        )
+        service_revision = ProviderServiceRevision.objects.get(
+            provider=self.handan, status=ProviderServiceRevision.Status.PENDING
+        )
+        profile_review = self.client.post(
+            reverse(
+                "backoffice-provider-change-review-action",
+                args=("profile", profile_revision.id),
+            ),
+            {"decision": "approve"},
+            format="json",
+        )
+        service_review = self.client.post(
+            reverse(
+                "backoffice-provider-change-review-action",
+                args=("service", service_revision.id),
+            ),
+            {"decision": "approve"},
+            format="json",
+        )
+
+        self.assertEqual(profile_review.status_code, status.HTTP_200_OK)
+        self.assertEqual(service_review.status_code, status.HTTP_200_OK)
+        self.handan.refresh_from_db()
+        service.refresh_from_db()
+        self.assertEqual(self.handan.display_name, "审核后的达人名")
+        self.assertEqual(service.price_amount, 18000)
 
     def test_invalid_provider_list_query_returns_validation_error(self):
         response = self.client.get(
@@ -581,8 +673,9 @@ class BackofficeProviderReviewTests(APITestCase):
 
     def test_provider_management_list_is_scoped_and_has_summary(self):
         self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
         self.handan.is_accepting_orders = True
-        self.handan.save(update_fields=("status", "is_accepting_orders", "updated_at"))
+        self.handan.save(update_fields=("status", "onboarding_status", "is_accepting_orders", "updated_at"))
         self.create_live_location(self.handan)
 
         response = self.client.get(reverse("backoffice-providers"))
@@ -596,8 +689,9 @@ class BackofficeProviderReviewTests(APITestCase):
 
     def test_provider_management_detail_includes_current_live_location(self):
         self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
         self.handan.is_accepting_orders = True
-        self.handan.save(update_fields=("status", "is_accepting_orders", "updated_at"))
+        self.handan.save(update_fields=("status", "onboarding_status", "is_accepting_orders", "updated_at"))
         self.create_live_location(self.handan)
 
         response = self.client.get(
@@ -1607,18 +1701,70 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_provider_lifecycle_reaches_public_bookable_availability(self):
+        category = ServiceCategory.objects.create(name="城市陪伴", slug="lifecycle-service")
         response = self.client.post(
             reverse("backoffice-provider-application-review", args=(self.handan.id,)),
-            {"decision": "approve"},
+            {"decision": "approve", "allowed_category_ids": [category.id]},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.handan.refresh_from_db()
         self.assertFalse(self.handan.is_accepting_orders)
 
-        category = ServiceCategory.objects.create(name="城市陪伴", slug="lifecycle-service")
         provider_client = self.client_class()
         provider_client.force_authenticate(self.handan_user)
+        self.handan.identity_status = ProviderProfile.IdentityStatus.UNVERIFIED
+        self.handan.identity_real_name = ""
+        self.handan.identity_number_masked = ""
+        self.handan.identity_number_digest = ""
+        self.handan.save(
+            update_fields=(
+                "identity_status",
+                "identity_real_name",
+                "identity_number_masked",
+                "identity_number_digest",
+                "updated_at",
+            )
+        )
+        identity_photos = [
+            MediaAsset.objects.create(
+                owner=self.handan_user,
+                scope=MediaAsset.Scope.PRIVATE,
+                category=MediaAsset.Category.IDENTITY,
+                status=MediaAsset.Status.UPLOADED,
+                object_key=f"private/provider-identities/lifecycle/{side}.webp",
+            )
+            for side in ("front", "back", "face")
+        ]
+        identity_response = provider_client.patch(
+            "/api/v1/providers/me/identity/",
+            {
+                "identity_real_name": "张三",
+                "id_number": "130400199806181234",
+                "identity_front_photo_id": str(identity_photos[0].id),
+                "identity_back_photo_id": str(identity_photos[1].id),
+                "identity_face_photo_id": str(identity_photos[2].id),
+            },
+            format="json",
+        )
+        self.assertEqual(identity_response.status_code, status.HTTP_200_OK)
+        identity_submit = provider_client.post(
+            "/api/v1/providers/me/identity/submit/", {}, format="json"
+        )
+        self.assertEqual(identity_submit.status_code, status.HTTP_200_OK)
+        profile_response = provider_client.patch(
+            "/api/v1/providers/me/profile/",
+            {
+                "display_name": "邯郸小张",
+                "bio": self.handan.bio,
+                "lifestyle_photo_id": str(self.handan_lifestyle_photo.id),
+                "service_city_code": "130400",
+                "service_city_name": "邯郸市",
+                "max_service_radius_km": 20,
+            },
+            format="json",
+        )
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
         service_response = provider_client.post(
             "/api/v1/providers/me/services/",
             {
@@ -1631,7 +1777,23 @@ class BackofficeProviderReviewTests(APITestCase):
             format="json",
         )
         self.assertEqual(service_response.status_code, status.HTTP_201_CREATED)
-        service_id = service_response.data["data"]["id"]
+        self.handan.refresh_from_db()
+        self.assertEqual(
+            self.handan.onboarding_status,
+            ProviderProfile.OnboardingStatus.PENDING_REVIEW,
+        )
+        onboarding_review = self.client.post(
+            reverse(
+                "backoffice-provider-change-review-action",
+                args=("onboarding", self.handan.id),
+            ),
+            {"decision": "approve"},
+            format="json",
+        )
+        self.assertEqual(onboarding_review.status_code, status.HTTP_200_OK)
+        service_id = ProviderService.objects.get(
+            provider=self.handan, category=category
+        ).id
         day = timezone.localdate() + timedelta(days=1)
         ProviderWeeklyAvailability.objects.create(
             provider=self.handan,

@@ -27,7 +27,9 @@ class EngagementApiTests(TestCase):
         self.provider = ProviderProfile.objects.create(
             user=provider_user,
             status=ProviderProfile.Status.APPROVED,
+            onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
             identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            display_name="收藏达人",
             lifestyle_photo=lifestyle_photo,
             bio="用于收藏与浏览记录测试的完整达人资料。",
             service_city_code="130400",

@@ -703,6 +703,16 @@ def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
         ).encode("utf-8")
     ).hexdigest()
 
+    if not ProviderOrderPaymentOrder.objects.filter(
+        req_date=fields["req_date"], req_seq_id=fields["req_seq_id"]
+    ).exists():
+        from activities.huifu import process_activity_huifu_payment_notification
+
+        return process_activity_huifu_payment_notification(
+            fields=fields,
+            payload_digest=payload_digest,
+        )
+
     with transaction.atomic():
         payment = (
             ProviderOrderPaymentOrder.objects.select_for_update()
@@ -782,6 +792,15 @@ def process_huifu_payment_notification(*, resp_data: str, sign: str) -> str:
 
 
 def _process_huifu_refund_notification(*, fields: dict, payload_digest: str) -> str:
+    if not ProviderOrderRefundOrder.objects.filter(
+        req_date=fields["req_date"], req_seq_id=fields["req_seq_id"]
+    ).exists():
+        from activities.huifu import process_activity_huifu_refund_notification
+
+        return process_activity_huifu_refund_notification(
+            fields=fields,
+            payload_digest=payload_digest,
+        )
     event_key = sha256(
         ":".join(
             (
@@ -1290,7 +1309,8 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
         title="订单收入已结算",
         content=(
             f"订单 {order_no} 收入 ¥{settlement.provider_settlement_amount // 100}."
-            f"{settlement.provider_settlement_amount % 100:02d} 已结算入账。"
+            f"{settlement.provider_settlement_amount % 100:02d} 已完成平台账务结算，"
+            "实际出款以资金账户记录为准。"
         ),
         target_type="provider_order_settlement",
         target_id=settlement.settlement_no,

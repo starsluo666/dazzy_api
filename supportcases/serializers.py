@@ -133,7 +133,7 @@ class SupportCaseSerializer(serializers.ModelSerializer):
 
     def get_target_title(self, obj):
         if obj.provider_id:
-            return obj.provider.user.nickname or "达人"
+            return obj.provider.public_display_name or "达人"
         if obj.provider_order_id:
             return obj.provider_order.service_name_snapshot
         if obj.activity_id:

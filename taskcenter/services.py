@@ -16,7 +16,10 @@ TASK_SYNC_BATCH_SIZE = 500
 ACTIVITY_TASK_TYPES = (
     ScheduledTask.Type.ACTIVITY_PUBLISH_PAYMENT_EXPIRY,
     ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY,
+    ScheduledTask.Type.ACTIVITY_PUBLISH_CANCEL_COMPENSATION,
+    ScheduledTask.Type.ACTIVITY_PARTICIPATION_CANCEL_COMPENSATION,
     ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
+    ScheduledTask.Type.ACTIVITY_PUBLISH_REFUND,
     ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE,
     ScheduledTask.Type.ACTIVITY_START,
     ScheduledTask.Type.ACTIVITY_COMPLETION,
@@ -189,6 +192,35 @@ def register_activity_participation_payment_expiry(order):
     )
 
 
+def register_activity_publish_cancel_compensation(order):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_CANCEL_COMPENSATION,
+        business_type="activity_publish_payment",
+        business_key=order.order_no,
+        scheduled_at=timezone.now(),
+        payload={
+            "publish_order_no": order.order_no,
+            "activity_id": order.activity_id,
+        },
+        max_attempts=10,
+    )
+
+
+def register_activity_participation_cancel_compensation(order):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_CANCEL_COMPENSATION,
+        business_type="activity_participation",
+        business_key=order.order_no,
+        scheduled_at=timezone.now(),
+        payload={
+            "payment_order_no": order.order_no,
+            "participation_id": order.participation_id,
+            "activity_id": order.participation.activity_id,
+        },
+        max_attempts=10,
+    )
+
+
 def register_activity_participation_refund(refund):
     return _register_task(
         task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
@@ -202,6 +234,23 @@ def register_activity_participation_refund(refund):
             "activity_id": refund.activity_id,
             "activity_title": refund.activity.title,
         },
+        max_attempts=10,
+    )
+
+
+def register_activity_publish_refund(refund):
+    return _register_task(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_REFUND,
+        business_type="activity_publish_refund",
+        business_key=refund.refund_no,
+        scheduled_at=timezone.now(),
+        payload={
+            "refund_no": refund.refund_no,
+            "publish_order_no": refund.publish_order.order_no,
+            "activity_id": refund.activity_id,
+            "activity_title": refund.activity.title,
+        },
+        max_attempts=10,
     )
 
 
@@ -495,6 +544,14 @@ def mark_activity_participation_refund_succeeded(refund_no: str):
     )
 
 
+def mark_activity_publish_refund_succeeded(refund_no: str):
+    return _mark_refund_task_succeeded(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_REFUND,
+        business_type="activity_publish_refund",
+        refund_no=refund_no,
+    )
+
+
 def _requiring_task_synchronization(queryset, *, task_type, deadline_field):
     existing_task = ScheduledTask.objects.filter(
         task_type=task_type,
@@ -701,6 +758,7 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
         ActivityParticipationPaymentOrder,
         ActivityParticipationRefundOrder,
         ActivityPublishOrder,
+        ActivityRefundRecord,
         ActivitySettlement,
     )
     from activities.services import ensure_activity_settlement
@@ -744,6 +802,46 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
         _, created = register_activity_participation_payment_expiry(payment)
         payment_created += int(created)
 
+    publish_cancel_compensation_created = 0
+    publish_compensation_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_CANCEL_COMPENSATION,
+        business_type="activity_publish_payment",
+        business_key=OuterRef("order_no"),
+    )
+    cancelled_publish_payments = (
+        ActivityPublishOrder.objects.filter(
+            status=ActivityPublishOrder.Status.CANCELLED,
+            huifu_payment__isnull=False,
+        )
+        .annotate(_has_scheduled_task=Exists(publish_compensation_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("activity")
+        .order_by("id")[:batch_size]
+    )
+    for payment in cancelled_publish_payments:
+        _, created = register_activity_publish_cancel_compensation(payment)
+        publish_cancel_compensation_created += int(created)
+
+    participation_cancel_compensation_created = 0
+    participation_compensation_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_CANCEL_COMPENSATION,
+        business_type="activity_participation",
+        business_key=OuterRef("order_no"),
+    )
+    closed_participation_payments = (
+        ActivityParticipationPaymentOrder.objects.filter(
+            status=ActivityParticipationPaymentOrder.Status.CLOSED,
+            huifu_payment__isnull=False,
+        )
+        .annotate(_has_scheduled_task=Exists(participation_compensation_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("participation__activity")
+        .order_by("id")[:batch_size]
+    )
+    for payment in closed_participation_payments:
+        _, created = register_activity_participation_cancel_compensation(payment)
+        participation_cancel_compensation_created += int(created)
+
     refund_task_created = 0
     refund_task = ScheduledTask.objects.filter(
         task_type=ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND,
@@ -766,6 +864,29 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     for refund in refunds:
         _, created = register_activity_participation_refund(refund)
         refund_task_created += int(created)
+
+    publish_refund_task_created = 0
+    publish_refund_task = ScheduledTask.objects.filter(
+        task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_REFUND,
+        business_type="activity_publish_refund",
+        business_key=OuterRef("refund_no"),
+    )
+    publish_refunds = (
+        ActivityRefundRecord.objects.filter(
+            status__in=(
+                ActivityRefundRecord.Status.PENDING,
+                ActivityRefundRecord.Status.PROCESSING,
+                ActivityRefundRecord.Status.FAILED,
+            )
+        )
+        .annotate(_has_scheduled_task=Exists(publish_refund_task))
+        .filter(_has_scheduled_task=False)
+        .select_related("activity", "publish_order")
+        .order_by("id")[:batch_size]
+    )
+    for refund in publish_refunds:
+        _, created = register_activity_publish_refund(refund)
+        publish_refund_task_created += int(created)
 
     formation_created = 0
     formation_activities = (
@@ -849,7 +970,12 @@ def synchronize_activity_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict:
     return {
         "publish_payment_created": publish_payment_created,
         "payment_created": payment_created,
+        "publish_cancel_compensation_created": publish_cancel_compensation_created,
+        "participation_cancel_compensation_created": (
+            participation_cancel_compensation_created
+        ),
         "refund_task_created": refund_task_created,
+        "publish_refund_task_created": publish_refund_task_created,
         "formation_created": formation_created,
         "start_created": start_created,
         "completion_created": completion_created,
@@ -1100,8 +1226,22 @@ def _activity_result(activity, state):
 
 
 def _execute_activity_publish_payment_expiry(task, now):
+    from activities.huifu import confirm_activity_huifu_payment_status
+    from activities.models import ActivityPublishOrder
     from activities.services import expire_activity_publish_payment
 
+    order = ActivityPublishOrder.objects.filter(order_no=task.business_key).first()
+    if order and hasattr(order, "huifu_payment"):
+        confirmation = confirm_activity_huifu_payment_status(
+            payment_kind="activity_publish",
+            activity_id=order.activity_id,
+            user_id=order.payer_id,
+        )
+        if confirmation["state"] in ("paid", "refund_pending", "refunded"):
+            return TaskExecutionOutcome(
+                status=ScheduledTask.Status.SUCCEEDED,
+                result={**confirmation, "source": "expiry_query"},
+            )
     outcome = expire_activity_publish_payment(order_no=task.business_key, now=now)
     if outcome["state"] == "not_due":
         deadline = outcome["deadline"]
@@ -1119,8 +1259,24 @@ def _execute_activity_publish_payment_expiry(task, now):
 
 
 def _execute_activity_participation_payment_expiry(task, now):
+    from activities.huifu import confirm_activity_huifu_payment_status
+    from activities.models import ActivityParticipationPaymentOrder
     from activities.services import expire_activity_participation_payment
 
+    order = ActivityParticipationPaymentOrder.objects.filter(
+        order_no=task.business_key
+    ).first()
+    if order and hasattr(order, "huifu_payment"):
+        confirmation = confirm_activity_huifu_payment_status(
+            payment_kind="activity_participation",
+            activity_id=order.participation.activity_id,
+            user_id=order.payer_id,
+        )
+        if confirmation["state"] in ("paid", "refund_pending", "refunded"):
+            return TaskExecutionOutcome(
+                status=ScheduledTask.Status.SUCCEEDED,
+                result={**confirmation, "source": "expiry_query"},
+            )
     outcome = expire_activity_participation_payment(
         order_no=task.business_key,
         now=now,
@@ -1140,6 +1296,64 @@ def _execute_activity_participation_payment_expiry(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _execute_activity_cancel_compensation(task, now, *, payment_kind):
+    from activities.huifu import process_activity_huifu_cancel_compensation
+
+    outcome = process_activity_huifu_cancel_compensation(
+        payment_kind=payment_kind,
+        order_no=task.business_key,
+        now=now,
+    )
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "processing":
+        if task.attempt_count >= task.max_attempts:
+            raise ValidationError(
+                "活动支付取消补偿持续处理中，已停止自动操作并转人工核对。"
+            )
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result=outcome,
+            available_at=now + timedelta(minutes=1),
+        )
+    if outcome["state"] == "refund_failed":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.FAILED,
+            result=outcome,
+            last_error="取消后的自动退款失败，请人工核对退款单。",
+        )
+    if outcome["state"] in ("closed", "refund_processing", "refunded"):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.SUCCEEDED,
+            result=outcome,
+        )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.CANCELLED,
+        result=outcome,
+    )
+
+
+def _execute_activity_publish_cancel_compensation(task, now):
+    return _execute_activity_cancel_compensation(
+        task,
+        now,
+        payment_kind="activity_publish",
+    )
+
+
+def _execute_activity_participation_cancel_compensation(task, now):
+    return _execute_activity_cancel_compensation(
+        task,
+        now,
+        payment_kind="activity_participation",
+    )
+
+
 def _execute_activity_participation_refund(task, now):
     from activities.models import ActivityParticipationRefundOrder
     from activities.services import process_activity_participation_refund
@@ -1155,12 +1369,55 @@ def _execute_activity_participation_refund(task, now):
     refund, changed = process_activity_participation_refund(
         task.business_key, now=now
     )
+    if refund.status == ActivityParticipationRefundOrder.Status.PROCESSING:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={
+                "state": refund.status,
+                "refund_no": refund.refund_no,
+                "changed": changed,
+            },
+            available_at=now + timedelta(seconds=30),
+        )
     return TaskExecutionOutcome(
         status=ScheduledTask.Status.SUCCEEDED,
         result={
             "state": refund.status,
             "refund_no": refund.refund_no,
             "payment_order_no": refund.payment_order.order_no,
+            "activity_id": refund.activity_id,
+            "changed": changed,
+        },
+    )
+
+
+def _execute_activity_publish_refund(task, now):
+    from activities.models import ActivityRefundRecord
+    from activities.services import process_activity_publish_refund
+
+    refund = ActivityRefundRecord.objects.filter(refund_no=task.business_key).first()
+    if not refund:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"state": "missing", "refund_no": task.business_key},
+        )
+    refund, changed = process_activity_publish_refund(task.business_key, now=now)
+    if refund.status == ActivityRefundRecord.Status.PROCESSING:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={
+                "state": refund.status,
+                "refund_no": refund.refund_no,
+                "changed": changed,
+            },
+            available_at=now + timedelta(seconds=30),
+        )
+    return TaskExecutionOutcome(
+        status=ScheduledTask.Status.SUCCEEDED,
+        result={
+            "state": refund.status,
+            "refund_no": refund.refund_no,
+            "publish_order_no": refund.publish_order.order_no,
             "activity_id": refund.activity_id,
             "changed": changed,
         },
@@ -1359,9 +1616,16 @@ TASK_HANDLERS = {
     ScheduledTask.Type.ACTIVITY_PARTICIPATION_PAYMENT_EXPIRY: (
         _execute_activity_participation_payment_expiry
     ),
+    ScheduledTask.Type.ACTIVITY_PUBLISH_CANCEL_COMPENSATION: (
+        _execute_activity_publish_cancel_compensation
+    ),
+    ScheduledTask.Type.ACTIVITY_PARTICIPATION_CANCEL_COMPENSATION: (
+        _execute_activity_participation_cancel_compensation
+    ),
     ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND: (
         _execute_activity_participation_refund
     ),
+    ScheduledTask.Type.ACTIVITY_PUBLISH_REFUND: _execute_activity_publish_refund,
     ScheduledTask.Type.ACTIVITY_FORMATION_DEADLINE: _execute_activity_formation_deadline,
     ScheduledTask.Type.ACTIVITY_START: _execute_activity_start,
     ScheduledTask.Type.ACTIVITY_COMPLETION: _execute_activity_completion,

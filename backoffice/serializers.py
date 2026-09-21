@@ -81,7 +81,9 @@ class AdminServiceCategorySerializer(serializers.ModelSerializer):
         fields = (
             "id", "name", "slug", "icon_object_key", "icon_url", "city_codes",
             "sort_order", "is_active", "platform_commission_rate", "service_count", "active_service_count",
-            "provider_count", "created_at", "updated_at",
+            "provider_count", "hourly_min_price_amount", "hourly_max_price_amount",
+            "per_session_min_price_amount", "per_session_max_price_amount",
+            "created_at", "updated_at",
         )
         read_only_fields = ("id", "icon_url", "created_at", "updated_at")
 
@@ -117,6 +119,29 @@ class AdminServiceCategorySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"slug": "该分类已有达人服务关联，标识不可修改。"}
             )
+        hourly_min = attrs.get(
+            "hourly_min_price_amount",
+            getattr(instance, "hourly_min_price_amount", None),
+        )
+        hourly_max = attrs.get(
+            "hourly_max_price_amount",
+            getattr(instance, "hourly_max_price_amount", None),
+        )
+        session_min = attrs.get(
+            "per_session_min_price_amount",
+            getattr(instance, "per_session_min_price_amount", None),
+        )
+        session_max = attrs.get(
+            "per_session_max_price_amount",
+            getattr(instance, "per_session_max_price_amount", None),
+        )
+        errors = {}
+        if hourly_min is not None and hourly_max is not None and hourly_min > hourly_max:
+            errors["hourly_max_price_amount"] = "按小时最高价格不能低于最低价格。"
+        if session_min is not None and session_max is not None and session_min > session_max:
+            errors["per_session_max_price_amount"] = "按次最高价格不能低于最低价格。"
+        if errors:
+            raise serializers.ValidationError(errors)
         return attrs
 
 
@@ -608,17 +633,19 @@ class ProviderReviewListSerializer(serializers.ModelSerializer):
     nickname = serializers.CharField(source="user.nickname")
     phone = serializers.CharField(source="user.phone")
     gender = serializers.CharField(source="user.gender")
-    birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
+    birth_date = serializers.DateField(source="application_birth_date", allow_null=True)
     lifestyle_photo_url = serializers.SerializerMethodField()
     service_names = serializers.SerializerMethodField()
+    allowed_categories = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderProfile
         fields = (
-            "id", "public_id", "nickname", "phone", "gender",
+            "id", "public_id", "nickname", "phone", "gender", "application_real_name",
             "birth_date", "status", "lifestyle_photo_url", "service_city_code",
             "service_city_name", "bio", "max_service_radius_km",
-            "service_names", "submitted_at", "reviewed_at", "rejection_reason",
+            "service_names", "allowed_categories", "onboarding_status",
+            "onboarding_submitted_at", "submitted_at", "reviewed_at", "rejection_reason",
         )
 
     def get_service_names(self, obj):
@@ -628,6 +655,13 @@ class ProviderReviewListSerializer(serializers.ModelSerializer):
         if not obj.lifestyle_photo_id:
             return None
         return build_media_url(obj.lifestyle_photo.object_key)
+
+    def get_allowed_categories(self, obj):
+        return [
+            {"id": grant.category_id, "name": grant.category.name}
+            for grant in obj.category_grants.all()
+            if grant.is_active
+        ]
 
 
 class ProviderApplicationQuerySerializer(serializers.Serializer):
@@ -650,6 +684,31 @@ class ProviderReviewDecisionSerializer(serializers.Serializer):
         if attrs["decision"] == "reject" and not attrs.get("reason", "").strip():
             raise serializers.ValidationError({"reason": "驳回申请时必须填写原因。"})
         return attrs
+
+
+class ProviderApplicationReviewDecisionSerializer(ProviderReviewDecisionSerializer):
+    allowed_category_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, default=list
+    )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if attrs["decision"] == "approve" and not attrs["allowed_category_ids"]:
+            raise serializers.ValidationError(
+                {"allowed_category_ids": "通过入驻申请时至少选择一个可经营服务分类。"}
+            )
+        return attrs
+
+
+class ProviderChangeReviewQuerySerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(
+        required=False, default="onboarding", choices=("onboarding", "profile", "service")
+    )
+    status = serializers.ChoiceField(
+        required=False, default="pending", choices=("pending", "approved", "rejected")
+    )
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
 class AdminUserQuerySerializer(serializers.Serializer):
@@ -805,15 +864,16 @@ class ProviderCreditAdjustmentSerializer(serializers.ModelSerializer):
 
 class ProviderAdminSerializer(serializers.ModelSerializer):
     public_id = serializers.UUIDField(source="user.public_id")
-    nickname = serializers.CharField(source="user.nickname")
+    nickname = serializers.CharField(source="public_display_name")
     phone_masked = serializers.SerializerMethodField()
     gender = serializers.CharField(source="user.gender")
     gender_label = serializers.CharField(source="user.get_gender_display")
-    birth_date = serializers.DateField(source="user.birth_date", allow_null=True)
+    birth_date = serializers.DateField(source="application_birth_date", allow_null=True)
     identity_status_label = serializers.CharField(source="get_identity_status_display")
     account_status = serializers.CharField(source="user.account_status")
     account_status_label = serializers.CharField(source="user.get_account_status_display")
     status_label = serializers.CharField(source="get_status_display")
+    onboarding_status_label = serializers.CharField(source="get_onboarding_status_display")
     lifestyle_photo_available = serializers.SerializerMethodField()
     lifestyle_photo_url = serializers.SerializerMethodField()
     is_online = serializers.SerializerMethodField()
@@ -837,7 +897,9 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
         fields = (
             "id", "public_id", "nickname", "phone_masked", "gender", "gender_label",
             "birth_date", "identity_status", "identity_status_label",
-            "account_status", "account_status_label", "status", "status_label", "bio",
+            "account_status", "account_status_label", "status", "status_label",
+            "onboarding_status", "onboarding_status_label", "onboarding_submitted_at",
+            "onboarding_reviewed_at", "onboarding_rejection_reason", "bio",
             "lifestyle_photo_available", "lifestyle_photo_url", "service_city_code",
             "service_city_name", "is_online", "has_live_location", "current_longitude",
             "current_latitude", "location_accuracy_m", "location_updated_at",

@@ -582,6 +582,10 @@ class ActivityRefundRecord(models.Model):
         FAILED_TO_FORM = "failed_to_form", "未成局退款"
 
     class Status(models.TextChoices):
+        PENDING = "pending", "待退款"
+        PROCESSING = "processing", "退款处理中"
+        SUCCEEDED = "succeeded", "退款成功"
+        FAILED = "failed", "退款失败"
         SIMULATED_REFUNDED = "simulated_refunded", "模拟退款成功"
 
     refund_no = models.CharField(
@@ -628,8 +632,10 @@ class ActivityRefundRecord(models.Model):
         blank=True,
         verbose_name="操作人",
     )
-    refunded_at = models.DateTimeField("退款时间")
+    refunded_at = models.DateTimeField("退款时间", null=True, blank=True)
+    failure_reason = models.CharField("失败原因", max_length=1000, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "activity_refund_record"
@@ -650,6 +656,232 @@ class ActivityRefundRecord(models.Model):
         verbose_name_plural = verbose_name
 
 
+class ActivityHuifuPaymentOrder(models.Model):
+    class PreorderStatus(models.TextChoices):
+        NOT_STARTED = "not_started", "未发起"
+        SUBMITTING = "submitting", "预下单处理中"
+        READY = "ready", "预下单成功"
+        FAILED = "failed", "预下单失败"
+
+    publish_order = models.OneToOneField(
+        ActivityPublishOrder,
+        on_delete=models.PROTECT,
+        related_name="huifu_payment",
+        null=True,
+        blank=True,
+        verbose_name="活动发布支付单",
+    )
+    participation_order = models.OneToOneField(
+        ActivityParticipationPaymentOrder,
+        on_delete=models.PROTECT,
+        related_name="huifu_payment",
+        null=True,
+        blank=True,
+        verbose_name="活动报名支付单",
+    )
+    preorder_status = models.CharField(
+        "汇付预下单状态",
+        max_length=16,
+        choices=PreorderStatus,
+        default=PreorderStatus.NOT_STARTED,
+    )
+    gateway_merchant_id = models.CharField("汇付商户号", max_length=32, blank=True)
+    req_date = models.CharField("汇付请求日期", max_length=8, blank=True)
+    req_seq_id = models.CharField("汇付请求流水号", max_length=128, blank=True)
+    payment_scene = models.CharField("支付场景", max_length=32, blank=True)
+    trade_type = models.CharField("汇付交易类型", max_length=16, blank=True)
+    gateway_trade_no = models.CharField("汇付全局流水号", max_length=128, blank=True)
+    payment_invoke_payload = models.JSONField("客户端调起参数", default=dict, blank=True)
+    gateway_party_order_id = models.CharField("渠道商户订单号", max_length=64, blank=True)
+    gateway_out_trans_id = models.CharField("渠道交易订单号", max_length=64, blank=True)
+    gateway_response_code = models.CharField("汇付响应码", max_length=32, blank=True)
+    gateway_response_digest = models.CharField("汇付响应摘要", max_length=64, blank=True)
+    gateway_last_query_status = models.CharField("最近查单状态", max_length=8, blank=True)
+    gateway_last_query_digest = models.CharField("最近查单响应摘要", max_length=64, blank=True)
+    gateway_last_queried_at = models.DateTimeField("最近查单时间", null=True, blank=True)
+    close_req_date = models.CharField("汇付关单请求日期", max_length=8, blank=True)
+    close_req_seq_id = models.CharField("汇付关单请求流水号", max_length=128, blank=True)
+    close_query_req_date = models.CharField("汇付关单查询日期", max_length=8, blank=True)
+    close_query_req_seq_id = models.CharField(
+        "汇付关单查询流水号", max_length=128, blank=True
+    )
+    gateway_close_status = models.CharField("汇付关单状态", max_length=8, blank=True)
+    gateway_close_response_code = models.CharField(
+        "汇付关单响应码", max_length=32, blank=True
+    )
+    gateway_close_response_digest = models.CharField(
+        "汇付关单响应摘要", max_length=64, blank=True
+    )
+    gateway_close_queried_at = models.DateTimeField(
+        "最近关单查询时间", null=True, blank=True
+    )
+    preorder_attempts = models.PositiveSmallIntegerField("预下单尝试次数", default=0)
+    preorder_requested_at = models.DateTimeField("预下单请求时间", null=True, blank=True)
+    preorder_ready_at = models.DateTimeField("预下单完成时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "activity_huifu_payment_order"
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("preorder_status", "-updated_at"),
+                name="activity_huifu_pay_pre_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(publish_order__isnull=False, participation_order__isnull=True)
+                    | Q(publish_order__isnull=True, participation_order__isnull=False)
+                ),
+                name="activity_huifu_payment_one_business_order",
+            ),
+            models.UniqueConstraint(
+                fields=("gateway_trade_no",),
+                condition=~Q(gateway_trade_no=""),
+                name="uniq_activity_huifu_gateway_trade",
+            ),
+            models.UniqueConstraint(
+                fields=("req_date", "req_seq_id"),
+                condition=~Q(req_seq_id=""),
+                name="uniq_activity_huifu_payment_request",
+            ),
+            models.UniqueConstraint(
+                fields=("close_req_date", "close_req_seq_id"),
+                condition=~Q(close_req_seq_id=""),
+                name="uniq_act_huifu_close_req",
+            ),
+            models.UniqueConstraint(
+                fields=("close_query_req_date", "close_query_req_seq_id"),
+                condition=~Q(close_query_req_seq_id=""),
+                name="uniq_act_huifu_close_query",
+            ),
+        ]
+        verbose_name = "活动汇付支付请求"
+        verbose_name_plural = verbose_name
+
+
+class ActivityHuifuRefundOrder(models.Model):
+    publish_refund = models.OneToOneField(
+        ActivityRefundRecord,
+        on_delete=models.PROTECT,
+        related_name="huifu_refund",
+        null=True,
+        blank=True,
+        verbose_name="活动发布退款单",
+    )
+    participation_refund = models.OneToOneField(
+        ActivityParticipationRefundOrder,
+        on_delete=models.PROTECT,
+        related_name="huifu_refund",
+        null=True,
+        blank=True,
+        verbose_name="活动报名退款单",
+    )
+    gateway_merchant_id = models.CharField("汇付商户号", max_length=32, blank=True)
+    req_date = models.CharField("汇付退款请求日期", max_length=8, blank=True)
+    req_seq_id = models.CharField("汇付退款请求流水号", max_length=128, blank=True)
+    gateway_refund_no = models.CharField("汇付退款全局流水号", max_length=128, blank=True)
+    gateway_status = models.CharField("渠道退款状态", max_length=8, blank=True)
+    gateway_response_code = models.CharField("汇付响应码", max_length=32, blank=True)
+    gateway_response_digest = models.CharField("汇付响应摘要", max_length=64, blank=True)
+    gateway_last_query_status = models.CharField("最近退款查询状态", max_length=8, blank=True)
+    gateway_last_query_digest = models.CharField("最近退款查询响应摘要", max_length=64, blank=True)
+    gateway_last_queried_at = models.DateTimeField("最近退款查询时间", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "activity_huifu_refund_order"
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(publish_refund__isnull=False, participation_refund__isnull=True)
+                    | Q(publish_refund__isnull=True, participation_refund__isnull=False)
+                ),
+                name="activity_huifu_refund_one_business_order",
+            ),
+            models.UniqueConstraint(
+                fields=("gateway_refund_no",),
+                condition=~Q(gateway_refund_no=""),
+                name="uniq_activity_huifu_gateway_refund",
+            ),
+            models.UniqueConstraint(
+                fields=("req_date", "req_seq_id"),
+                condition=~Q(req_seq_id=""),
+                name="uniq_activity_huifu_refund_request",
+            ),
+        ]
+        verbose_name = "活动汇付退款请求"
+        verbose_name_plural = verbose_name
+
+
+class ActivityHuifuNotification(models.Model):
+    class Status(models.TextChoices):
+        RECEIVED = "received", "已接收"
+        PROCESSED = "processed", "已处理"
+
+    event_key = models.CharField("事件幂等键", max_length=64, unique=True)
+    payment = models.ForeignKey(
+        ActivityHuifuPaymentOrder,
+        on_delete=models.PROTECT,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    refund = models.ForeignKey(
+        ActivityHuifuRefundOrder,
+        on_delete=models.PROTECT,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    huifu_id = models.CharField("汇付商户号", max_length=32)
+    req_date = models.CharField("请求日期", max_length=8)
+    req_seq_id = models.CharField("请求流水号", max_length=128)
+    hf_seq_id = models.CharField("汇付全局流水号", max_length=128, blank=True)
+    trans_type = models.CharField("交易类型", max_length=32, blank=True)
+    notify_type = models.CharField("通知类型", max_length=8, blank=True)
+    trans_stat = models.CharField("交易状态", max_length=8, blank=True)
+    amount = models.CharField("通知金额（元）", max_length=16, blank=True)
+    payload_digest = models.CharField("通知报文摘要", max_length=64)
+    signature_verified = models.BooleanField("验签通过", default=False)
+    query_response_digest = models.CharField("主动查询响应摘要", max_length=64, blank=True)
+    status = models.CharField(
+        "处理状态", max_length=16, choices=Status, default=Status.RECEIVED
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "activity_huifu_notification"
+        ordering = ("-received_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("req_date", "req_seq_id"),
+                name="activity_huifu_notify_req_idx",
+            ),
+            models.Index(
+                fields=("status", "-received_at"),
+                name="act_huifu_notify_status_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(payment__isnull=False, refund__isnull=True)
+                    | Q(payment__isnull=True, refund__isnull=False)
+                ),
+                name="activity_huifu_notify_one_request",
+            ),
+        ]
+        verbose_name = "活动汇付通知"
+        verbose_name_plural = verbose_name
+
+
 def generate_activity_settlement_no():
     return f"AST{uuid.uuid4().hex[:20].upper()}"
 
@@ -659,7 +891,7 @@ class ActivitySettlement(models.Model):
         CONFIRMING = "confirming", "履约确认中"
         RISK_FROZEN = "risk_frozen", "风险冻结中"
         DISPUTE_FROZEN = "dispute_frozen", "争议冻结中"
-        SETTLED = "settled", "已结算入账"
+        SETTLED = "settled", "平台账务已结算"
 
     class DisputeSource(models.TextChoices):
         NONE = "", "无"
@@ -702,7 +934,7 @@ class ActivitySettlement(models.Model):
         "争议来源", max_length=20, choices=DisputeSource, blank=True
     )
     calculation_snapshot = models.JSONField("结算计算快照", default=dict)
-    settled_at = models.DateTimeField("结算入账时间", null=True, blank=True)
+    settled_at = models.DateTimeField("平台账务结算时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

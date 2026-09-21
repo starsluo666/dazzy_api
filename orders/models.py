@@ -548,7 +548,7 @@ class ProviderOrderSettlement(models.Model):
     class Status(models.TextChoices):
         RISK_FROZEN = "risk_frozen", "风险冻结中"
         DISPUTE_FROZEN = "dispute_frozen", "争议冻结中"
-        SETTLED = "settled", "已结算入账"
+        SETTLED = "settled", "平台账务已结算"
         CANCELLED = "cancelled", "已取消"
 
     settlement_no = models.CharField(
@@ -588,7 +588,7 @@ class ProviderOrderSettlement(models.Model):
     freeze_until = models.DateTimeField("冻结截止时间")
     dispute_reason = models.CharField("争议冻结原因", max_length=1000, blank=True)
     calculation_snapshot = models.JSONField("结算计算快照", default=dict)
-    settled_at = models.DateTimeField("结算入账时间", null=True, blank=True)
+    settled_at = models.DateTimeField("平台账务结算时间", null=True, blank=True)
     cancelled_at = models.DateTimeField("取消时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

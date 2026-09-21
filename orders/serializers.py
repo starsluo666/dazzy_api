@@ -60,6 +60,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
                 is_active=True,
                 category__is_active=True,
                 provider__status=ProviderProfile.Status.APPROVED,
+                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
                 provider__identity_status=ProviderProfile.IdentityStatus.VERIFIED,
                 provider__is_accepting_orders=True,
             )
@@ -401,7 +402,7 @@ def quote_payload(validated_data):
     return {
         "provider": {
             "public_id": service.provider.user.public_id,
-            "nickname": service.provider.user.nickname,
+            "nickname": service.provider.public_display_name,
             "avatar_url": build_media_url(service.provider.user.avatar_object_key),
             "verified": service.provider.identity_status
             == service.provider.IdentityStatus.VERIFIED,

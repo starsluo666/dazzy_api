@@ -41,7 +41,9 @@ class HomeDiscoveryTests(TestCase):
             provider = ProviderProfile.objects.create(
                 user=user,
                 status=ProviderProfile.Status.APPROVED,
+                onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
                 identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+                display_name=f"达人{index}",
                 lifestyle_photo=lifestyle_photo,
                 bio="用于首页推荐测试的完整达人资料。",
                 service_city_code="130400",
@@ -171,6 +173,29 @@ class HomeDiscoveryTests(TestCase):
         response = self.client.get("/api/v1/home/", {"longitude": "114.5240070"})
 
         self.assertEqual(response.status_code, 400)
+
+    @patch("home.views.build_home_card_assets", return_value={})
+    def test_home_excludes_provider_outside_own_service_radius(self, _build_assets):
+        distant = ProviderProfile.objects.get(user__nickname="达人0")
+        ProviderLiveLocation.objects.filter(provider=distant).update(
+            source_longitude=Decimal("113.2644350"),
+            source_latitude=Decimal("23.1291630"),
+            position=Point(113.258692, 23.126512, srid=4326),
+        )
+
+        response = self.client.get(
+            "/api/v1/home/",
+            {
+                "city_code": "130400",
+                "longitude": "114.5240070",
+                "latitude": "36.6074460",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        providers = response.json()["data"]["recommended_providers"]
+        self.assertEqual(len(providers), 4)
+        self.assertNotIn("达人0", [provider["nickname"] for provider in providers])
 
     @patch("home.views.build_home_card_assets", return_value={})
     def test_home_keeps_offline_providers_with_last_known_distance(self, _build_assets):

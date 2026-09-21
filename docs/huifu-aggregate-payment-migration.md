@@ -1,8 +1,8 @@
 # DAZZY 汇付聚合支付迁移说明
 
-> 版本：V1.0
-> 日期：2026-09-18
-> 当前范围：微信服务号 H5 `T_JSAPI`；Android `T_APP` 保留后端扩展点，尚未开放客户端
+> 版本：V1.1
+> 日期：2026-09-19
+> 当前范围：达人订单、活动发布、活动报名的微信服务号 H5 `T_JSAPI`；Android `T_APP` 尚未开放客户端
 
 ## 1. 当前结论
 
@@ -92,6 +92,25 @@ POST /api/v1/provider-orders/{order_no}/payment-status/
 接口只允许订单本人访问，并设置独立频率限制。支付超时任务在关闭订单前也会执行一次
 主动查单；如果查单暂时不可用，任务进入重试而不会直接关闭可能已经付款的订单。
 
+### 2.3 活动发布与报名支付
+
+活动支付复用同一服务号授权、官方 SDK、通知地址和主动查单规则，不另写签名或 HTTP
+客户端。业务接口如下：
+
+```text
+GET  /api/v1/activities/{id}/publish-order/payment-authorization/
+POST /api/v1/activities/{id}/publish-order/payment-session/
+POST /api/v1/activities/{id}/publish-order/payment-status/
+
+GET  /api/v1/activities/{id}/participation/payment-authorization/
+POST /api/v1/activities/{id}/participation/payment-session/
+POST /api/v1/activities/{id}/participation/payment-status/
+```
+
+`ActivityHuifuPaymentOrder` 持久化汇付请求身份、客户端调起参数摘要和最近查单结果；
+一条记录必须且只能关联活动发布支付单或活动报名支付单。活动支付前端只开放微信服务号
+H5，支付宝、原生 App 和小程序支付在完成独立渠道联调前不展示为可用渠道。
+
 ## 3. 服务号 OAuth 与 OpenID
 
 公众号/服务号 `T_JSAPI` 必须使用与 `sub_appid` 同一应用授权得到的
@@ -149,6 +168,23 @@ POST /api/v1/payments/huifu/notify/
 
 同步 `resp_code`、浏览器回跳和 `WeixinJSBridge` 回调均不属于支付终态。
 
+### 5.1 活动退款与超时到账补偿
+
+真实活动支付退款使用聚合支付退款与退款查询，退款请求固定复用持久化的
+`req_date/req_seq_id`，并通过 `ActivityHuifuRefundOrder` 保存受理、查询和汇付退款流水。
+任务中心分别重试活动发布退款和活动报名退款；只有退款查询返回 `S` 才更新本地退款成功
+及支付单已退款状态。
+
+支付超时任务先主动查单；未确认成功时释放本地名额或关闭发布支付，再创建独立取消补偿
+任务。补偿任务遵循“查单 → 等待最短关单间隔 → 关单/关单查询”的顺序，关单与查询请求号
+首次生成后固定复用，并保存关单状态、响应摘要和查询时间。历史已关闭但缺少补偿任务的真实
+支付单由任务同步命令补建。
+
+如果支付在名额释放、发布支付关闭或关单竞态中确认成功，系统先记录真实支付终态，再创建
+全额原路退款任务，避免把晚到支付错误地推进为报名成功或提交审核。支付通知和退款通知共用
+验签入口，按本地请求流水分发并分别保存幂等事件。支付结果接口还会区分退款处理中、退款
+成功和退款失败，前端回跳或重新进入收银台时不会把已退款订单展示成支付成功。
+
 ## 6. 环境变量
 
 生产凭据只能由部署环境或密钥管理服务注入：
@@ -192,9 +228,11 @@ WECHAT_OAUTH_TIMEOUT_SECONDS
 本轮实现按 `huifu-pay-integration` V1.3.5 的以下资料执行：
 
 - `copilot-existing-system.md`
+- `copilot-solution-selection.md`
 - `aggregation-order.md`
-- `aggregation-order-method-wechat.md`
-- `aggregation-python-adapter.md`
+- `aggregation-query-payment-query.md`
+- `aggregation-query-trade-close.md`
+- `aggregation-refund.md`
 - `shared-async-notify.md`
 
 汇付接口字段与渠道开通结果仍以联调时官方开放平台返回和汇付人工确认为准。

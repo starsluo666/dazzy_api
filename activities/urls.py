@@ -8,9 +8,15 @@ from .views import (
     ActivityListView,
     ActivityOrganizerCancelView,
     ActivityParticipationPaymentView,
+    ActivityParticipationPaymentAuthorizationView,
+    ActivityParticipationPaymentSessionView,
+    ActivityParticipationPaymentStatusView,
     ActivityParticipationView,
     ActivityPublishOrderView,
     ActivityPublishPaymentView,
+    ActivityPublishPaymentAuthorizationView,
+    ActivityPublishPaymentSessionView,
+    ActivityPublishPaymentStatusView,
     ActivityPublishRuleView,
     ActivityReportCreateView,
     MyActivityListView,
@@ -35,6 +41,21 @@ urlpatterns = [
         name="activity-participation-payment",
     ),
     path(
+        "activities/<int:pk>/participation/payment-authorization/",
+        ActivityParticipationPaymentAuthorizationView.as_view(),
+        name="activity-participation-payment-authorization",
+    ),
+    path(
+        "activities/<int:pk>/participation/payment-session/",
+        ActivityParticipationPaymentSessionView.as_view(),
+        name="activity-participation-payment-session",
+    ),
+    path(
+        "activities/<int:pk>/participation/payment-status/",
+        ActivityParticipationPaymentStatusView.as_view(),
+        name="activity-participation-payment-status",
+    ),
+    path(
         "activities/<int:pk>/after-sales/",
         ActivityAfterSalesView.as_view(),
         name="activity-after-sales",
@@ -46,4 +67,19 @@ urlpatterns = [
     ),
     path("activities/<int:pk>/publish-order/", ActivityPublishOrderView.as_view(), name="activity-publish-order"),
     path("activities/<int:pk>/publish-order/simulate-payment/", ActivityPublishPaymentView.as_view(), name="activity-publish-payment"),
+    path(
+        "activities/<int:pk>/publish-order/payment-authorization/",
+        ActivityPublishPaymentAuthorizationView.as_view(),
+        name="activity-publish-payment-authorization",
+    ),
+    path(
+        "activities/<int:pk>/publish-order/payment-session/",
+        ActivityPublishPaymentSessionView.as_view(),
+        name="activity-publish-payment-session",
+    ),
+    path(
+        "activities/<int:pk>/publish-order/payment-status/",
+        ActivityPublishPaymentStatusView.as_view(),
+        name="activity-publish-payment-status",
+    ),
 ]

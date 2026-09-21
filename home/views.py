@@ -14,7 +14,7 @@ from mediafiles.services import build_home_card_assets
 from providers.availability import build_availability
 from providers.models import ProviderService
 from providers.presence import online_provider_query
-from providers.selectors import public_providers
+from providers.selectors import public_providers, within_service_radius
 
 from .serializers import HomeActivitySerializer, HomeProviderSerializer, HomeQuerySerializer
 
@@ -43,9 +43,7 @@ def _recommended_providers(params, point, request):
     if city_code := params.get("city_code"):
         queryset = queryset.filter(service_city_code=city_code)
     if point:
-        queryset = queryset.annotate(
-            distance=Distance("live_location__position", point)
-        )
+        queryset = within_service_radius(queryset, point)
     providers = list(
         queryset.order_by(
             "-is_currently_online", "-rating", "-service_count", "id"

@@ -156,6 +156,7 @@ class ActivityParticipationOrderCreateSerializer(serializers.Serializer):
         choices=(
             ActivityParticipationPaymentOrder.Channel.MOCK_WECHAT,
             ActivityParticipationPaymentOrder.Channel.MOCK_ALIPAY,
+            ActivityParticipationPaymentOrder.Channel.WECHAT,
         ),
     )
 

@@ -32,7 +32,13 @@ from orders.models import (
     ProviderOrderRefundOrder,
     ProviderOrderSettlement,
 )
-from providers.models import ProviderProfile, ProviderService, ServiceCategory
+from providers.models import (
+    ProviderProfile,
+    ProviderProfileRevision,
+    ProviderService,
+    ProviderServiceRevision,
+    ServiceCategory,
+)
 from providers.presence import online_provider_query
 from taskcenter.models import ScheduledTask
 from taskcenter.serializers import ScheduledTaskQuerySerializer, ScheduledTaskSerializer
@@ -107,6 +113,8 @@ from .serializers import (
     ProviderOrderingSettingSerializer,
     PlatformOperationSettingSerializer,
     ProviderApplicationQuerySerializer,
+    ProviderApplicationReviewDecisionSerializer,
+    ProviderChangeReviewQuerySerializer,
     ProviderReviewDecisionSerializer,
     ProviderReviewListSerializer,
 )
@@ -120,6 +128,9 @@ from .services import (
     moderate_provider_order_review,
     review_provider_order_after_sales_case,
     review_provider_application,
+    review_provider_onboarding,
+    review_provider_profile_revision,
+    review_provider_service_revision,
     review_provider_identity,
     review_activity,
     review_activity_after_sales_case,
@@ -615,6 +626,22 @@ class AdminOverviewView(APIView):
             orders = orders.filter(provider__service_city_code__in=access.city_codes)
             activities = activities.filter(city_code__in=access.city_codes)
         trend = build_order_trend(orders, days=days)
+        pending_provider_reviews = (
+            providers.filter(status=ProviderProfile.Status.PENDING).count()
+            + providers.filter(
+                onboarding_status=ProviderProfile.OnboardingStatus.PENDING_REVIEW
+            ).count()
+            + ProviderProfileRevision.objects.filter(
+                provider__in=providers,
+                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+                status=ProviderProfileRevision.Status.PENDING,
+            ).count()
+            + ProviderServiceRevision.objects.filter(
+                provider__in=providers,
+                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+                status=ProviderServiceRevision.Status.PENDING,
+            ).count()
+        )
         week_transaction_amount = sum(
             point["transaction_amount"] for point in trend["points"][-7:]
         )
@@ -624,7 +651,7 @@ class AdminOverviewView(APIView):
                     "metrics": {
                         "today_new_users": User.objects.filter(date_joined__date=today).count()
                         if access.all_data else None,
-                        "pending_providers": providers.filter(status=ProviderProfile.Status.PENDING).count(),
+                        "pending_providers": pending_provider_reviews,
                         "active_orders": orders.filter(
                             status__in=(
                                 ProviderOrder.Status.PENDING_ACCEPTANCE,
@@ -641,7 +668,7 @@ class AdminOverviewView(APIView):
                         {
                             "key": "provider_review",
                             "label": "达人入驻审核",
-                            "count": providers.filter(status=ProviderProfile.Status.PENDING).count(),
+                            "count": pending_provider_reviews,
                             "priority": "high",
                         },
                         {
@@ -1456,14 +1483,16 @@ class ProviderApplicationListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = scoped_providers(access).select_related("user", "lifestyle_photo").prefetch_related(
-            "services__category"
+            "services__category", "category_grants__category"
         )
         queryset = queryset.filter(status=params["status"])
         if city_code := params.get("city_code"):
             queryset = queryset.filter(service_city_code=city_code)
         if keyword := params.get("search", "").strip():
             queryset = queryset.filter(
-                Q(user__nickname__icontains=keyword) | Q(user__phone__icontains=keyword)
+                Q(user__nickname__icontains=keyword)
+                | Q(user__phone__icontains=keyword)
+                | Q(application_real_name__icontains=keyword)
             )
         return paginated_response(
             queryset.order_by("submitted_at", "id"),
@@ -1481,7 +1510,7 @@ class ProviderApplicationDetailView(APIView):
         access.require("provider.review")
         profile = get_object_or_404(
             scoped_providers(access).select_related("user", "lifestyle_photo").prefetch_related(
-                "services__category"
+                "services__category", "category_grants__category"
             ),
             id=profile_id,
         )
@@ -1494,20 +1523,195 @@ class ProviderApplicationReviewView(APIView):
     def post(self, request, profile_id):
         access = resolve_admin_access(request.user)
         access.require("provider.review")
-        serializer = ProviderReviewDecisionSerializer(data=request.data)
+        serializer = ProviderApplicationReviewDecisionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = review_provider_application(
             profile_id=profile_id,
             decision=serializer.validated_data["decision"],
             reason=serializer.validated_data.get("reason", ""),
+            allowed_category_ids=serializer.validated_data.get("allowed_category_ids", []),
             actor=request.user,
             access=access,
             request=request,
         )
         profile = ProviderProfile.objects.select_related("user", "lifestyle_photo").prefetch_related(
-            "services__category"
+            "services__category", "category_grants__category"
         ).get(id=profile.id)
         return Response({"data": ProviderReviewListSerializer(profile).data})
+
+
+def _profile_revision_payload(revision):
+    if not revision:
+        return None
+    return {
+        "id": revision.id,
+        "display_name": revision.display_name,
+        "bio": revision.bio,
+        "lifestyle_photo_url": build_media_url(revision.lifestyle_photo.object_key),
+        "service_city_code": revision.service_city_code,
+        "service_city_name": revision.service_city_name,
+        "max_service_radius_km": revision.max_service_radius_km,
+        "status": revision.status,
+        "rejection_reason": revision.rejection_reason,
+        "submitted_at": revision.submitted_at,
+    }
+
+
+def _service_revision_payload(revision):
+    minimum, maximum = revision.category.price_range_for(revision.billing_type)
+    return {
+        "id": revision.id,
+        "service_id": revision.service_id,
+        "action": revision.action,
+        "action_label": revision.get_action_display(),
+        "category_id": revision.category_id,
+        "category_name": revision.category.name,
+        "billing_type": revision.billing_type,
+        "billing_type_label": revision.get_billing_type_display(),
+        "price_amount": revision.price_amount,
+        "min_price_amount": minimum,
+        "max_price_amount": maximum,
+        "estimated_duration_minutes": revision.estimated_duration_minutes,
+        "description": revision.description,
+        "status": revision.status,
+        "rejection_reason": revision.rejection_reason,
+        "submitted_at": revision.submitted_at,
+    }
+
+
+def _provider_change_payload(kind, obj):
+    provider = obj if kind == "onboarding" else obj.provider
+    base = {
+        "id": provider.id if kind == "onboarding" else obj.id,
+        "kind": kind,
+        "provider_id": provider.id,
+        "provider_name": provider.public_display_name,
+        "application_real_name": provider.application_real_name,
+        "identity_real_name": provider.identity_real_name,
+        "identity_name_matches": (
+            not provider.application_real_name
+            or provider.application_real_name.strip() == provider.identity_real_name.strip()
+        ),
+        "phone": provider.user.phone,
+        "service_city_name": provider.service_city_name,
+    }
+    if kind == "onboarding":
+        profile_revision = provider.profile_revisions.filter(
+            status=ProviderProfileRevision.Status.PENDING
+        ).select_related("lifestyle_photo").first()
+        services = provider.service_revisions.filter(
+            status=ProviderServiceRevision.Status.PENDING
+        ).select_related("category", "service")
+        base.update({
+            "status": provider.onboarding_status,
+            "submitted_at": provider.onboarding_submitted_at,
+            "rejection_reason": provider.onboarding_rejection_reason,
+            "identity": {
+                "status": provider.identity_status,
+                "number_masked": provider.identity_number_masked,
+                "front_photo_url": build_media_url(
+                    provider.identity_front_photo.object_key, private=True
+                ) if provider.identity_front_photo_id else None,
+                "back_photo_url": build_media_url(
+                    provider.identity_back_photo.object_key, private=True
+                ) if provider.identity_back_photo_id else None,
+                "face_photo_url": build_media_url(
+                    provider.identity_face_photo.object_key, private=True
+                ) if provider.identity_face_photo_id else None,
+            },
+            "profile_revision": _profile_revision_payload(profile_revision),
+            "service_revisions": [_service_revision_payload(item) for item in services],
+        })
+    elif kind == "profile":
+        base.update({
+            "status": obj.status,
+            "submitted_at": obj.submitted_at,
+            "rejection_reason": obj.rejection_reason,
+            "profile_revision": _profile_revision_payload(obj),
+            "service_revisions": [],
+        })
+    else:
+        base.update({
+            "status": obj.status,
+            "submitted_at": obj.submitted_at,
+            "rejection_reason": obj.rejection_reason,
+            "profile_revision": None,
+            "service_revisions": [_service_revision_payload(obj)],
+        })
+    return base
+
+
+class ProviderChangeReviewListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("provider.review")
+        query = ProviderChangeReviewQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+        kind = params["kind"]
+        requested_status = params["status"]
+        if kind == "onboarding":
+            status_value = {
+                "pending": ProviderProfile.OnboardingStatus.PENDING_REVIEW,
+                "approved": ProviderProfile.OnboardingStatus.APPROVED,
+                "rejected": ProviderProfile.OnboardingStatus.REJECTED,
+            }[requested_status]
+            queryset = scoped_providers(access).filter(onboarding_status=status_value).select_related(
+                "user", "identity_front_photo", "identity_back_photo", "identity_face_photo"
+            ).order_by("-onboarding_submitted_at", "-id")
+        elif kind == "profile":
+            queryset = ProviderProfileRevision.objects.filter(status=requested_status).select_related(
+                "provider__user", "lifestyle_photo"
+            )
+            if not access.all_data:
+                queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
+            queryset = queryset.order_by("-submitted_at", "-id")
+        else:
+            queryset = ProviderServiceRevision.objects.filter(status=requested_status).select_related(
+                "provider__user", "category", "service"
+            )
+            if not access.all_data:
+                queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
+            queryset = queryset.order_by("-submitted_at", "-id")
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset[(page - 1) * page_size : page * page_size]
+        return Response({"data": {
+            "items": [_provider_change_payload(kind, item) for item in items],
+            "pagination": {"page": page, "page_size": page_size, "total": total},
+        }})
+
+
+class ProviderChangeReviewActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, kind, review_id):
+        access = resolve_admin_access(request.user)
+        access.require("provider.review")
+        serializer = ProviderReviewDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        kwargs = {
+            "decision": serializer.validated_data["decision"],
+            "reason": serializer.validated_data.get("reason", ""),
+            "actor": request.user,
+            "access": access,
+            "request": request,
+        }
+        if kind == "onboarding":
+            result = review_provider_onboarding(profile_id=review_id, **kwargs)
+            result_status = result.onboarding_status
+        elif kind == "profile":
+            result = review_provider_profile_revision(revision_id=review_id, **kwargs)
+            result_status = result.status
+        elif kind == "service":
+            result = review_provider_service_revision(revision_id=review_id, **kwargs)
+            result_status = result.status
+        else:
+            raise ValidationError({"kind": "不支持的审核类型。"})
+        return Response({"data": {"id": review_id, "kind": kind, "status": result_status}})
 
 
 class AdminUserListView(APIView):
@@ -1665,7 +1869,9 @@ class ProviderAdminListView(APIView):
             queryset = queryset.filter(service_city_code=city_code)
         if keyword := params.get("search", "").strip():
             queryset = queryset.filter(
-                Q(user__nickname__icontains=keyword) | Q(user__phone__icontains=keyword)
+                Q(display_name__icontains=keyword)
+                | Q(user__nickname__icontains=keyword)
+                | Q(user__phone__icontains=keyword)
             )
         summary_queryset = queryset
         online_query = online_provider_query(timezone.now())
