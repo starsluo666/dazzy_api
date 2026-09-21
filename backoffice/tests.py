@@ -497,6 +497,78 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(self.handan.display_name, "审核后的达人名")
         self.assertEqual(service.price_amount, 18000)
 
+    def test_initial_components_only_enter_combined_queue_and_keep_verified_identity(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.INCOMPLETE
+        self.handan.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+        self.handan.identity_real_name = self.handan.application_real_name
+        self.handan.save()
+        profile_revision = ProviderProfileRevision.objects.create(
+            provider=self.handan,
+            display_name="待开通达人名",
+            bio="这是首次综合开通审核所使用的完整达人资料。",
+            lifestyle_photo=self.handan_lifestyle_photo,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+        service_revision = ProviderServiceRevision.objects.create(
+            provider=self.handan,
+            category=self.order_category,
+            action=ProviderServiceRevision.Action.CREATE,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=16800,
+            description="首次综合开通审核服务",
+        )
+
+        profile_queue = self.client.get(
+            reverse("backoffice-provider-change-reviews"),
+            {"kind": "profile", "status": "pending"},
+        )
+        service_queue = self.client.get(
+            reverse("backoffice-provider-change-reviews"),
+            {"kind": "service", "status": "pending"},
+        )
+
+        self.assertEqual(profile_queue.status_code, status.HTTP_200_OK)
+        self.assertEqual(service_queue.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_queue.data["data"]["pagination"]["total"], 0)
+        self.assertEqual(service_queue.data["data"]["pagination"]["total"], 0)
+
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.PENDING_REVIEW
+        self.handan.onboarding_submitted_at = timezone.now()
+        self.handan.save(
+            update_fields=("onboarding_status", "onboarding_submitted_at", "updated_at")
+        )
+        summary = self.client.get(reverse("backoffice-provider-review-summary"))
+        self.assertEqual(summary.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary.data["data"]["onboarding"], 1)
+        self.assertEqual(summary.data["data"]["profile_changes"], 0)
+        self.assertEqual(summary.data["data"]["service_changes"], 0)
+
+        rejected = self.client.post(
+            reverse(
+                "backoffice-provider-change-review-action",
+                args=("onboarding", self.handan.id),
+            ),
+            {"decision": "reject", "reason": "资料和服务说明需要补充"},
+            format="json",
+        )
+
+        self.assertEqual(rejected.status_code, status.HTTP_200_OK)
+        self.handan.refresh_from_db()
+        profile_revision.refresh_from_db()
+        service_revision.refresh_from_db()
+        self.assertEqual(
+            self.handan.identity_status,
+            ProviderProfile.IdentityStatus.VERIFIED,
+        )
+        self.assertEqual(
+            self.handan.onboarding_status,
+            ProviderProfile.OnboardingStatus.REJECTED,
+        )
+        self.assertEqual(profile_revision.status, ProviderProfileRevision.Status.REJECTED)
+        self.assertEqual(service_revision.status, ProviderServiceRevision.Status.REJECTED)
+
     def test_invalid_provider_list_query_returns_validation_error(self):
         response = self.client.get(
             reverse("backoffice-provider-applications"),
@@ -889,6 +961,13 @@ class BackofficeProviderReviewTests(APITestCase):
     def test_platform_operation_setting_can_be_updated_and_is_audited(self):
         self.client.force_authenticate(self.platform_admin)
         detail_url = reverse("backoffice-platform-operation-setting")
+        default_cover = MediaAsset.objects.create(
+            owner=self.platform_admin,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.ACTIVITY_COVER,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="test/activity/default-cover.webp",
+        )
 
         response = self.client.get(detail_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -906,6 +985,12 @@ class BackofficeProviderReviewTests(APITestCase):
                 "provider_order_confirmation_timeout_days": 5,
                 "provider_order_settlement_freeze_days": 2,
                 "activity_payment_timeout_minutes": 15,
+                "activity_service_fee_rate": "0.1250",
+                "activity_min_capacity": 3,
+                "activity_max_capacity": 80,
+                "activity_min_aa_principal_amount": 100,
+                "activity_max_aa_principal_amount": 500000,
+                "default_activity_cover_id": str(default_cover.pk),
                 "activity_minimum_advance_hours": 24,
                 "activity_maximum_advance_days": 45,
                 "activity_settlement_confirmation_hours": 36,
@@ -920,6 +1005,12 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(setting.provider_order_confirmation_timeout_days, 5)
         self.assertEqual(setting.provider_order_settlement_freeze_days, 2)
         self.assertEqual(setting.activity_payment_timeout_minutes, 15)
+        self.assertEqual(setting.activity_service_fee_rate, Decimal("0.1250"))
+        self.assertEqual(setting.activity_min_capacity, 3)
+        self.assertEqual(setting.activity_max_capacity, 80)
+        self.assertEqual(setting.activity_min_aa_principal_amount, 100)
+        self.assertEqual(setting.activity_max_aa_principal_amount, 500000)
+        self.assertEqual(setting.default_activity_cover_id, default_cover.pk)
         self.assertEqual(setting.activity_minimum_advance_hours, 24)
         self.assertEqual(setting.activity_maximum_advance_days, 45)
         self.assertEqual(setting.activity_settlement_confirmation_hours, 36)

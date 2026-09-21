@@ -303,12 +303,18 @@ class CurrentProviderProfileView(APIView):
 
     def get(self, request):
         profile = current_approved_provider(request)
-        revision = profile.profile_revisions.filter(
-            status__in=(
+        latest_revision = profile.profile_revisions.select_related(
+            "lifestyle_photo"
+        ).order_by("-submitted_at", "-id").first()
+        revision = (
+            latest_revision
+            if latest_revision
+            and latest_revision.status in (
                 ProviderProfileRevision.Status.PENDING,
                 ProviderProfileRevision.Status.REJECTED,
             )
-        ).select_related("lifestyle_photo").first()
+            else None
+        )
         return Response(
             {"data": ProviderProfileManageSerializer(
                 revision or profile, context={"request": request}
@@ -405,22 +411,35 @@ class CurrentProviderServiceListCreateView(APIView):
         provider = self.provider(request)
         services = list(provider.services.select_related("category").order_by("id"))
         revisions = list(
-            provider.service_revisions.filter(
-                status__in=(
-                    ProviderServiceRevision.Status.PENDING,
-                    ProviderServiceRevision.Status.REJECTED,
-                )
-            ).select_related("category", "service").order_by("-submitted_at", "-id")
+            provider.service_revisions.select_related(
+                "category", "service"
+            ).order_by("-submitted_at", "-id")
         )
         latest = {}
         for revision in revisions:
             key = revision.service_id or (revision.category_id, revision.billing_type)
             latest.setdefault(key, revision)
         items = []
+        live_service_keys = {
+            (service.category_id, service.billing_type) for service in services
+        }
         for service in services:
-            items.append(_managed_service_item(service=service, revision=latest.pop(service.id, None)))
+            revision = latest.pop(service.id, None)
+            if revision and revision.status not in (
+                ProviderServiceRevision.Status.PENDING,
+                ProviderServiceRevision.Status.REJECTED,
+            ):
+                revision = None
+            items.append(_managed_service_item(service=service, revision=revision))
         for revision in latest.values():
-            if revision.service_id is None:
+            if (
+                revision.service_id is None
+                and revision.status in (
+                    ProviderServiceRevision.Status.PENDING,
+                    ProviderServiceRevision.Status.REJECTED,
+                )
+                and (revision.category_id, revision.billing_type) not in live_service_keys
+            ):
                 items.append(_managed_service_item(revision=revision))
         return Response({"data": {"items": items}})
 

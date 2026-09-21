@@ -25,6 +25,7 @@ from .views import (
 urlpatterns = [
     path("activities/", ActivityListView.as_view(), name="activity-list"),
     path("activity-categories/", ActivityCategoryListView.as_view(), name="activity-category-list"),
+    path("activity-tags/", ActivityCategoryListView.as_view(), name="activity-tag-list"),
     path("activity-publish-rules/", ActivityPublishRuleView.as_view(), name="activity-publish-rules"),
     path("activities/mine/", MyActivityListView.as_view(), name="my-activity-list"),
     path("activities/<int:pk>/", ActivityDetailView.as_view(), name="activity-detail"),

@@ -37,13 +37,22 @@ from .serializers import STANDARD_REFUND_SNAPSHOT
 def create_activity_draft(*, organizer, validated_data) -> Activity:
     ensure_activity_payment_available("activity_publish")
     organizer = lock_active_user_for_business(organizer)
-    category = validated_data.pop("category_slug")
+    tags = validated_data.pop("tag_slugs", [])
+    category = validated_data.pop("category_slug", None)
+    if tags:
+        category = tags[0]
+    if not tags and category is not None:
+        tags = [category]
     longitude = validated_data.pop("longitude")
     latitude = validated_data.pop("latitude")
     validated_data.pop("refund_template_version")
-    cover = validated_data.pop("cover")
+    cover = validated_data.pop("cover", None)
+    from backoffice.models import PlatformOperationSetting
+
+    operation_setting = PlatformOperationSetting.current()
+    cover = cover or operation_setting.default_activity_cover
     wgs84 = gcj02_to_wgs84(longitude, latitude)
-    return Activity.objects.create(
+    activity = Activity.objects.create(
         organizer=organizer,
         category=category,
         cover=cover,
@@ -52,9 +61,12 @@ def create_activity_draft(*, organizer, validated_data) -> Activity:
         meeting_point=wgs84,
         refund_template_version="standard-v1",
         refund_rule_snapshot=STANDARD_REFUND_SNAPSHOT,
+        service_fee_rate=operation_setting.activity_service_fee_rate,
         status=Activity.Status.DRAFT,
         **validated_data,
     )
+    activity.tags.set(tags)
+    return activity
 
 
 def _publish_order_no() -> str:
@@ -306,7 +318,9 @@ def get_or_create_publish_order(*, activity_id: int, user):
         from taskcenter.services import mark_activity_publish_payment_expired
 
         mark_activity_publish_payment_expired(existing.order_no, source="checkout_guard")
-    service_fee = calculate_publish_service_fee(activity.aa_principal_amount)
+    service_fee = calculate_publish_service_fee(
+        activity.aa_principal_amount, activity.service_fee_rate
+    )
     order = ActivityPublishOrder.objects.create(
         activity=activity,
         order_no=_publish_order_no(),
@@ -314,7 +328,10 @@ def get_or_create_publish_order(*, activity_id: int, user):
         aa_principal_amount=activity.aa_principal_amount,
         platform_service_fee_amount=service_fee,
         payable_amount=activity.aa_principal_amount + service_fee,
-        pricing_snapshot={"platform_service_fee_rate": "0.10", "rounding": "half_up"},
+        pricing_snapshot={
+            "platform_service_fee_rate": str(activity.service_fee_rate),
+            "rounding": "half_up",
+        },
         expires_at=now
         + timedelta(minutes=platform_operation_rules()["activity_payment_timeout_minutes"]),
     )
@@ -398,7 +415,9 @@ def simulate_publish_payment(*, activity_id: int, user):
         recipient=user,
         event_type=UserNotification.EventType.ACTIVITY_PUBLISH_SUBMITTED,
         title="活动已提交审核",
-        content="发布支付成功，平台会尽快完成内容审核。",
+        content="活动提交成功，平台正在审核中，可在“我的活动”查看进展。",
+        action_text="查看进展",
+        action_url="/pages/activities/mine?role=organized",
     )
     return order
 
@@ -570,12 +589,14 @@ def get_or_create_participation_order(*, activity_id: int, user, channel: str):
     if _occupied_count(activity, now=now) >= activity.capacity:
         raise ValidationError("活动名额已满。")
 
-    service_fee = calculate_publish_service_fee(activity.aa_principal_amount)
+    service_fee = calculate_publish_service_fee(
+        activity.aa_principal_amount, activity.service_fee_rate
+    )
     expires_at = now + timedelta(
         minutes=platform_operation_rules()["activity_payment_timeout_minutes"]
     )
     snapshot = {
-        "platform_service_fee_rate": "0.10",
+        "platform_service_fee_rate": str(activity.service_fee_rate),
         "rounding": "half_up",
         "refund_template_version": activity.refund_template_version,
     }

@@ -493,6 +493,16 @@ class ProviderSelfManagementTests(TestCase):
         self.assertEqual(submitted.status_code, 400)
         self.assertIn("真实姓名", str(submitted.data))
 
+    def test_provider_application_draft_allows_clearing_birth_date(self):
+        response = self.client.patch(
+            "/api/v1/providers/me/application/",
+            {"application_birth_date": None},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["data"]["application_birth_date"])
+
     def test_provider_profile_rejects_another_users_lifestyle_photo(self):
         ProviderProfile.objects.create(user=self.user, status=ProviderProfile.Status.APPROVED)
         other = User.objects.create_user(phone="13800000029", password="test-password")
@@ -745,6 +755,139 @@ class ProviderSelfManagementTests(TestCase):
                 status=ProviderProfileRevision.Status.PENDING,
                 display_name="新达人名",
             ).exists()
+        )
+
+    def test_latest_approved_revisions_do_not_expose_historical_rejections(self):
+        photo = MediaAsset.objects.create(
+            owner=self.user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{self.user.public_id}/approved-current.webp",
+        )
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+            display_name="当前达人名",
+            bio="这是当前已经审核通过并正式生效的达人简介。",
+            lifestyle_photo=photo,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+        ProviderProfileRevision.objects.create(
+            provider=profile,
+            display_name="已驳回达人名",
+            bio="这是历史上已经被后台驳回的达人简介内容。",
+            lifestyle_photo=photo,
+            service_city_code="110100",
+            service_city_name="北京市",
+            status=ProviderProfileRevision.Status.REJECTED,
+            rejection_reason="历史驳回",
+        )
+        ProviderProfileRevision.objects.create(
+            provider=profile,
+            display_name="当前达人名",
+            bio=profile.bio,
+            lifestyle_photo=photo,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+            status=ProviderProfileRevision.Status.APPROVED,
+        )
+        category = ServiceCategory.objects.create(
+            name="审核历史测试服务", slug="revision-history-service"
+        )
+        service = ProviderService.objects.create(
+            provider=profile,
+            category=category,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=15000,
+            description="当前已生效服务",
+        )
+        ProviderServiceRevision.objects.create(
+            provider=profile,
+            category=category,
+            action=ProviderServiceRevision.Action.CREATE,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=9000,
+            description="历史驳回服务",
+            status=ProviderServiceRevision.Status.REJECTED,
+            rejection_reason="历史驳回",
+        )
+        ProviderServiceRevision.objects.create(
+            provider=profile,
+            service=service,
+            category=category,
+            action=ProviderServiceRevision.Action.CREATE,
+            billing_type=ProviderService.BillingType.HOURLY,
+            price_amount=15000,
+            description="当前已生效服务",
+            status=ProviderServiceRevision.Status.APPROVED,
+        )
+
+        profile_response = self.client.get("/api/v1/providers/me/profile/")
+        services_response = self.client.get("/api/v1/providers/me/services/")
+
+        self.assertEqual(profile_response.status_code, 200)
+        self.assertEqual(profile_response.json()["data"]["display_name"], "当前达人名")
+        self.assertEqual(profile_response.json()["data"]["review_status"], "approved")
+        self.assertEqual(services_response.status_code, 200)
+        service_items = services_response.json()["data"]["items"]
+        self.assertEqual(len(service_items), 1)
+        self.assertEqual(service_items[0]["price_amount"], 15000)
+        self.assertEqual(service_items[0]["review_status"], "approved")
+
+    def test_verified_legacy_provider_auto_submits_combined_onboarding(self):
+        photo = MediaAsset.objects.create(
+            owner=self.user,
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.PROVIDER_PHOTO,
+            status=MediaAsset.Status.UPLOADED,
+            object_key=f"public/provider-photos/{self.user.public_id}/legacy-onboarding.webp",
+        )
+        profile = ProviderProfile.objects.create(
+            user=self.user,
+            status=ProviderProfile.Status.APPROVED,
+            identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            onboarding_status=ProviderProfile.OnboardingStatus.INCOMPLETE,
+            display_name="历史达人",
+            bio="这是历史达人等待补齐综合开通审核的资料。",
+            lifestyle_photo=photo,
+            service_city_code="130400",
+            service_city_name="邯郸市",
+        )
+        category = ServiceCategory.objects.create(
+            name="历史达人服务", slug="legacy-onboarding-service"
+        )
+        ProviderCategoryGrant.objects.create(provider=profile, category=category)
+        profile_response = self.client.patch(
+            "/api/v1/providers/me/profile/",
+            {
+                "display_name": "历史达人新名称",
+                "bio": "这是历史达人补齐后提交审核的新版达人资料。",
+                "lifestyle_photo_id": str(photo.id),
+                "service_city_code": "130400",
+                "service_city_name": "邯郸市",
+            },
+            format="json",
+        )
+        service_response = self.client.post(
+            "/api/v1/providers/me/services/",
+            {
+                "category_id": category.id,
+                "billing_type": ProviderService.BillingType.HOURLY,
+                "price_amount": 15000,
+                "description": "历史达人补齐的服务配置",
+            },
+            format="json",
+        )
+
+        self.assertEqual(profile_response.status_code, 200)
+        self.assertEqual(service_response.status_code, 201)
+        profile.refresh_from_db()
+        self.assertEqual(
+            profile.onboarding_status,
+            ProviderProfile.OnboardingStatus.PENDING_REVIEW,
         )
 
     def test_unapproved_user_cannot_manage_services(self):

@@ -369,6 +369,7 @@ def activity_admin_queryset(access):
         scoped_activities(access)
         .select_related("category", "organizer", "cover", "reviewed_by", "settlement")
         .prefetch_related(
+            "tags",
             Prefetch(
                 "publish_orders",
                 queryset=ActivityPublishOrder.objects.order_by("-created_at"),
@@ -416,11 +417,11 @@ def activity_admin_queryset(access):
 
 def activity_category_admin_queryset():
     return ActivityCategory.objects.annotate(
-        activity_count=Count("activities", distinct=True),
+        activity_count=Count("tagged_activities", distinct=True),
         active_activity_count=Count(
-            "activities",
+            "tagged_activities",
             filter=Q(
-                activities__status__in=(
+                tagged_activities__status__in=(
                     Activity.Status.PENDING_REVIEW,
                     Activity.Status.RECRUITING,
                     Activity.Status.FORMED,
@@ -592,6 +593,27 @@ def build_order_trend(orders, *, days):
     }
 
 
+def provider_review_summary(access):
+    providers = scoped_providers(access)
+    counts = {
+        "applications": providers.filter(status=ProviderProfile.Status.PENDING).count(),
+        "onboarding": providers.filter(
+            onboarding_status=ProviderProfile.OnboardingStatus.PENDING_REVIEW
+        ).count(),
+        "profile_changes": ProviderProfileRevision.objects.filter(
+            provider__in=providers,
+            provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+            status=ProviderProfileRevision.Status.PENDING,
+        ).count(),
+        "service_changes": ProviderServiceRevision.objects.filter(
+            provider__in=providers,
+            provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+            status=ProviderServiceRevision.Status.PENDING,
+        ).count(),
+    }
+    return {**counts, "total": sum(counts.values())}
+
+
 class AdminMeView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -618,7 +640,6 @@ class AdminOverviewView(APIView):
         query = AdminOverviewQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         days = query.validated_data["days"]
-        providers = scoped_providers(access)
         today = timezone.localdate()
         orders = ProviderOrder.objects.all()
         activities = Activity.objects.all()
@@ -626,22 +647,7 @@ class AdminOverviewView(APIView):
             orders = orders.filter(provider__service_city_code__in=access.city_codes)
             activities = activities.filter(city_code__in=access.city_codes)
         trend = build_order_trend(orders, days=days)
-        pending_provider_reviews = (
-            providers.filter(status=ProviderProfile.Status.PENDING).count()
-            + providers.filter(
-                onboarding_status=ProviderProfile.OnboardingStatus.PENDING_REVIEW
-            ).count()
-            + ProviderProfileRevision.objects.filter(
-                provider__in=providers,
-                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
-                status=ProviderProfileRevision.Status.PENDING,
-            ).count()
-            + ProviderServiceRevision.objects.filter(
-                provider__in=providers,
-                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
-                status=ProviderServiceRevision.Status.PENDING,
-            ).count()
-        )
+        pending_provider_reviews = provider_review_summary(access)["total"]
         week_transaction_amount = sum(
             point["transaction_amount"] for point in trend["points"][-7:]
         )
@@ -814,7 +820,7 @@ class AdminActivityListView(APIView):
         if city_code := params.get("city_code", "").strip():
             queryset = queryset.filter(city_code=city_code)
         if category := params.get("category", "").strip():
-            queryset = queryset.filter(category__slug=category)
+            queryset = queryset.filter(tags__slug=category).distinct()
 
         summary_queryset = queryset
         summary = {
@@ -938,14 +944,14 @@ class AdminActivityCategoryListView(APIView):
             "active": summary_queryset.filter(is_active=True).count(),
             "inactive": summary_queryset.filter(is_active=False).count(),
             "active_activities": Activity.objects.filter(
-                category__in=summary_queryset,
+                tags__in=summary_queryset,
                 status__in=(
                     Activity.Status.PENDING_REVIEW,
                     Activity.Status.RECRUITING,
                     Activity.Status.FORMED,
                     Activity.Status.IN_PROGRESS,
                 ),
-            ).count(),
+            ).distinct().count(),
         }
         if params["status"] == "active":
             queryset = queryset.filter(is_active=True)
@@ -1502,6 +1508,15 @@ class ProviderApplicationListView(APIView):
         )
 
 
+class ProviderReviewSummaryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("provider.review")
+        return Response({"data": provider_review_summary(access)})
+
+
 class ProviderApplicationDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1662,16 +1677,18 @@ class ProviderChangeReviewListView(APIView):
                 "user", "identity_front_photo", "identity_back_photo", "identity_face_photo"
             ).order_by("-onboarding_submitted_at", "-id")
         elif kind == "profile":
-            queryset = ProviderProfileRevision.objects.filter(status=requested_status).select_related(
-                "provider__user", "lifestyle_photo"
-            )
+            queryset = ProviderProfileRevision.objects.filter(
+                status=requested_status,
+                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+            ).select_related("provider__user", "lifestyle_photo")
             if not access.all_data:
                 queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
             queryset = queryset.order_by("-submitted_at", "-id")
         else:
-            queryset = ProviderServiceRevision.objects.filter(status=requested_status).select_related(
-                "provider__user", "category", "service"
-            )
+            queryset = ProviderServiceRevision.objects.filter(
+                status=requested_status,
+                provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
+            ).select_related("provider__user", "category", "service")
             if not access.all_data:
                 queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
             queryset = queryset.order_by("-submitted_at", "-id")

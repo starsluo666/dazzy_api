@@ -71,7 +71,8 @@ def create_provider_new_order_notification(*, order):
 
 
 def create_activity_notification(
-    *, activity, recipient, event_type, title, content, dedupe_suffix=""
+    *, activity, recipient, event_type, title, content, dedupe_suffix="",
+    action_text="查看活动", action_url=None,
 ):
     suffix = f":{dedupe_suffix}" if dedupe_suffix else ""
     return create_notification(
@@ -83,8 +84,8 @@ def create_activity_notification(
         target_type="activity",
         target_id=str(activity.pk),
         target_title=activity.title,
-        action_text="查看活动",
-        action_url=f"/pages/activities/detail?id={activity.pk}",
+        action_text=action_text,
+        action_url=action_url or f"/pages/activities/detail?id={activity.pk}",
         dedupe_key=(
             f"activity:{activity.pk}:{event_type}:recipient:{recipient.pk}{suffix}"
         ),

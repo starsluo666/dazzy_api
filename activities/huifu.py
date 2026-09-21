@@ -331,8 +331,10 @@ def _apply_publish_payment_success(order_id: int, *, gateway_trade_no: str, paid
                     recipient=order.payer,
                     event_type=UserNotification.EventType.ACTIVITY_PUBLISH_SUBMITTED,
                     title="活动已提交审核",
-                    content="发布支付成功，平台会尽快完成内容审核。",
+                    content="活动提交成功，平台正在审核中，可在“我的活动”查看进展。",
                     dedupe_suffix=order.order_no,
+                    action_text="查看进展",
+                    action_url="/pages/activities/mine?role=organized",
                 ),
                 robust=True,
             )

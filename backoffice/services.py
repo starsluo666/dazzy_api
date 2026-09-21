@@ -79,8 +79,10 @@ def _scoped_users(access):
 
 @transaction.atomic
 def review_activity(*, activity_id, decision, reason, actor, access, request):
-    queryset = Activity.objects.select_for_update().select_related(
-        "category", "organizer"
+    queryset = (
+        Activity.objects.select_for_update()
+        .select_related("organizer")
+        .prefetch_related("tags")
     )
     if not access.all_data:
         queryset = queryset.filter(city_code__in=access.city_codes)
@@ -99,8 +101,14 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
 
     now = timezone.now()
     if decision == "approve":
-        if not activity.category.is_active:
-            raise ValidationError({"decision": "活动分类已停用，不能通过审核。"})
+        tags = list(activity.tags.all()) or ([activity.category] if activity.category_id else [])
+        if not tags:
+            raise ValidationError({"decision": "活动未配置标签，不能通过审核。"})
+        inactive_tags = [tag.name for tag in tags if not tag.is_active]
+        if inactive_tags:
+            raise ValidationError(
+                {"decision": f"活动标签“{'、'.join(inactive_tags)}”已停用，不能通过审核。"}
+            )
         if activity.organizer.account_status != User.AccountStatus.ACTIVE:
             raise ValidationError({"decision": "发起人账号当前不可用。"})
         if activity.formation_deadline <= now or activity.starts_at <= now:
@@ -658,7 +666,18 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
             status=ProviderServiceRevision.Status.PENDING
         ).select_related("category", "service")
     )
-    if not profile_revision or not service_revisions or profile.identity_status != ProviderProfile.IdentityStatus.PENDING:
+    identity_was_pending = (
+        profile.identity_status == ProviderProfile.IdentityStatus.PENDING
+    )
+    if (
+        not profile_revision
+        or not service_revisions
+        or profile.identity_status
+        not in (
+            ProviderProfile.IdentityStatus.PENDING,
+            ProviderProfile.IdentityStatus.VERIFIED,
+        )
+    ):
         raise ValidationError("达人提交资料不完整，暂不能完成开通审核。")
     now = timezone.now()
     before = {"onboarding_status": profile.onboarding_status}
@@ -674,9 +693,10 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
         profile.service_city_code = profile_revision.service_city_code
         profile.service_city_name = profile_revision.service_city_name
         profile.max_service_radius_km = profile_revision.max_service_radius_km
-        profile.identity_status = ProviderProfile.IdentityStatus.VERIFIED
-        profile.identity_rejection_reason = ""
-        profile.identity_reviewed_at = now
+        if identity_was_pending:
+            profile.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+            profile.identity_rejection_reason = ""
+            profile.identity_reviewed_at = now
         for service_revision in service_revisions:
             _apply_service_revision(service_revision, actor=actor, now=now)
         profile_revision.status = ProviderProfileRevision.Status.APPROVED
@@ -685,9 +705,12 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
         profile.onboarding_rejection_reason = ""
     else:
         rejection = reason.strip()
-        profile.identity_status = ProviderProfile.IdentityStatus.REJECTED
-        profile.identity_rejection_reason = rejection
-        profile.identity_reviewed_at = now
+        # 综合审核驳回时，只驳回本轮尚未完成的实名认证。历史已经通过的认证
+        # 不能因为资料或服务配置被驳回而失效。
+        if identity_was_pending:
+            profile.identity_status = ProviderProfile.IdentityStatus.REJECTED
+            profile.identity_rejection_reason = rejection
+            profile.identity_reviewed_at = now
         profile_revision.status = ProviderProfileRevision.Status.REJECTED
         profile_revision.rejection_reason = rejection
         for service_revision in service_revisions:

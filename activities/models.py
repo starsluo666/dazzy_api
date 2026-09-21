@@ -1,9 +1,10 @@
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.gis.db import models
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db.models import F, Q
 
 
@@ -27,7 +28,7 @@ class ActivityCategory(models.Model):
     class Meta:
         db_table = "activity_category"
         ordering = ("sort_order", "id")
-        verbose_name = "活动分类"
+        verbose_name = "活动标签"
         verbose_name_plural = verbose_name
         constraints = [
             models.CheckConstraint(
@@ -66,7 +67,18 @@ class Activity(models.Model):
         verbose_name="发起人",
     )
     category = models.ForeignKey(
-        ActivityCategory, on_delete=models.PROTECT, related_name="activities", verbose_name="分类"
+        ActivityCategory,
+        on_delete=models.PROTECT,
+        related_name="activities",
+        verbose_name="历史主标签",
+        null=True,
+        blank=True,
+    )
+    tags = models.ManyToManyField(
+        ActivityCategory,
+        related_name="tagged_activities",
+        blank=True,
+        verbose_name="活动标签",
     )
     title = models.CharField("标题", max_length=80)
     cover = models.ForeignKey(
@@ -98,6 +110,13 @@ class Activity(models.Model):
     participation_rules = models.TextField("参与规则")
     aa_principal_amount = models.PositiveBigIntegerField(
         "单人AA本金（分）", validators=[MinValueValidator(1)]
+    )
+    service_fee_rate = models.DecimalField(
+        "活动服务费率",
+        max_digits=5,
+        decimal_places=4,
+        default=Decimal("0.1000"),
+        validators=[MinValueValidator(0), MaxValueValidator(1)],
     )
     refund_template_version = models.CharField("退款模板版本", max_length=64)
     refund_rule_snapshot = models.JSONField("退款规则快照")

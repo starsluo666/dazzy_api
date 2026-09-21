@@ -16,6 +16,7 @@ from activities.models import (
     ActivitySettlement,
 )
 from activities.serializers import ActivityParticipationRefundOrderSerializer
+from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 from orders.models import (
     ProviderOrder,
@@ -224,7 +225,7 @@ class AdminActivityCategorySerializer(serializers.ModelSerializer):
         if self.instance:
             queryset = queryset.exclude(pk=self.instance.pk)
         if queryset.exists():
-            raise serializers.ValidationError("该活动分类标识已存在。")
+            raise serializers.ValidationError("该活动标签标识已存在。")
         return normalized
 
     def validate(self, attrs):
@@ -474,8 +475,9 @@ class AdminActivitySettlementActionSerializer(serializers.Serializer):
 
 class AdminActivitySerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
-    category_name = serializers.CharField(source="category.name")
-    category_slug = serializers.CharField(source="category.slug")
+    category_name = serializers.SerializerMethodField()
+    category_slug = serializers.SerializerMethodField()
+    tags = serializers.SerializerMethodField()
     organizer_public_id = serializers.UUIDField(source="organizer.public_id")
     organizer_name = serializers.CharField(source="organizer.nickname")
     organizer_phone_masked = serializers.SerializerMethodField()
@@ -499,7 +501,7 @@ class AdminActivitySerializer(serializers.ModelSerializer):
     class Meta:
         model = Activity
         fields = (
-            "id", "title", "status", "status_label", "category_name", "category_slug",
+            "id", "title", "status", "status_label", "category_name", "category_slug", "tags",
             "organizer_public_id", "organizer_name", "organizer_phone_masked",
             "organizer_account_status", "organizer_account_status_label", "cover_url",
             "city_code", "city_name", "starts_at", "ends_at", "formation_deadline",
@@ -514,6 +516,21 @@ class AdminActivitySerializer(serializers.ModelSerializer):
 
     def get_organizer_phone_masked(self, obj):
         return mask_phone(obj.organizer.phone)
+
+    def _activity_tags(self, obj):
+        tags = list(obj.tags.all())
+        return tags or ([obj.category] if obj.category_id else [])
+
+    def get_category_name(self, obj):
+        tags = self._activity_tags(obj)
+        return tags[0].name if tags else "活动"
+
+    def get_category_slug(self, obj):
+        tags = self._activity_tags(obj)
+        return tags[0].slug if tags else ""
+
+    def get_tags(self, obj):
+        return [{"name": tag.name, "slug": tag.slug} for tag in self._activity_tags(obj)]
 
     def get_cover_url(self, obj):
         return build_media_url(obj.cover.object_key) if obj.cover_id else None
@@ -1658,10 +1675,41 @@ class ProviderOrderingSettingSerializer(serializers.ModelSerializer):
 
 
 class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    activity_service_fee_rate = serializers.DecimalField(
+        max_digits=5, decimal_places=4, min_value=0, max_value=1,
+        coerce_to_string=False,
+    )
+    default_activity_cover_id = serializers.PrimaryKeyRelatedField(
+        source="default_activity_cover",
+        queryset=MediaAsset.objects.filter(
+            category=MediaAsset.Category.ACTIVITY_COVER,
+            status=MediaAsset.Status.UPLOADED,
+            scope=MediaAsset.Scope.PUBLIC,
+        ),
+        required=False,
+        allow_null=True,
+    )
+    default_activity_cover_url = serializers.SerializerMethodField()
+
     class Meta:
         model = PlatformOperationSetting
-        fields = (*DEFAULT_PLATFORM_OPERATION_RULES.keys(), "updated_at")
-        read_only_fields = ("updated_at",)
+        fields = (
+            *DEFAULT_PLATFORM_OPERATION_RULES.keys(),
+            "default_activity_cover_id", "default_activity_cover_url", "updated_at",
+        )
+        read_only_fields = ("default_activity_cover_url", "updated_at",)
+
+    def get_default_activity_cover_url(self, obj):
+        if not obj.default_activity_cover_id:
+            return None
+        return build_media_url(obj.default_activity_cover.object_key)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["activity_service_fee_rate"] = float(data["activity_service_fee_rate"])
+        if data["default_activity_cover_id"] is not None:
+            data["default_activity_cover_id"] = str(data["default_activity_cover_id"])
+        return data
 
     def validate_provider_order_payment_timeout_minutes(self, value):
         if not 5 <= value <= 60:
@@ -1681,6 +1729,26 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
     def validate_activity_payment_timeout_minutes(self, value):
         if not 5 <= value <= 60:
             raise serializers.ValidationError("活动报名支付时限必须在 5–60 分钟之间。")
+        return value
+
+    def validate_activity_min_capacity(self, value):
+        if not 2 <= value <= 100:
+            raise serializers.ValidationError("活动最少人数必须在 2–100 人之间。")
+        return value
+
+    def validate_activity_max_capacity(self, value):
+        if not 2 <= value <= 100:
+            raise serializers.ValidationError("活动最多人数必须在 2–100 人之间。")
+        return value
+
+    def validate_activity_min_aa_principal_amount(self, value):
+        if not 1 <= value <= 10_000_000:
+            raise serializers.ValidationError("活动最低AA本金必须在 0.01–100000 元之间。")
+        return value
+
+    def validate_activity_max_aa_principal_amount(self, value):
+        if not 1 <= value <= 10_000_000:
+            raise serializers.ValidationError("活动最高AA本金必须在 0.01–100000 元之间。")
         return value
 
     def validate_activity_minimum_advance_hours(self, value):
@@ -1715,5 +1783,27 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
         if minimum_hours >= maximum_days * 24:
             raise serializers.ValidationError(
                 {"activity_maximum_advance_days": "最远可发布时间必须大于最少提前时间。"}
+            )
+        min_capacity = attrs.get(
+            "activity_min_capacity", getattr(self.instance, "activity_min_capacity", 2)
+        )
+        max_capacity = attrs.get(
+            "activity_max_capacity", getattr(self.instance, "activity_max_capacity", 100)
+        )
+        if min_capacity > max_capacity:
+            raise serializers.ValidationError(
+                {"activity_max_capacity": "活动最多人数不能小于最少人数。"}
+            )
+        min_amount = attrs.get(
+            "activity_min_aa_principal_amount",
+            getattr(self.instance, "activity_min_aa_principal_amount", 1),
+        )
+        max_amount = attrs.get(
+            "activity_max_aa_principal_amount",
+            getattr(self.instance, "activity_max_aa_principal_amount", 10_000_000),
+        )
+        if min_amount > max_amount:
+            raise serializers.ValidationError(
+                {"activity_max_aa_principal_amount": "活动最高AA本金不能小于最低金额。"}
             )
         return attrs

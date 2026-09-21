@@ -93,7 +93,12 @@ def maybe_submit_provider_onboarding(*, provider: ProviderProfile) -> bool:
         ProviderProfile.OnboardingStatus.PENDING_REVIEW,
     ):
         return False
-    identity_ready = locked.identity_status == ProviderProfile.IdentityStatus.PENDING
+    # 已通过实名认证的历史达人不应被卡在首次综合开通流程之外。新达人仍需先
+    # 提交实名认证；历史达人则复用已有认证结果，只审核本次资料与服务配置。
+    identity_ready = locked.identity_status in (
+        ProviderProfile.IdentityStatus.PENDING,
+        ProviderProfile.IdentityStatus.VERIFIED,
+    )
     profile_ready = locked.profile_revisions.filter(
         status=ProviderProfileRevision.Status.PENDING
     ).exists()

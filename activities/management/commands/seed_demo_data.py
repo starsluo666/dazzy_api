@@ -263,7 +263,7 @@ class Command(BaseCommand):
             starts_at = (now + timedelta(days=day)).replace(
                 hour=hour, minute=0, second=0, microsecond=0
             )
-            Activity.objects.update_or_create(
+            activity, _ = Activity.objects.update_or_create(
                 organizer=organizer,
                 title=title,
                 defaults={
@@ -287,6 +287,7 @@ class Command(BaseCommand):
                     "published_at": now,
                 },
             )
+            activity.tags.set([activity_categories[category_slug]])
 
         self.stdout.write(
             self.style.SUCCESS(

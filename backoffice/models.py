@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -161,6 +162,23 @@ class PlatformOperationSetting(models.Model):
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
     provider_order_settlement_freeze_days = models.PositiveSmallIntegerField(default=1)
     activity_payment_timeout_minutes = models.PositiveSmallIntegerField(default=30)
+    activity_service_fee_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=4,
+        default=Decimal("0.1000"),
+        validators=[MinValueValidator(0), MaxValueValidator(1)],
+    )
+    activity_min_capacity = models.PositiveSmallIntegerField(default=2)
+    activity_max_capacity = models.PositiveSmallIntegerField(default=100)
+    activity_min_aa_principal_amount = models.PositiveBigIntegerField(default=1)
+    activity_max_aa_principal_amount = models.PositiveBigIntegerField(default=10_000_000)
+    default_activity_cover = models.ForeignKey(
+        "mediafiles.MediaAsset",
+        on_delete=models.PROTECT,
+        related_name="platform_default_activity_cover_settings",
+        null=True,
+        blank=True,
+    )
     activity_minimum_advance_hours = models.PositiveSmallIntegerField(default=48)
     activity_maximum_advance_days = models.PositiveSmallIntegerField(default=30)
     activity_settlement_confirmation_hours = models.PositiveSmallIntegerField(default=24)

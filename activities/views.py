@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from backoffice.operation_settings import platform_operation_rules
+from backoffice.models import PlatformOperationSetting
 from config.api import paginated_response
 from config.geospatial import gcj02_to_wgs84
 from config.payment_capabilities import ensure_activity_real_payment_available
@@ -18,6 +19,7 @@ from orders.wechat_oauth import (
     build_payment_authorization,
     get_official_account_openid,
 )
+from mediafiles.services import build_media_url
 
 from .huifu import (
     confirm_activity_huifu_payment_status,
@@ -79,8 +81,21 @@ class ActivityListView(APIView):
         params = query.validated_data
 
         queryset = upcoming_public_activities()
+        tag_slugs = params.get("tags", [])
         if category := params.get("category"):
-            queryset = queryset.filter(category__slug=category)
+            tag_slugs = list(dict.fromkeys([*tag_slugs, category]))
+        if tag_slugs:
+            queryset = queryset.filter(tags__slug__in=tag_slugs).distinct()
+        if keyword := params.get("keyword", "").strip():
+            queryset = queryset.filter(
+                Q(title__icontains=keyword)
+                | Q(description__icontains=keyword)
+                | Q(meeting_place_name__icontains=keyword)
+                | Q(meeting_address__icontains=keyword)
+                | Q(tags__name__icontains=keyword)
+            ).distinct()
+        if city_code := params.get("city_code", "").strip():
+            queryset = queryset.filter(city_code=city_code)
         if "longitude" in params:
             point = gcj02_to_wgs84(params["longitude"], params["latitude"])
             queryset = queryset.annotate(distance=Distance("meeting_point", point))
@@ -90,6 +105,8 @@ class ActivityListView(APIView):
             queryset = queryset.order_by("distance", "starts_at", "id")
         elif ordering == "latest":
             queryset = queryset.order_by("-published_at", "id")
+        elif ordering == "popular":
+            queryset = queryset.order_by("-participant_count", "starts_at", "id")
         else:
             queryset = queryset.order_by("starts_at", "id")
 
@@ -140,11 +157,22 @@ class ActivityPublishRuleView(APIView):
 
     def get(self, request):
         rules = platform_operation_rules()
+        rules_setting = PlatformOperationSetting.current()
         return Response(
             {
                 "data": {
                     "minimum_advance_hours": rules["activity_minimum_advance_hours"],
                     "maximum_advance_days": rules["activity_maximum_advance_days"],
+                    "service_fee_rate": rules["activity_service_fee_rate"],
+                    "min_capacity": rules["activity_min_capacity"],
+                    "max_capacity": rules["activity_max_capacity"],
+                    "min_aa_principal_amount": rules["activity_min_aa_principal_amount"],
+                    "max_aa_principal_amount": rules["activity_max_aa_principal_amount"],
+                    "default_cover_id": str(rules_setting.default_activity_cover_id)
+                    if rules_setting.default_activity_cover_id else None,
+                    "default_cover_url": build_media_url(
+                        rules_setting.default_activity_cover.object_key
+                    ) if rules_setting.default_activity_cover_id else None,
                 }
             }
         )
@@ -170,7 +198,7 @@ class ActivityDetailView(APIView):
                 Activity.objects.select_related(
                     "category", "organizer", "organizer__provider_profile", "cover",
                     "settlement",
-                )
+                ).prefetch_related("tags")
             ).filter(visibility),
             pk=pk,
         )
@@ -192,6 +220,7 @@ class MyActivityListView(APIView):
         params = query.validated_data
         queryset = with_participant_count(
             Activity.objects.select_related("category", "organizer", "cover", "settlement")
+            .prefetch_related("tags")
         )
 
         if params["role"] == "joined":
@@ -541,7 +570,7 @@ class ActivityCopySourceView(APIView):
 
     def get(self, request, pk):
         activity = get_object_or_404(
-            Activity.objects.select_related("category", "cover"),
+            Activity.objects.select_related("category", "cover").prefetch_related("tags"),
             pk=pk,
             organizer=request.user,
             status=Activity.Status.REJECTED,

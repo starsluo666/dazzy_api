@@ -194,7 +194,14 @@ class ActivityAfterSalesCreateSerializer(serializers.Serializer):
 
 
 class ActivityCreateSerializer(serializers.Serializer):
-    category_slug = serializers.SlugField()
+    tag_slugs = serializers.ListField(
+        child=serializers.SlugField(),
+        min_length=1,
+        max_length=5,
+        required=False,
+    )
+    # Kept during the client migration window; new clients submit tag_slugs.
+    category_slug = serializers.SlugField(required=False)
     title = serializers.CharField(max_length=80)
     starts_at = serializers.DateTimeField()
     ends_at = serializers.DateTimeField()
@@ -213,17 +220,30 @@ class ActivityCreateSerializer(serializers.Serializer):
     refund_template_version = serializers.ChoiceField(choices=("standard-v1",))
     cover_id = serializers.PrimaryKeyRelatedField(
         source="cover",
+        required=False,
+        allow_null=True,
         queryset=MediaAsset.objects.filter(
             category=MediaAsset.Category.ACTIVITY_COVER,
             status=MediaAsset.Status.UPLOADED,
         ),
     )
 
+    def validate_tag_slugs(self, value):
+        normalized = list(dict.fromkeys(value))
+        tags = list(
+            ActivityCategory.objects.filter(slug__in=normalized, is_active=True)
+        )
+        tags_by_slug = {tag.slug: tag for tag in tags}
+        missing = [slug for slug in normalized if slug not in tags_by_slug]
+        if missing:
+            raise serializers.ValidationError(f"活动标签不存在或已停用：{', '.join(missing)}。")
+        return [tags_by_slug[slug] for slug in normalized]
+
     def validate_category_slug(self, value):
         try:
             return ActivityCategory.objects.get(slug=value, is_active=True)
         except ActivityCategory.DoesNotExist as exc:
-            raise serializers.ValidationError("活动分类不存在或已停用。") from exc
+            raise serializers.ValidationError("活动标签不存在或已停用。") from exc
 
     def validate(self, attrs):
         now = timezone.now()
@@ -245,36 +265,67 @@ class ActivityCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError({"formation_deadline": "成局截止时间须晚于当前时间且早于活动开始。"})
         if attrs["min_participants"] > attrs["capacity"]:
             raise serializers.ValidationError({"min_participants": "最少成局人数不能超过人数上限。"})
-        category = attrs["category_slug"]
+        tags = attrs.get("tag_slugs", [])
+        category = attrs.get("category_slug")
+        if not tags and not category:
+            raise serializers.ValidationError({"tag_slugs": "请至少选择一个活动标签。"})
         city_code = attrs.get("city_code", "")
-        if category.city_codes and city_code not in category.city_codes:
-            raise serializers.ValidationError({"category_slug": "该活动分类未在当前城市开放。"})
-        if not category.min_capacity <= attrs["capacity"] <= category.max_capacity:
+        unavailable_tags = [
+            tag.name for tag in tags if tag.city_codes and city_code not in tag.city_codes
+        ]
+        if unavailable_tags:
             raise serializers.ValidationError(
-                {"capacity": f"该分类人数范围为 {category.min_capacity}—{category.max_capacity} 人。"}
+                {"tag_slugs": f"以下活动标签未在当前城市开放：{'、'.join(unavailable_tags)}。"}
             )
-        if not (
-            category.min_aa_principal_amount
-            <= attrs["aa_principal_amount"]
-            <= category.max_aa_principal_amount
-        ):
+        if category and not tags and category.city_codes and city_code not in category.city_codes:
+            raise serializers.ValidationError({"category_slug": "该活动标签未在当前城市开放。"})
+        min_capacity = rules["activity_min_capacity"]
+        max_capacity = rules["activity_max_capacity"]
+        min_amount = rules["activity_min_aa_principal_amount"]
+        max_amount = rules["activity_max_aa_principal_amount"]
+        if not min_capacity <= attrs["capacity"] <= max_capacity:
             raise serializers.ValidationError(
-                {"aa_principal_amount": "AA本金超出该活动分类允许范围。"}
+                {"capacity": f"活动人数范围为 {min_capacity}—{max_capacity} 人。"}
+            )
+        if not min_amount <= attrs["aa_principal_amount"] <= max_amount:
+            raise serializers.ValidationError(
+                {"aa_principal_amount": "AA本金超出平台允许范围。"}
             )
         request = self.context.get("request")
-        if not request or attrs["cover"].owner_id != request.user.pk:
+        cover = attrs.get("cover")
+        from backoffice.models import PlatformOperationSetting
+
+        operation_setting = PlatformOperationSetting.current()
+        if cover and (
+            not request
+            or (
+                cover.owner_id != request.user.pk
+                and cover.pk != operation_setting.default_activity_cover_id
+                and not Activity.objects.filter(
+                    organizer=request.user, cover=cover
+                ).exists()
+            )
+        ):
             raise serializers.ValidationError({"cover_id": "活动封面不存在或无权使用。"})
+        if not cover:
+            if not operation_setting.default_activity_cover_id:
+                raise serializers.ValidationError(
+                    {"cover_id": "平台尚未配置默认活动封面，请上传活动封面。"}
+                )
         return attrs
 
 
 class ActivityListQuerySerializer(serializers.Serializer):
     category = serializers.SlugField(required=False)
+    tags = serializers.CharField(required=False, allow_blank=True, max_length=220)
+    keyword = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
     longitude = serializers.DecimalField(required=False, max_digits=10, decimal_places=7)
     latitude = serializers.DecimalField(required=False, max_digits=10, decimal_places=7)
     ordering = serializers.ChoiceField(
         required=False,
         default="recommended",
-        choices=("recommended", "distance", "time", "latest"),
+        choices=("recommended", "distance", "time", "latest", "popular"),
     )
     page = serializers.IntegerField(required=False, default=1, min_value=1)
     page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
@@ -284,6 +335,10 @@ class ActivityListQuerySerializer(serializers.Serializer):
             raise serializers.ValidationError("longitude 和 latitude 必须同时提供。")
         if attrs.get("ordering") == "distance" and "longitude" not in attrs:
             raise serializers.ValidationError("按距离排序时必须提供经纬度。")
+        raw_tags = attrs.get("tags", "")
+        attrs["tags"] = list(
+            dict.fromkeys(item.strip() for item in raw_tags.split(",") if item.strip())
+        )[:5]
         return attrs
 
 
@@ -299,8 +354,9 @@ class MyActivityListQuerySerializer(serializers.Serializer):
 
 
 class ActivityListItemSerializer(serializers.ModelSerializer):
-    category = serializers.CharField(source="category.name")
-    category_slug = serializers.CharField(source="category.slug")
+    category = serializers.SerializerMethodField()
+    category_slug = serializers.SerializerMethodField()
+    tags = serializers.SerializerMethodField()
     organizer_public_id = serializers.UUIDField(source="organizer.public_id")
     organizer_nickname = serializers.CharField(source="organizer.nickname")
     organizer_avatar_url = serializers.SerializerMethodField()
@@ -315,6 +371,7 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
             "title",
             "category",
             "category_slug",
+            "tags",
             "organizer_public_id",
             "organizer_nickname",
             "organizer_avatar_url",
@@ -334,6 +391,31 @@ class ActivityListItemSerializer(serializers.ModelSerializer):
 
     def get_organizer_avatar_url(self, obj) -> str | None:
         return build_media_url(obj.organizer.avatar_object_key)
+
+    def _tags(self, obj):
+        tags = list(obj.tags.all())
+        if not tags and obj.category_id:
+            tags = [obj.category]
+        return tags
+
+    def get_category(self, obj) -> str:
+        tags = self._tags(obj)
+        return tags[0].name if tags else "活动"
+
+    def get_category_slug(self, obj) -> str:
+        tags = self._tags(obj)
+        return tags[0].slug if tags else ""
+
+    def get_tags(self, obj):
+        return [
+            {
+                "name": tag.name,
+                "slug": tag.slug,
+                "icon_url": build_media_url(tag.icon_object_key)
+                if tag.icon_object_key else None,
+            }
+            for tag in self._tags(obj)
+        ]
 
     def get_cover_url(self, obj) -> str | None:
         return build_media_url(obj.cover.object_key) if obj.cover_id else None
@@ -396,6 +478,7 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
     remaining_capacity = serializers.SerializerMethodField()
     platform_service_fee_amount = serializers.SerializerMethodField()
     payable_amount = serializers.SerializerMethodField()
+    service_fee_rate = serializers.DecimalField(max_digits=5, decimal_places=4)
     organizer_rating = serializers.SerializerMethodField()
     reviewed_at = serializers.DateTimeField(allow_null=True)
     rejection_reason = serializers.CharField()
@@ -419,13 +502,14 @@ class ActivityDetailSerializer(ActivityListItemSerializer):
             "remaining_capacity",
             "platform_service_fee_amount",
             "payable_amount",
+            "service_fee_rate",
             "organizer_rating",
             "reviewed_at",
             "rejection_reason",
         )
 
     def get_platform_service_fee_amount(self, obj) -> int:
-        return calculate_publish_service_fee(obj.aa_principal_amount)
+        return calculate_publish_service_fee(obj.aa_principal_amount, obj.service_fee_rate)
 
     def get_payable_amount(self, obj) -> int:
         return obj.aa_principal_amount + self.get_platform_service_fee_amount(obj)
@@ -509,8 +593,9 @@ class ActivityParticipationSerializer(serializers.ModelSerializer):
 
 
 class ActivityCopySourceSerializer(serializers.ModelSerializer):
-    category_slug = serializers.CharField(source="category.slug")
-    cover_id = serializers.UUIDField()
+    category_slug = serializers.SerializerMethodField()
+    tag_slugs = serializers.SerializerMethodField()
+    cover_id = serializers.UUIDField(allow_null=True)
     cover_url = serializers.SerializerMethodField()
     longitude = serializers.DecimalField(
         source="source_longitude", max_digits=10, decimal_places=7
@@ -522,7 +607,7 @@ class ActivityCopySourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Activity
         fields = (
-            "id", "category_slug", "cover_id", "cover_url", "title", "starts_at",
+            "id", "category_slug", "tag_slugs", "cover_id", "cover_url", "title", "starts_at",
             "ends_at", "formation_deadline", "meeting_place_name", "meeting_address",
             "city_code", "city_name", "longitude", "latitude", "capacity",
             "min_participants", "description", "participation_rules",
@@ -531,6 +616,14 @@ class ActivityCopySourceSerializer(serializers.ModelSerializer):
 
     def get_cover_url(self, obj):
         return build_media_url(obj.cover.object_key) if obj.cover_id else None
+
+    def get_tag_slugs(self, obj):
+        tags = list(obj.tags.all())
+        return [tag.slug for tag in tags] or ([obj.category.slug] if obj.category_id else [])
+
+    def get_category_slug(self, obj):
+        tags = self.get_tag_slugs(obj)
+        return tags[0] if tags else ""
 
 
 class ActivityReportCreateSerializer(serializers.Serializer):

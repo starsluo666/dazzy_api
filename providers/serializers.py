@@ -142,6 +142,9 @@ class ProviderApplicationSerializer(serializers.ModelSerializer):
         return value
 
     def validate_application_birth_date(self, value):
+        # 草稿允许清空出生日期，正式提交时再由申请提交校验统一拦截缺失项。
+        if value is None:
+            return None
         today = timezone.localdate()
         age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
         if age < 18:

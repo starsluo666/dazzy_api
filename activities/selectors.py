@@ -9,6 +9,7 @@ def with_participant_count(queryset):
         participant_count=Count(
             "participations",
             filter=Q(participations__status=ActivityParticipation.Status.ACTIVE),
+            distinct=True,
         )
     )
 
@@ -18,5 +19,5 @@ def upcoming_public_activities():
         Activity.objects.filter(
             status__in=(Activity.Status.RECRUITING, Activity.Status.FORMED),
             starts_at__gt=timezone.now(),
-        ).select_related("category", "organizer", "cover")
+        ).select_related("category", "organizer", "cover").prefetch_related("tags")
     )

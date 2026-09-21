@@ -50,6 +50,7 @@ from .views import (
     ProviderApplicationReviewView,
     ProviderChangeReviewActionView,
     ProviderChangeReviewListView,
+    ProviderReviewSummaryView,
     ProviderIdentityReviewView,
     ScheduledTaskDetailView,
     ScheduledTaskListView,
@@ -191,6 +192,11 @@ urlpatterns = [
         "provider-change-reviews/",
         ProviderChangeReviewListView.as_view(),
         name="backoffice-provider-change-reviews",
+    ),
+    path(
+        "provider-review-summary/",
+        ProviderReviewSummaryView.as_view(),
+        name="backoffice-provider-review-summary",
     ),
     path(
         "provider-change-reviews/<str:kind>/<int:review_id>/review/",

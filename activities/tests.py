@@ -622,10 +622,12 @@ class ActivityModelTests(TestCase):
         response = self.client.get("/api/v1/activity-publish-rules/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["data"],
-            {"minimum_advance_hours": 24, "maximum_advance_days": 45},
-        )
+        data = response.json()["data"]
+        self.assertEqual(data["minimum_advance_hours"], 24)
+        self.assertEqual(data["maximum_advance_days"], 45)
+        self.assertEqual(Decimal(str(data["service_fee_rate"])), Decimal("0.1000"))
+        self.assertEqual(data["min_capacity"], 2)
+        self.assertEqual(data["max_capacity"], 100)
 
     def test_activity_detail_returns_display_fields_and_calculated_fee(self):
         activity = self.build_activity(
@@ -1445,6 +1447,154 @@ class ActivityModelTests(TestCase):
                 target_id=str(activity.pk),
             ).exists()
         )
+
+    @override_settings(DEBUG=True)
+    def test_tags_default_cover_and_fee_rate_are_snapshotted_for_both_payment_flows(self):
+        second_tag = ActivityCategory.objects.create(name="交友", slug="social")
+        setting = PlatformOperationSetting.current()
+        setting.activity_service_fee_rate = Decimal("0.1250")
+        setting.default_activity_cover = self.cover
+        setting.save(
+            update_fields=("activity_service_fee_rate", "default_activity_cover", "updated_at")
+        )
+        self.organizer.verification_status = User.VerificationStatus.VERIFIED
+        self.organizer.save(update_fields=("verification_status",))
+        self.client.force_login(self.organizer)
+        payload = self.activity_create_payload(
+            tag_slugs=[self.category.slug, second_tag.slug]
+        )
+        payload.pop("category_slug")
+        payload.pop("cover_id")
+
+        created = self.client.post(
+            "/api/v1/activities/", payload, content_type="application/json"
+        )
+
+        self.assertEqual(created.status_code, 201)
+        activity = Activity.objects.get(pk=created.json()["data"]["id"])
+        self.assertEqual(activity.cover_id, self.cover.pk)
+        self.assertEqual(activity.service_fee_rate, Decimal("0.1250"))
+        self.assertEqual(
+            list(activity.tags.order_by("id").values_list("slug", flat=True)),
+            [self.category.slug, second_tag.slug],
+        )
+
+        setting.activity_service_fee_rate = Decimal("0.2000")
+        setting.save(update_fields=("activity_service_fee_rate", "updated_at"))
+        publish_order = self.client.post(
+            f"/api/v1/activities/{activity.pk}/publish-order/"
+        ).json()["data"]
+        self.assertEqual(publish_order["platform_service_fee_amount"], 850)
+        self.assertEqual(publish_order["payable_amount"], 7650)
+        self.client.post(
+            f"/api/v1/activities/{activity.pk}/publish-order/simulate-payment/"
+        )
+        activity.status = Activity.Status.RECRUITING
+        activity.save(update_fields=("status", "updated_at"))
+
+        participant = User.objects.create_user(
+            phone="13800000139",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        self.client.force_login(participant)
+        participation = self.client.post(
+            f"/api/v1/activities/{activity.pk}/participation/",
+            {},
+            content_type="application/json",
+        )
+        self.assertEqual(participation.status_code, 201)
+        payment_order = participation.json()["data"]["payment_order"]
+        self.assertEqual(payment_order["platform_service_fee_amount"], 850)
+        self.assertEqual(payment_order["payable_amount"], 7650)
+
+        notification = UserNotification.objects.get(
+            recipient=self.organizer,
+            event_type=UserNotification.EventType.ACTIVITY_PUBLISH_SUBMITTED,
+        )
+        self.assertEqual(notification.action_text, "查看进展")
+        self.assertEqual(notification.action_url, "/pages/activities/mine?role=organized")
+
+    @override_settings(DEBUG=True)
+    def test_legacy_category_publish_cannot_bypass_platform_limits(self):
+        setting = PlatformOperationSetting.current()
+        setting.activity_max_capacity = 10
+        setting.activity_max_aa_principal_amount = 10_000
+        setting.save(
+            update_fields=(
+                "activity_max_capacity",
+                "activity_max_aa_principal_amount",
+                "updated_at",
+            )
+        )
+        self.organizer.verification_status = User.VerificationStatus.VERIFIED
+        self.organizer.save(update_fields=("verification_status",))
+        self.client.force_login(self.organizer)
+
+        capacity_response = self.client.post(
+            "/api/v1/activities/",
+            self.activity_create_payload(capacity=11),
+            content_type="application/json",
+        )
+        amount_response = self.client.post(
+            "/api/v1/activities/",
+            self.activity_create_payload(aa_principal_amount=10_001),
+            content_type="application/json",
+        )
+
+        self.assertEqual(capacity_response.status_code, 400)
+        self.assertIn("capacity", capacity_response.json())
+        self.assertEqual(amount_response.status_code, 400)
+        self.assertIn("aa_principal_amount", amount_response.json())
+
+    @override_settings(DEBUG=True)
+    def test_tag_payload_uses_first_tag_as_legacy_primary_tag(self):
+        second_tag = ActivityCategory.objects.create(name="交友", slug="social-primary")
+        self.organizer.verification_status = User.VerificationStatus.VERIFIED
+        self.organizer.save(update_fields=("verification_status",))
+        self.client.force_login(self.organizer)
+        payload = self.activity_create_payload(
+            category_slug=second_tag.slug,
+            tag_slugs=[self.category.slug, second_tag.slug],
+        )
+
+        response = self.client.post(
+            "/api/v1/activities/", payload, content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        activity = Activity.objects.get(pk=response.json()["data"]["id"])
+        self.assertEqual(activity.category_id, self.category.pk)
+
+    def test_activity_list_supports_city_keyword_and_multi_tag_filters(self):
+        social = ActivityCategory.objects.create(name="交友", slug="social-filter")
+        target = self.build_activity(
+            title="城市桌游交友夜",
+            city_code="130400",
+            city_name="邯郸市",
+            status=Activity.Status.RECRUITING,
+        )
+        target.save()
+        target.tags.set([self.category, social])
+        other = self.build_activity(
+            title="北京周末活动",
+            city_code="110100",
+            city_name="北京市",
+            status=Activity.Status.RECRUITING,
+        )
+        other.save()
+        other.tags.set([self.category])
+
+        response = self.client.get(
+            "/api/v1/activities/",
+            {"city_code": "130400", "keyword": "交友", "tags": "social-filter"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["pagination"]["total"], 1)
+        item = response.json()["data"]["items"][0]
+        self.assertEqual(item["id"], target.pk)
+        self.assertEqual([tag["slug"] for tag in item["tags"]], ["billiards", "social-filter"])
 
     @override_settings(DEBUG=True)
     def test_activity_publish_payment_expires_through_task_center(self):
