@@ -45,6 +45,8 @@ from .views import (
     ProviderOrderSupportNoteView,
     ProviderOrderingSettingView,
     PlatformOperationSettingView,
+    AdminCouponListIssueView,
+    ProviderCommissionOverrideView,
     ProviderApplicationDetailView,
     ProviderApplicationListView,
     ProviderApplicationReviewView,
@@ -58,6 +60,8 @@ from .views import (
 )
 
 urlpatterns = [
+    path("coupons/", AdminCouponListIssueView.as_view(), name="backoffice-coupons"),
+    path("providers/<int:profile_id>/commission-override/", ProviderCommissionOverrideView.as_view(), name="backoffice-provider-commission-override"),
     path("auth/login/", AdminPasswordLoginView.as_view(), name="backoffice-auth-login"),
     path("auth/refresh/", AdminTokenRefreshView.as_view(), name="backoffice-auth-refresh"),
     path("auth/logout/", AdminLogoutView.as_view(), name="backoffice-auth-logout"),

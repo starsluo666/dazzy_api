@@ -27,6 +27,8 @@ def public_pricing_snapshot(snapshot: dict) -> dict:
         key: value
         for key, value in snapshot.items()
         if key != "platform_commission_rate"
+        and key != "category_platform_commission_rate"
+        and not key.startswith("provider_bonus_")
     }
 
 
@@ -36,6 +38,7 @@ class ProviderOrderInputSerializer(serializers.Serializer):
     duration_minutes = serializers.IntegerField(min_value=30, max_value=480)
     address_id = serializers.IntegerField(min_value=1)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    coupon_id = serializers.UUIDField(required=False, allow_null=True)
 
     def validate(self, attrs):
         request = self.context.get("request")
@@ -96,7 +99,17 @@ class ProviderOrderInputSerializer(serializers.Serializer):
         attrs["duration_minutes"] = duration
         attrs["ends_at"] = ends_at
         attrs["route"] = route
-        attrs["quote"] = build_quote(service, duration, route.distance_km)
+        coupon = None
+        if attrs.get("coupon_id"):
+            from .coupons import eligible_coupon
+
+            base_quote = build_quote(service, duration, route.distance_km)
+            coupon = eligible_coupon(
+                owner=request.user, public_id=attrs["coupon_id"],
+                order_amount=base_quote.payable_amount,
+            )
+        attrs["coupon"] = coupon
+        attrs["quote"] = build_quote(service, duration, route.distance_km, coupon=coupon)
         return attrs
 
 
@@ -130,11 +143,11 @@ class ProviderOrderReviewSerializer(serializers.ModelSerializer):
         model = ProviderOrderReview
         fields = (
             "rating", "content", "customer_name", "image_urls", "is_anonymous",
-            "audit_status", "audit_rejection_reason", "created_at",
+            "is_auto_generated", "audit_status", "audit_rejection_reason", "created_at",
         )
 
     def get_customer_name(self, obj):
-        return "匿名用户" if obj.is_anonymous else obj.customer.nickname
+        return "系统默认好评" if obj.is_auto_generated else "匿名用户" if obj.is_anonymous else obj.customer.nickname
 
     def get_image_urls(self, obj):
         return [build_media_url(image.object_key) for image in obj.images.all()]
@@ -279,6 +292,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "departed_at", "arrival_photo_url", "arrival_photo_uploaded_at",
             "service_started_at", "completion_submitted_at", "confirmation_expires_at",
             "customer_confirmed_at", "auto_confirmed_at", "review", "payment_order",
+            "review_expires_at",
             "refund_orders", "settlement", "after_sales",
         )
 

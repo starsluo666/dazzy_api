@@ -871,6 +871,32 @@ class ProviderCreditAdjustmentInputSerializer(serializers.Serializer):
         return value
 
 
+class AdminCouponListQuerySerializer(serializers.Serializer):
+    user_public_id = serializers.UUIDField(required=False)
+    search = serializers.CharField(required=False, allow_blank=True, max_length=50)
+
+
+class AdminCouponIssueSerializer(serializers.Serializer):
+    user_public_id = serializers.UUIDField()
+
+
+class ProviderCommissionOverrideSerializer(serializers.Serializer):
+    reset_period = serializers.ChoiceField(
+        choices=("", "month", "quarter", "year", "never"), required=False
+    )
+    tiers = serializers.JSONField(required=False, allow_null=True)
+
+    def validate_tiers(self, value):
+        if value is None:
+            return None
+        from orders.commission import validate_commission_tiers
+
+        try:
+            return validate_commission_tiers(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+
 class ProviderCreditAdjustmentSerializer(serializers.ModelSerializer):
     operator_name = serializers.CharField(source="operator.nickname")
     organization_name = serializers.CharField(source="organization.name", allow_null=True)
@@ -927,6 +953,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "location_expires_at",
             "max_service_radius_km", "rating", "service_count",
             "order_count", "credit_score", "is_accepting_orders", "admin_order_restricted",
+            "commission_reset_period_override", "commission_tiers_override",
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
             "credit_adjustments", "submitted_at", "reviewed_at", "rejection_reason",
             "identity_real_name", "identity_number_masked", "identity_front_photo_url",
@@ -1746,6 +1773,39 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
     def validate_provider_order_confirmation_timeout_days(self, value):
         if not 1 <= value <= 15:
             raise serializers.ValidationError("用户确认时限必须在 1–15 天之间。")
+        return value
+
+    def validate_provider_order_review_timeout_days(self, value):
+        if not 1 <= value <= 30:
+            raise serializers.ValidationError("评价时限必须在 1–30 天之间。")
+        return value
+
+    def validate_provider_commission_reset_period(self, value):
+        if value not in ("month", "quarter", "year", "never"):
+            raise serializers.ValidationError("重置周期必须是月、季度、年或永久。")
+        return value
+
+    def validate_provider_commission_tiers(self, value):
+        from orders.commission import validate_commission_tiers
+
+        try:
+            return validate_commission_tiers(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate_report_coupon_amount(self, value):
+        if not 1 <= value <= 100_000:
+            raise serializers.ValidationError("举报奖励券面额必须在 0.01–1000 元之间。")
+        return value
+
+    def validate_report_coupon_min_order_amount(self, value):
+        if not 1 <= value <= 10_000_000:
+            raise serializers.ValidationError("优惠券门槛必须在 0.01–100000 元之间。")
+        return value
+
+    def validate_report_coupon_valid_days(self, value):
+        if not 1 <= value <= 3650:
+            raise serializers.ValidationError("优惠券有效期必须在 1–3650 天之间。")
         return value
 
     def validate_provider_order_settlement_freeze_days(self, value):

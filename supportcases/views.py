@@ -1,7 +1,11 @@
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from backoffice.operation_settings import platform_operation_rules
+from orders.models import ProviderOrder
 
 from .serializers import (
     SupportCaseCreateSerializer,
@@ -53,6 +57,29 @@ class SupportCaseListCreateView(APIView):
             {"data": SupportCaseSerializer(case).data, "created": created},
             status=201 if created else 200,
         )
+
+
+class RewardReportRulesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rules = platform_operation_rules()
+        orders = ProviderOrder.objects.filter(
+            customer=request.user, status=ProviderOrder.Status.PENDING_REVIEW,
+            review_expires_at__gt=timezone.now(),
+        ).exclude(support_cases__reward_eligible=True).order_by("-review_expires_at")[:100]
+        return Response({"data": {
+            "review_timeout_days": rules["provider_order_review_timeout_days"],
+            "coupon_amount": rules["report_coupon_amount"],
+            "coupon_min_order_amount": rules["report_coupon_min_order_amount"],
+            "coupon_valid_days": rules["report_coupon_valid_days"],
+            "eligible_orders": [
+                {"order_no": order.order_no, "service_name": order.service_name_snapshot,
+                 "provider_name": order.provider_name_snapshot,
+                 "review_expires_at": order.review_expires_at}
+                for order in orders
+            ],
+        }})
 
 
 class SupportCaseDetailView(APIView):

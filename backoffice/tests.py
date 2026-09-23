@@ -779,6 +779,43 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(data["location_accuracy_m"], "16.00")
         self.assertIsNotNone(data["location_updated_at"])
 
+    def test_provider_commission_override_is_scoped_and_preserves_detail(self):
+        service = ProviderService.objects.create(
+            provider=self.handan, category=self.order_category,
+            billing_type=ProviderService.BillingType.PER_SESSION, price_amount=16800,
+        )
+        url = reverse("backoffice-provider-commission-override", args=(self.handan.id,))
+        payload = {
+            "reset_period": "quarter",
+            "tiers": [
+                {"threshold_amount": 0, "bonus_rate": "0"},
+                {"threshold_amount": 100000, "bonus_rate": "5"},
+            ],
+        }
+        response = self.client.patch(url, payload, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.handan.refresh_from_db()
+        self.assertEqual(self.handan.commission_reset_period_override, "quarter")
+        self.assertEqual(response.data["data"]["services"][0]["id"], service.pk)
+        self.assertIsNotNone(response.data["data"]["lifestyle_photo_url"])
+        self.assertTrue(AdminAuditLog.objects.filter(action="provider.commission_override.update").exists())
+
+        other_city = self.client.patch(
+            reverse("backoffice-provider-commission-override", args=(self.beijing.id,)),
+            payload, format="json",
+        )
+        self.assertEqual(other_city.status_code, 404)
+        invalid = self.client.patch(url, {"tiers": [
+            {"threshold_amount": index * 100000, "bonus_rate": str(index)}
+            for index in range(6)
+        ]}, format="json")
+        self.assertEqual(invalid.status_code, 400)
+        restored = self.client.patch(url, {"reset_period": "", "tiers": None}, format="json")
+        self.assertEqual(restored.status_code, 200)
+        self.handan.refresh_from_db()
+        self.assertIsNone(self.handan.commission_tiers_override)
+        self.assertEqual(self.handan.commission_reset_period_override, "")
+
     def test_user_and_provider_management_permissions_are_required(self):
         restricted_user = User.objects.create_user(
             phone="19900001234", password="test-password", nickname="仅看总览"

@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.db.models import Count
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -8,7 +9,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from orders.models import ProviderOrder
+from orders.models import ProviderOrder, UserCoupon
 from engagements.models import ProviderFavorite
 from backoffice.operation_settings import platform_operation_rules
 from config.throttles import SmsSendIpDailyThrottle
@@ -199,9 +200,11 @@ class CurrentUserOverviewView(APIView):
             {
                 "data": {
                     "customer_service_phone": platform_operation_rules()["customer_service_phone"],
-                    # 钱包和优惠券模型尚未建立，返回 null，避免展示模拟数据。
+                    # 钱包尚未建立，保留 null；优惠券数量来自真实券记录。
                     "balance_amount": None,
-                    "coupon_count": None,
+                    "coupon_count": UserCoupon.objects.filter(
+                        owner=request.user, status="available", expires_at__gt=timezone.now()
+                    ).count(),
                     "favorite_count": ProviderFavorite.objects.filter(user=request.user).count(),
                     "order_count": orders.count(),
                     "pending_payment_count": total(ProviderOrder.Status.PENDING_PAYMENT),

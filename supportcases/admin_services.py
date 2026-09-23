@@ -107,6 +107,13 @@ def review_support_case(*, case_no, action, result_note, actor, access, request)
             "status", "assignee", "result_note", "resolved_at", "updated_at",
         )
     )
+    if action == "resolve" and case.reward_eligible and not case.reward_coupon_id:
+        from orders.coupons import issue_coupon
+
+        case.reward_coupon = issue_coupon(
+            owner=case.reporter, source="report_reward", issued_by=actor
+        )
+        case.save(update_fields=("reward_coupon", "updated_at"))
     record = SupportCaseRecord.objects.create(
         case=case,
         actor=actor,

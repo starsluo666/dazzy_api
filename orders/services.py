@@ -464,6 +464,8 @@ def cancel_provider_order_with_compensation(*, order_no: str, customer_id: int):
     order.status = ProviderOrder.Status.CANCELLED
     order.cancelled_at = now
     order.save(update_fields=("status", "cancelled_at", "updated_at"))
+    from .coupons import release_coupon
+    release_coupon(order)
     payment = ProviderOrderPaymentOrder.objects.select_for_update().filter(order=order).first()
     has_real_payment_request = bool(
         payment
@@ -928,6 +930,8 @@ def apply_provider_order_payment_success(
         payment.status = ProviderOrderPaymentOrder.Status.CLOSED
         payment.closed_at = now
         payment.save(update_fields=("status", "closed_at", "updated_at"))
+        from .coupons import release_coupon
+        release_coupon(order)
         mark_provider_order_payment_expired(order_no, source="payment_guard")
         return order, payment, False
 
@@ -943,6 +947,8 @@ def apply_provider_order_payment_success(
     payment.save(update_fields=(
         "channel", "status", "gateway_trade_no", "paid_at", "updated_at",
     ))
+    from .coupons import consume_coupon
+    consume_coupon(order, now=now)
     cancel_provider_order_payment_expiry(order_no, "payment_succeeded")
     register_provider_acceptance_timeout(order)
     create_order_notification(
@@ -1189,6 +1195,10 @@ def _settlement_amounts(order: ProviderOrder, commission_rate: Decimal) -> dict:
             "paid_amount": order.payable_amount,
             "refunded_amount": refunded_amount,
             "commission_rate": str(commission_rate),
+            "category_platform_commission_rate": order.pricing_snapshot.get("category_platform_commission_rate"),
+            "provider_bonus_rate": order.pricing_snapshot.get("provider_bonus_rate"),
+            "provider_bonus_turnover_amount": order.pricing_snapshot.get("provider_bonus_turnover_amount"),
+            "provider_bonus_period": order.pricing_snapshot.get("provider_bonus_period"),
         },
     }
 
@@ -1398,6 +1408,8 @@ def _complete_provider_order_refund(
             case.save(update_fields=("status", "updated_at"))
         if payment.status == ProviderOrderPaymentOrder.Status.REFUNDED:
             order.status = ProviderOrder.Status.REFUNDED
+            from .coupons import release_coupon
+            release_coupon(order, refunded=True)
         elif case and order.status == ProviderOrder.Status.AFTER_SALES:
             order.status = case.original_order_status
         order.save(update_fields=("status", "updated_at"))
@@ -1664,24 +1676,33 @@ def fallback_transport_fee(distance_km: Decimal | None) -> int:
     return max(1, math.ceil(float(distance_km) / 5)) * 500
 
 
-def build_quote(service: ProviderService, duration_minutes: int, distance_km: Decimal | None) -> PriceQuote:
+def build_quote(service: ProviderService, duration_minutes: int, distance_km: Decimal | None, coupon=None) -> PriceQuote:
+    from .commission import commission_snapshot
+    from .coupons import coupon_discount
+
     service_fee = calculate_service_fee(service, duration_minutes)
     transport_fee = fallback_transport_fee(distance_km)
     total = service_fee + transport_fee
+    discount = coupon_discount(coupon, total) if coupon else 0
     return PriceQuote(
         service_fee_amount=service_fee,
         transport_fee_amount=transport_fee,
         other_fee_amount=0,
-        discount_amount=0,
-        payable_amount=total,
+        discount_amount=discount,
+        payable_amount=total - discount,
         snapshot={
             "version": "provider-order-pricing-v1",
             "currency": "CNY",
-            "platform_commission_rate": str(service.category.platform_commission_rate),
+            **commission_snapshot(service.provider, service.category.platform_commission_rate),
             "time_grain_minutes": TIME_GRAIN_MINUTES,
             "minimum_hourly_minutes": MINIMUM_HOURLY_MINUTES,
             "transport_rule": "fallback_5_cny_per_5km" if distance_km is not None else "pending_map_route",
-            "coupon": None,
+            "coupon": ({
+                "public_id": str(coupon.public_id),
+                "face_amount": coupon.face_amount,
+                "min_order_amount": coupon.min_order_amount,
+                "discount_amount": discount,
+            } if coupon else None),
         },
     )
 
@@ -1749,6 +1770,8 @@ def expire_provider_order_payment(order_no: str, *, now=None) -> dict:
     order.status = ProviderOrder.Status.CANCELLED
     order.cancelled_at = now
     order.save(update_fields=("status", "cancelled_at", "updated_at"))
+    from .coupons import release_coupon
+    release_coupon(order)
     payment = ProviderOrderPaymentOrder.objects.select_for_update().filter(order=order).first()
     if payment and payment.status == ProviderOrderPaymentOrder.Status.PENDING_PAYMENT:
         payment.status = ProviderOrderPaymentOrder.Status.CLOSED
@@ -1933,7 +1956,13 @@ def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
         }
     order.status = ProviderOrder.Status.PENDING_REVIEW
     order.auto_confirmed_at = now
-    order.save(update_fields=("status", "auto_confirmed_at", "updated_at"))
+    from backoffice.operation_settings import platform_operation_rules
+    from taskcenter.services import register_provider_order_review_timeout
+    order.review_expires_at = now + timedelta(
+        days=platform_operation_rules()["provider_order_review_timeout_days"]
+    )
+    order.save(update_fields=("status", "auto_confirmed_at", "review_expires_at", "updated_at"))
+    register_provider_order_review_timeout(order)
     ensure_provider_order_settlement(order_no=order.order_no, now=now)
     create_order_notification(
         order=order,
@@ -1946,3 +1975,44 @@ def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
         "order_no": order_no,
         "action": "auto_confirmed",
     }
+
+
+@transaction.atomic
+def auto_review_provider_order(order_no: str, *, now=None) -> dict:
+    now = now or timezone.now()
+    order = ProviderOrder.objects.select_for_update().select_related("provider", "customer").filter(
+        order_no=order_no
+    ).first()
+    if order is None:
+        return {"state": "missing", "order_no": order_no}
+    if order.status == ProviderOrder.Status.AFTER_SALES and order.review_expires_at:
+        return {"state": "after_sales", "order_no": order_no}
+    if order.status != ProviderOrder.Status.PENDING_REVIEW:
+        return {"state": "not_applicable", "order_no": order_no}
+    if not order.review_expires_at:
+        return {"state": "invalid", "order_no": order_no, "reason": "missing_deadline"}
+    if order.review_expires_at > now:
+        return {"state": "not_due", "order_no": order_no, "deadline": order.review_expires_at}
+    ProviderOrderReview.objects.get_or_create(
+        order=order,
+        defaults={
+            "customer": order.customer,
+            "provider": order.provider,
+            "rating": 5,
+            "content": "评价期满，系统默认好评",
+            "is_anonymous": True,
+            "is_auto_generated": True,
+            "audit_status": ProviderOrderReview.AuditStatus.APPROVED,
+            "audited_at": now,
+        },
+    )
+    order.status = ProviderOrder.Status.COMPLETED
+    order.save(update_fields=("status", "updated_at"))
+    refresh_provider_review_metrics(order.provider)
+    create_order_notification(
+        order=order,
+        event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
+        title="订单已默认好评",
+        content="评价期限届满，系统已生成默认 5 星好评。",
+    )
+    return {"state": "expired", "order_no": order_no, "action": "auto_reviewed"}

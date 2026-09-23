@@ -10,6 +10,7 @@ from .views import (
     CurrentProviderOrderRejectView,
     CurrentProviderOrderStartView,
     CurrentUserProviderReviewListView,
+    CurrentUserCouponListView,
     HuifuPaymentNotificationView,
     PaymentCapabilitiesView,
     ProviderOrderAfterSalesView,
@@ -27,6 +28,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path("users/me/coupons/", CurrentUserCouponListView.as_view()),
     path("payments/capabilities/", PaymentCapabilitiesView.as_view()),
     path("payments/huifu/notify/", HuifuPaymentNotificationView.as_view()),
     path(

@@ -48,7 +48,8 @@ def _resolve_target(*, reporter, target_type, target_id):
         return target_fields, provider.service_city_code, provider.service_city_name
     if target_type == SupportCase.TargetType.PROVIDER_ORDER:
         order = get_object_or_404(
-            ProviderOrder.objects.select_related("provider"), order_no=target_id
+            ProviderOrder.objects.select_related("provider").select_for_update(of=("self",)),
+            order_no=target_id,
         )
         if order.customer_id != reporter.id:
             raise PermissionDenied("无权反馈该订单。")
@@ -105,30 +106,50 @@ def create_support_case(*, reporter, validated_data):
     attachments = _validate_attachments(
         reporter=reporter, attachment_ids=attachment_ids
     )
+    if validated_data.get("reward_eligible"):
+        order = target_fields["provider_order"]
+        if (order is None or order.status != ProviderOrder.Status.PENDING_REVIEW
+                or not order.review_expires_at or order.review_expires_at <= timezone.now()):
+            raise ValidationError({"target_id": "仅可举报处于待评价期限内的本人订单。"})
+        if SupportCase.objects.filter(reporter=reporter, provider_order=order, reward_eligible=True).exists():
+            raise ValidationError({"target_id": "该订单已提交过举报有奖申请。"})
     lookup = {key: value for key, value in target_fields.items() if value is not None}
+    # Order feedback and reward reports can coexist. Other targets retain their
+    # existing one-open-case constraint regardless of case type.
+    dedupe_lookup = dict(lookup)
+    if target_fields["provider_order"] is not None:
+        dedupe_lookup["case_type"] = validated_data["case_type"]
     if lookup:
         existing = support_case_queryset().filter(
-            reporter=reporter, status__in=OPEN_STATUSES, **lookup
+            reporter=reporter, status__in=OPEN_STATUSES, **dedupe_lookup
         ).first()
         if existing:
+            if validated_data.get("reward_eligible") and not existing.reward_eligible:
+                raise ValidationError({"target_id": "该订单已有进行中的举报，请先完成原举报。"})
             return existing, False
     try:
-        case = SupportCase.objects.create(
-            reporter=reporter,
-            case_type=validated_data["case_type"],
-            target_type=validated_data["target_type"],
-            reason=validated_data["reason"],
-            description=validated_data["description"],
-            city_code=city_code,
-            city_name=city_name,
-            **target_fields,
-        )
+        with transaction.atomic():
+            case = SupportCase.objects.create(
+                reporter=reporter,
+                case_type=validated_data["case_type"],
+                reward_eligible=validated_data.get("reward_eligible", False),
+                target_type=validated_data["target_type"],
+                reason=validated_data["reason"],
+                description=validated_data["description"],
+                city_code=city_code,
+                city_name=city_name,
+                **target_fields,
+            )
     except IntegrityError:
         if not lookup:
             raise
-        case = support_case_queryset().get(
-            reporter=reporter, status__in=OPEN_STATUSES, **lookup
-        )
+        case = support_case_queryset().filter(
+            reporter=reporter, status__in=OPEN_STATUSES, **dedupe_lookup
+        ).first()
+        if case is None or (validated_data.get("reward_eligible") and not case.reward_eligible):
+            message = ("该订单已经提交过举报有奖申请。" if validated_data.get("reward_eligible")
+                       else "该对象已有反馈，请刷新后查看。")
+            raise ValidationError({"target_id": message})
         return case, False
     if attachments:
         case.attachments.set(attachments)

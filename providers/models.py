@@ -119,6 +119,8 @@ class ProviderProfile(models.Model):
         validators=[MinValueValidator(Decimal("0.00"))],
     )
     service_count = models.PositiveIntegerField("服务次数", default=0)
+    commission_reset_period_override = models.CharField(max_length=16, blank=True, default="")
+    commission_tiers_override = models.JSONField(null=True, blank=True, default=None)
     order_count = models.PositiveIntegerField("接单量", default=0)
     credit_score = models.PositiveSmallIntegerField("信用分", default=100)
     invitation_code = models.CharField("邀请码", max_length=32, blank=True)

@@ -12,6 +12,7 @@ class UserNotification(models.Model):
         SYSTEM = "system", "系统"
 
     class EventType(models.TextChoices):
+        COUPON_ISSUED = "coupon_issued", "优惠券已发放"
         SUPPORT_REPLY = "support_reply", "客服回复"
         SUPPORT_RESULT = "support_result", "工单处理结果"
         SUPPORT_REVIEW_RESULT = "support_review_result", "工单复核结果"

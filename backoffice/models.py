@@ -161,7 +161,13 @@ class PlatformOperationSetting(models.Model):
     customer_service_phone = models.CharField(max_length=32, blank=True, default="")
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
+    provider_order_review_timeout_days = models.PositiveSmallIntegerField(default=7)
     provider_order_settlement_freeze_days = models.PositiveSmallIntegerField(default=1)
+    provider_commission_reset_period = models.CharField(max_length=16, default="month")
+    provider_commission_tiers = models.JSONField(default=list, blank=True)
+    report_coupon_amount = models.PositiveIntegerField(default=2000)
+    report_coupon_min_order_amount = models.PositiveIntegerField(default=10000)
+    report_coupon_valid_days = models.PositiveSmallIntegerField(default=365)
     activity_payment_timeout_minutes = models.PositiveSmallIntegerField(default=30)
     activity_service_fee_rate = models.DecimalField(
         max_digits=5,

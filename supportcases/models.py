@@ -23,6 +23,8 @@ class SupportCase(models.Model):
         REVIEW = "review", "用户评价"
 
     class Reason(models.TextChoices):
+        PLATFORM_PROCESS = "platform_process", "平台流程问题"
+        PLATFORM_PRODUCT = "platform_product", "产品体验建议"
         SERVICE_QUALITY = "service_quality", "服务体验问题"
         FALSE_INFORMATION = "false_information", "信息不实"
         INAPPROPRIATE_CONTENT = "inappropriate_content", "内容不当"
@@ -52,6 +54,11 @@ class SupportCase(models.Model):
         verbose_name="提交用户",
     )
     case_type = models.CharField("工单类型", max_length=20, choices=CaseType)
+    reward_eligible = models.BooleanField("举报有奖", default=False)
+    reward_coupon = models.OneToOneField(
+        "orders.UserCoupon", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="reward_support_case",
+    )
     target_type = models.CharField("关联对象", max_length=24, choices=TargetType)
     provider = models.ForeignKey(
         "providers.ProviderProfile",
@@ -167,12 +174,17 @@ class SupportCase(models.Model):
                 name="uniq_open_support_case_provider",
             ),
             models.UniqueConstraint(
-                fields=("reporter", "provider_order"),
+                fields=("reporter", "provider_order", "case_type"),
                 condition=Q(
                     provider_order__isnull=False,
                     status__in=("pending", "processing", "reviewing"),
                 ),
                 name="uniq_open_support_case_order",
+            ),
+            models.UniqueConstraint(
+                fields=("reporter", "provider_order"),
+                condition=Q(provider_order__isnull=False, reward_eligible=True),
+                name="uniq_reward_report_per_order",
             ),
             models.UniqueConstraint(
                 fields=("reporter", "activity"),

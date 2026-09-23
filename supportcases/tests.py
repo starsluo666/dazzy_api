@@ -1,4 +1,5 @@
 from django.urls import reverse
+from datetime import timedelta
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -7,6 +8,8 @@ from backoffice.models import AdminAuditLog, AdminRole, Organization, Organizati
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from providers.models import ProviderProfile
+from providers.models import ProviderService, ServiceCategory
+from orders.models import ProviderOrder, UserCoupon
 
 from .models import SupportCase, SupportCaseRecord
 
@@ -75,6 +78,18 @@ class SupportCaseApiTests(APITestCase):
         self.assertEqual(duplicate.status_code, 200)
         self.assertFalse(duplicate.data["created"])
         self.assertEqual(duplicate.data["data"]["case_no"], case.case_no)
+        self.assertEqual(SupportCase.objects.count(), 1)
+
+    def test_non_order_feedback_types_share_existing_open_case(self):
+        first = self.create_provider_report()
+        response = self.client.post(reverse("support-case-list"), {
+            "case_type": "complaint", "target_type": "provider",
+            "target_id": str(self.provider.user.public_id),
+            "reason": "service_quality", "description": "同一达人已有进行中的工单。",
+        }, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["created"])
+        self.assertEqual(response.data["data"]["case_no"], first.data["data"]["case_no"])
         self.assertEqual(SupportCase.objects.count(), 1)
 
     def test_attachment_must_belong_to_current_user(self):
@@ -214,6 +229,27 @@ class AdminSupportCaseApiTests(APITestCase):
             1,
         )
 
+    def test_customer_service_can_find_case_reporter_and_issue_coupon(self):
+        search = self.client.get(reverse("backoffice-coupons"), {"search": "投诉用户"})
+        self.assertEqual(search.status_code, 200)
+        self.assertEqual(search.data["data"]["users"][0]["public_id"], str(self.case.reporter.public_id))
+        issued = self.client.post(
+            reverse("backoffice-coupons"),
+            {"user_public_id": str(self.case.reporter.public_id)}, format="json",
+        )
+        self.assertEqual(issued.status_code, 201)
+        self.assertEqual(issued.data["data"]["face_amount"], 2000)
+        self.assertEqual(UserCoupon.objects.filter(owner=self.case.reporter).count(), 1)
+        self.assertTrue(AdminAuditLog.objects.filter(action="coupon.issue").exists())
+
+    def test_coupon_endpoints_reject_invalid_user_identifier(self):
+        url = reverse("backoffice-coupons")
+        listing = self.client.get(url, {"user_public_id": "invalid-uuid"})
+        self.assertEqual(listing.status_code, 400)
+        issued = self.client.post(url, {"user_public_id": "invalid-uuid"}, format="json")
+        self.assertEqual(issued.status_code, 400)
+        self.assertFalse(UserCoupon.objects.exists())
+
     def test_city_scoped_operator_cannot_view_other_city(self):
         self.case.city_code = "110100"
         self.case.city_name = "北京市"
@@ -272,3 +308,66 @@ class AdminSupportCaseApiTests(APITestCase):
             UserNotification.EventType.SUPPORT_REVIEW_RESULT,
         )
         self.assertEqual(notification.title, "工单复核已完成")
+
+    def test_reward_report_requires_order_evidence_and_issues_coupon_once(self):
+        now = timezone.now()
+        category = ServiceCategory.objects.create(name="举报测试服务", slug="reward-report-test")
+        service = ProviderService.objects.create(
+            provider=self.case.provider, category=category,
+            billing_type=ProviderService.BillingType.PER_SESSION, price_amount=20000,
+        )
+        order = ProviderOrder.objects.create(
+            order_no="REWARD-ORDER-001", customer=self.case.reporter,
+            provider=self.case.provider, service=service,
+            provider_name_snapshot="邯郸达人", service_name_snapshot="举报测试服务",
+            billing_type_snapshot=ProviderOrder.BillingType.PER_SESSION,
+            unit_price_amount=20000, starts_at=now - timedelta(hours=4),
+            ends_at=now - timedelta(hours=2), duration_minutes=120,
+            meeting_address="邯郸测试地点", contact_name="测试用户", contact_phone="13812346688",
+            service_fee_amount=20000, payable_amount=20000,
+            status=ProviderOrder.Status.PENDING_REVIEW,
+            payment_expires_at=now - timedelta(days=2),
+            customer_confirmed_at=now, review_expires_at=now + timedelta(days=7),
+        )
+        attachment = MediaAsset.objects.create(
+            owner=self.case.reporter, scope=MediaAsset.Scope.PRIVATE,
+            category=MediaAsset.Category.SUPPORT_ATTACHMENT,
+            status=MediaAsset.Status.UPLOADED,
+            object_key="dazzy-test/private/support/reward.webp",
+            content_type="image/webp", size_bytes=1024, uploaded_at=now,
+        )
+        self.client.force_authenticate(self.case.reporter)
+        feedback = self.client.post(reverse("support-case-list"), {
+            "case_type": "consultation", "target_type": "provider_order",
+            "target_id": order.order_no, "reason": "platform_process",
+            "description": "反馈这个订单遇到的平台流程问题。",
+        }, format="json")
+        self.assertEqual(feedback.status_code, 201)
+        payload = {
+            "case_type": "report", "target_type": "provider_order",
+            "target_id": order.order_no, "reason": "safety_risk",
+            "description": "达人服务过程中存在安全风险，请平台核查。",
+            "reward_eligible": True,
+        }
+        missing_evidence = self.client.post(reverse("support-case-list"), payload, format="json")
+        self.assertEqual(missing_evidence.status_code, 400)
+        payload["attachment_ids"] = [str(attachment.pk)]
+        report = self.client.post(reverse("support-case-list"), payload, format="json")
+        self.assertEqual(report.status_code, 201)
+        case_no = report.data["data"]["case_no"]
+        self.client.force_authenticate(self.operator)
+        resolved = self.client.post(
+            reverse("admin-support-case-action", args=(case_no,)),
+            {"action": "resolve", "result_note": "举报证据属实，已完成违规核查。"}, format="json",
+        )
+        self.assertEqual(resolved.status_code, 200)
+        self.assertTrue(resolved.data["data"]["reward_issued"])
+        coupon = UserCoupon.objects.get(owner=self.case.reporter, source="report_reward")
+        self.assertEqual(coupon.face_amount, 2000)
+        self.assertEqual(coupon.min_order_amount, 10000)
+        repeated = self.client.post(
+            reverse("admin-support-case-action", args=(case_no,)),
+            {"action": "resolve", "result_note": "再次处理不应发券。"}, format="json",
+        )
+        self.assertEqual(repeated.status_code, 400)
+        self.assertEqual(UserCoupon.objects.filter(owner=self.case.reporter, source="report_reward").count(), 1)

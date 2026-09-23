@@ -5,9 +5,11 @@ from .views import (
     SupportCaseListCreateView,
     SupportCaseReplyView,
     SupportCaseReviewRequestView,
+    RewardReportRulesView,
 )
 
 urlpatterns = [
+    path("support/report-rules/", RewardReportRulesView.as_view()),
     path("support/cases/", SupportCaseListCreateView.as_view(), name="support-case-list"),
     path(
         "support/cases/<str:case_no>/",

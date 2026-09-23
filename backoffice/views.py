@@ -33,7 +33,9 @@ from orders.models import (
     ProviderOrderRefundOrder,
     ProviderOrderReview,
     ProviderOrderSettlement,
+    UserCoupon,
 )
+from orders.coupons import coupon_payload, issue_coupon
 from providers.models import (
     ProviderProfile,
     ProviderProfileRevision,
@@ -99,6 +101,9 @@ from .serializers import (
     ProviderAdminQuerySerializer,
     ProviderAdminSerializer,
     ProviderCreditAdjustmentInputSerializer,
+    ProviderCommissionOverrideSerializer,
+    AdminCouponIssueSerializer,
+    AdminCouponListQuerySerializer,
     ProviderOrderAfterSalesCaseActionSerializer,
     ProviderOrderAfterSalesCaseCreateSerializer,
     ProviderOrderAfterSalesCaseQuerySerializer,
@@ -2666,6 +2671,109 @@ class PlatformOperationSettingView(APIView):
             ip_address=client_ip(request),
         )
         return Response({"data": serializer.data})
+
+
+class AdminCouponListIssueView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def scoped_coupon_users(access):
+        from supportcases.models import SupportCase
+
+        if access.all_data:
+            return scoped_users(access)
+        case_reporters = SupportCase.objects.filter(
+            city_code__in=access.city_codes
+        ).values("reporter_id")
+        return User.objects.filter(
+            Q(pk__in=scoped_users(access).values("pk")) | Q(pk__in=case_reporters),
+            is_staff=False, is_superuser=False,
+            backoffice_memberships__isnull=True,
+        ).distinct()
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("support.case.manage")
+        query = AdminCouponListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        coupon_users = self.scoped_coupon_users(access)
+        queryset = UserCoupon.objects.filter(owner__in=coupon_users)
+        if user_id := query.validated_data.get("user_public_id"):
+            queryset = queryset.filter(owner__public_id=user_id)
+        items = queryset.select_related("owner", "issued_by")[:100]
+        search = query.validated_data.get("search", "")
+        users = coupon_users.filter(Q(nickname__icontains=search) | Q(phone__icontains=search))[:20] if search else []
+        return Response({"data": {"users": [
+            {"public_id": str(user.public_id), "nickname": user.nickname,
+             "phone_masked": f"{user.phone[:3]}****{user.phone[-4:]}" if len(user.phone) == 11 else ""}
+            for user in users
+        ], "items": [
+            {**coupon_payload(item), "user_public_id": str(item.owner.public_id),
+             "user_name": item.owner.nickname, "issued_by": item.issued_by.nickname if item.issued_by else None}
+            for item in items
+        ]}})
+
+    @transaction.atomic
+    def post(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("support.case.manage")
+        serializer = AdminCouponIssueSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        public_id = serializer.validated_data["user_public_id"]
+        scoped_owner = get_object_or_404(self.scoped_coupon_users(access), public_id=public_id)
+        owner = User.objects.select_for_update().get(pk=scoped_owner.pk)
+        if owner.account_status != User.AccountStatus.ACTIVE:
+            raise ValidationError({"user_public_id": "仅可向正常状态的用户发放优惠券。"})
+        coupon = issue_coupon(owner=owner, source="customer_service", issued_by=request.user)
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="coupon.issue", target_type="coupon", target_id=str(coupon.public_id),
+            before={}, after={"owner": str(owner.public_id), "amount": coupon.face_amount,
+                              "min_order_amount": coupon.min_order_amount},
+            ip_address=client_ip(request),
+        )
+        return Response({"data": coupon_payload(coupon)}, status=201)
+
+
+class ProviderCommissionOverrideView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def patch(self, request, profile_id):
+        access = resolve_admin_access(request.user)
+        access.require("provider.manage")
+        profile = get_object_or_404(
+            provider_admin_queryset(access).select_for_update(of=("self",)), pk=profile_id
+        )
+        serializer = ProviderCommissionOverrideSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        before = {
+            "reset_period": profile.commission_reset_period_override,
+            "tiers": profile.commission_tiers_override,
+        }
+        data = serializer.validated_data
+        if "reset_period" in data:
+            profile.commission_reset_period_override = data["reset_period"]
+        if "tiers" in data:
+            profile.commission_tiers_override = data["tiers"]
+        profile.save(update_fields=(
+            "commission_reset_period_override", "commission_tiers_override", "updated_at"
+        ))
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="provider.commission_override.update", target_type="provider",
+            target_id=str(profile_id), before=before,
+            after={"reset_period": profile.commission_reset_period_override,
+                   "tiers": profile.commission_tiers_override},
+            ip_address=client_ip(request),
+        )
+        context = {
+            "can_review": can_access(access, "provider.review"),
+            "include_detail": True,
+        }
+        return Response({"data": ProviderAdminSerializer(profile, context=context).data})
 
 
 class OrganizationMemberListView(APIView):

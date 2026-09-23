@@ -14,6 +14,7 @@ class SupportCaseCreateSerializer(serializers.Serializer):
     attachment_ids = serializers.ListField(
         child=serializers.UUIDField(), required=False, default=list, max_length=3
     )
+    reward_eligible = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         target_type = attrs["target_type"]
@@ -29,6 +30,11 @@ class SupportCaseCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"reason": "订单退款请从订单详情进入退款/售后流程。"}
             )
+        if attrs["reward_eligible"]:
+            if attrs["case_type"] != SupportCase.CaseType.REPORT or target_type != SupportCase.TargetType.PROVIDER_ORDER:
+                raise serializers.ValidationError("举报有奖必须关联达人订单。")
+            if not attrs["attachment_ids"]:
+                raise serializers.ValidationError({"attachment_ids": "举报有奖至少上传一张证据图片。"})
         return attrs
 
 
@@ -108,6 +114,7 @@ class SupportCaseSerializer(serializers.ModelSerializer):
     attachment_urls = serializers.SerializerMethodField()
     assignee_name = serializers.SerializerMethodField()
     records = SupportCaseRecordSerializer(many=True, read_only=True)
+    reward_issued = serializers.SerializerMethodField()
 
     class Meta:
         model = SupportCase
@@ -117,8 +124,12 @@ class SupportCaseSerializer(serializers.ModelSerializer):
             "reason", "reason_label", "description", "attachment_urls", "city_code",
             "city_name", "status", "status_label", "assignee_name", "result_note",
             "resolved_at", "review_requested_at", "review_reason", "records",
+            "reward_eligible", "reward_issued",
             "created_at", "updated_at",
         )
+
+    def get_reward_issued(self, obj):
+        return bool(obj.reward_coupon_id)
 
     def get_target_id(self, obj):
         if obj.provider_id:

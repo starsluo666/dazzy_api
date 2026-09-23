@@ -32,10 +32,12 @@ from taskcenter.services import (
     mark_provider_acceptance_expired,
     register_provider_rejection_support_timeout,
     register_provider_order_confirmation_timeout,
+    register_provider_order_review_timeout,
+    cancel_provider_order_review_timeout,
     register_provider_order_payment_expiry,
 )
 
-from .models import ProviderOrder, ProviderOrderPaymentOrder, ProviderOrderReview
+from .models import ProviderOrder, ProviderOrderPaymentOrder, ProviderOrderReview, UserCoupon
 from .payment_gateway import get_provider_order_payment_gateway
 from .serializers import (
     ProviderOrderAfterSalesInputSerializer,
@@ -54,6 +56,7 @@ from .serializers import (
 from .services import (
     PROVIDER_REJECTION_SUPPORT_TIMEOUT,
     apply_provider_order_payment_success,
+    build_quote,
     refresh_provider_review_metrics,
     cancel_provider_order_with_compensation,
     confirm_provider_order_huifu_payment_status,
@@ -64,6 +67,7 @@ from .services import (
     ensure_slot_available,
     process_huifu_payment_notification,
 )
+from .coupons import coupon_payload, eligible_coupon, reserve_coupon
 from .wechat_oauth import (
     WechatOAuthConfigurationError,
     build_payment_authorization,
@@ -81,6 +85,21 @@ def current_approved_provider(request):
     if provider.status != ProviderProfile.Status.APPROVED:
         raise PermissionDenied("仅审核通过的达人可以管理订单。")
     return provider
+
+
+class CurrentUserCouponListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        now = timezone.now()
+        owned = UserCoupon.objects.filter(owner=request.user)
+        # Never hide a usable coupon behind a long history of used/expired ones.
+        active = list(owned.filter(status=UserCoupon.Status.AVAILABLE, expires_at__gt=now))
+        history = list(owned.exclude(
+            status=UserCoupon.Status.AVAILABLE, expires_at__gt=now,
+        )[:100])
+        coupons = sorted(active + history, key=lambda item: (item.created_at, item.pk), reverse=True)
+        return Response({"data": {"items": [coupon_payload(item) for item in coupons]}})
 
 
 class ProviderOrderPreviewView(APIView):
@@ -124,7 +143,23 @@ class ProviderOrderListCreateView(APIView):
                 provider, data["starts_at"], data["ends_at"]
             )
             ensure_slot_available(provider, data["starts_at"], data["ends_at"])
-            quote = data["quote"]
+            service.provider = provider
+            base_quote = build_quote(
+                service, data["duration_minutes"], data["route"].distance_km,
+            )
+            coupon = None
+            if data.get("coupon_id"):
+                coupon = eligible_coupon(
+                    owner=customer, public_id=data["coupon_id"],
+                    order_amount=base_quote.payable_amount,
+                    lock=True,
+                )
+            quote = base_quote
+            if coupon:
+                quote = build_quote(
+                    service, data["duration_minutes"], data["route"].distance_km,
+                    coupon=coupon,
+                )
             order = ProviderOrder.objects.create(
                 order_no=make_order_no(),
                 customer=customer,
@@ -161,6 +196,8 @@ class ProviderOrderListCreateView(APIView):
                 ),
             )
             create_provider_order_payment_order(order)
+            if coupon:
+                reserve_coupon(coupon=coupon, order=order)
             register_provider_order_payment_expiry(order)
         return Response({"data": ProviderOrderSerializer(order).data}, status=201)
 
@@ -676,7 +713,11 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
             raise ValidationError({"status": "订单不在待确认状态。"})
         order.status = ProviderOrder.Status.PENDING_REVIEW
         order.customer_confirmed_at = timezone.now()
-        order.save(update_fields=("status", "customer_confirmed_at", "updated_at"))
+        order.review_expires_at = order.customer_confirmed_at + timedelta(
+            days=platform_operation_rules()["provider_order_review_timeout_days"]
+        )
+        order.save(update_fields=("status", "customer_confirmed_at", "review_expires_at", "updated_at"))
+        register_provider_order_review_timeout(order)
         cancel_provider_order_confirmation_timeout(
             order.order_no, "customer_confirmed_completion"
         )
@@ -700,6 +741,8 @@ class ProviderOrderReviewView(ProviderOrderDetailView):
             return Response({"data": ProviderOrderSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_REVIEW:
             raise ValidationError({"status": "订单当前不在待评价状态。"})
+        if order.review_expires_at and order.review_expires_at <= timezone.now():
+            raise ValidationError({"status": "评价期限已过，系统将生成默认好评。"})
         serializer = ProviderOrderReviewInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data.copy()
@@ -725,6 +768,7 @@ class ProviderOrderReviewView(ProviderOrderDetailView):
         review.images.set(images)
         order.status = ProviderOrder.Status.COMPLETED
         order.save(update_fields=("status", "updated_at"))
+        cancel_provider_order_review_timeout(order_no, "customer_reviewed")
         refresh_provider_review_metrics(order.provider)
         return Response({"data": ProviderOrderSerializer(order).data})
 

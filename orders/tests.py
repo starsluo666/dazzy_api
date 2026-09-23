@@ -9,6 +9,7 @@ from django.contrib.gis.geos import Point
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 
 from accounts.models import User, WechatOfficialAccountIdentity
 from backoffice.models import (
@@ -36,7 +37,13 @@ from .models import (
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderSettlement,
+    ProviderOrderReview,
+    ProviderOrderRefundOrder,
+    UserCoupon,
 )
+from .coupons import eligible_coupon, issue_coupon
+from .commission import commission_snapshot, validate_commission_tiers
+from .services import _complete_provider_order_refund, auto_review_provider_order
 from .payment_gateway import PaymentResult
 
 
@@ -1426,3 +1433,151 @@ class ProviderOrderApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+
+    def test_coupon_quote_reservation_payment_and_cancellation(self):
+        coupon = issue_coupon(owner=self.customer)
+        with self.assertRaises(ValidationError):
+            eligible_coupon(owner=self.customer, public_id=coupon.public_id, order_amount=10000)
+        self.assertEqual(
+            eligible_coupon(owner=self.customer, public_id=coupon.public_id, order_amount=10001).pk,
+            coupon.pk,
+        )
+        payload = {**self.payload(), "coupon_id": str(coupon.public_id)}
+        preview = self.client.post(
+            "/api/v1/provider-orders/preview/", payload, content_type="application/json"
+        )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["data"]["discount_amount"], 2000)
+        created = self.client.post(
+            "/api/v1/provider-orders/", payload, content_type="application/json"
+        )
+        self.assertEqual(created.status_code, 201)
+        order_no = created.json()["data"]["order_no"]
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.status, UserCoupon.Status.RESERVED)
+        self.assertEqual(coupon.reserved_order.order_no, order_no)
+        cancelled = self.client.post(f"/api/v1/provider-orders/{order_no}/cancel/")
+        self.assertEqual(cancelled.status_code, 200)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.status, UserCoupon.Status.AVAILABLE)
+        self.assertIsNone(coupon.reserved_order_id)
+
+        another = self.client.post(
+            "/api/v1/provider-orders/", payload, content_type="application/json"
+        )
+        self.assertEqual(another.status_code, 201)
+        paid = self.client.post(
+            f"/api/v1/provider-orders/{another.json()['data']['order_no']}/simulate-payment/"
+        )
+        self.assertEqual(paid.status_code, 200)
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.status, UserCoupon.Status.USED)
+        paid_order = ProviderOrder.objects.get(order_no=another.json()["data"]["order_no"])
+        refund = ProviderOrderRefundOrder.objects.create(
+            idempotency_key="test-coupon-full-refund",
+            order=paid_order,
+            payment_order=paid_order.payment_order,
+            beneficiary=self.customer,
+            source_type=ProviderOrderRefundOrder.SourceType.SYSTEM,
+            source_reference="test-coupon-refund",
+            service_fee_refund_amount=paid_order.service_fee_amount - paid_order.discount_amount,
+            transport_fee_refund_amount=paid_order.transport_fee_amount,
+            other_fee_refund_amount=0,
+            refund_amount=paid_order.payable_amount,
+            reason="测试全额退款返还优惠券",
+        )
+        _complete_provider_order_refund(
+            refund.refund_no, gateway_refund_no="TEST-REFUND-COUPON",
+            refunded_at=timezone.now(),
+        )
+        coupon.refresh_from_db()
+        self.assertEqual(coupon.status, UserCoupon.Status.AVAILABLE)
+        self.assertIsNone(coupon.reserved_order_id)
+
+    def test_coupon_list_keeps_usable_coupon_visible_after_long_history(self):
+        coupon = issue_coupon(owner=self.customer)
+        UserCoupon.objects.bulk_create([
+            UserCoupon(
+                owner=self.customer, face_amount=2000, min_order_amount=10000,
+                expires_at=timezone.now() + timedelta(days=365),
+                status=UserCoupon.Status.USED,
+            ) for _ in range(101)
+        ])
+        response = self.client.get("/api/v1/users/me/coupons/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(str(coupon.public_id), [item["public_id"] for item in response.json()["data"]["items"]])
+
+    def test_commission_bonus_is_based_on_category_and_capped(self):
+        setting = PlatformOperationSetting.current()
+        setting.provider_commission_tiers = validate_commission_tiers([
+            {"threshold_amount": 0, "bonus_rate": "3.00"},
+            {"threshold_amount": 100000, "bonus_rate": "5.00"},
+        ])
+        setting.save(update_fields=("provider_commission_tiers", "updated_at"))
+        snapshot = commission_snapshot(self.provider, Decimal("20.00"))
+        self.assertEqual(snapshot["platform_commission_rate"], "17.00")
+        with patch("orders.models.ProviderOrderSettlement.objects.filter") as settled_filter:
+            settled_filter.return_value.filter.return_value.aggregate.return_value = {"total": 100000}
+            at_threshold = commission_snapshot(self.provider, Decimal("20.00"))
+            self.assertEqual(
+                settled_filter.call_args.kwargs["status__in"],
+                (ProviderOrderSettlement.Status.RISK_FROZEN,
+                 ProviderOrderSettlement.Status.SETTLED),
+            )
+            self.assertIn("frozen_at__gte", settled_filter.return_value.filter.call_args.kwargs)
+        self.assertEqual(at_threshold["platform_commission_rate"], "15.00")
+        self.provider.commission_tiers_override = [
+            {"threshold_amount": 0, "bonus_rate": "30.00"}
+        ]
+        self.provider.save(update_fields=("commission_tiers_override", "updated_at"))
+        snapshot = commission_snapshot(self.provider, Decimal("20.00"))
+        self.assertEqual(snapshot["platform_commission_rate"], "0.00")
+        self.assertEqual(snapshot["provider_bonus_rate"], "20.00")
+
+    def test_review_timeout_waits_for_after_sales_then_resumes(self):
+        from taskcenter.services import process_due_tasks, register_provider_order_review_timeout
+
+        response = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 201)
+        order = ProviderOrder.objects.get(order_no=response.json()["data"]["order_no"])
+        now = timezone.now()
+        order.status = ProviderOrder.Status.AFTER_SALES
+        order.customer_confirmed_at = now - timedelta(days=8)
+        order.review_expires_at = now - timedelta(days=1)
+        order.save(update_fields=("status", "customer_confirmed_at", "review_expires_at"))
+        task, _ = register_provider_order_review_timeout(order)
+        result = process_due_tasks(task_types=[ScheduledTask.Type.PROVIDER_ORDER_REVIEW_TIMEOUT], now=now)
+        self.assertEqual(result["rescheduled"], 1)
+        self.assertFalse(ProviderOrderReview.objects.filter(order=order).exists())
+        task.refresh_from_db()
+        self.assertEqual(task.status, ScheduledTask.Status.PENDING)
+
+        order.status = ProviderOrder.Status.PENDING_REVIEW
+        order.save(update_fields=("status",))
+        result = process_due_tasks(
+            task_types=[ScheduledTask.Type.PROVIDER_ORDER_REVIEW_TIMEOUT],
+            now=now + timedelta(minutes=5),
+        )
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(ProviderOrderReview.objects.get(order=order).rating, 5)
+
+    def test_review_timeout_generates_single_approved_default_review(self):
+        response = self.client.post(
+            "/api/v1/provider-orders/", self.payload(), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 201)
+        order = ProviderOrder.objects.get(order_no=response.json()["data"]["order_no"])
+        order.status = ProviderOrder.Status.PENDING_REVIEW
+        order.customer_confirmed_at = timezone.now() - timedelta(days=8)
+        order.review_expires_at = timezone.now() - timedelta(days=1)
+        order.save(update_fields=("status", "customer_confirmed_at", "review_expires_at"))
+        outcome = auto_review_provider_order(order.order_no)
+        self.assertEqual(outcome["state"], "expired")
+        review = ProviderOrderReview.objects.get(order=order)
+        self.assertEqual(review.rating, 5)
+        self.assertTrue(review.is_auto_generated)
+        self.assertEqual(review.audit_status, ProviderOrderReview.AuditStatus.APPROVED)
+        self.assertEqual(auto_review_provider_order(order.order_no)["state"], "not_applicable")
+        self.assertEqual(ProviderOrderReview.objects.filter(order=order).count(), 1)

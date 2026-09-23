@@ -152,6 +152,18 @@ def register_provider_order_refund(refund):
     )
 
 
+def register_provider_order_review_timeout(order):
+    if not order.review_expires_at:
+        raise ValueError("评价截止时间不能为空。")
+    return _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_REVIEW_TIMEOUT,
+        business_type="provider_order",
+        business_key=order.order_no,
+        scheduled_at=order.review_expires_at,
+        payload={"order_no": order.order_no},
+    )
+
+
 def register_provider_order_cancel_compensation(order):
     return _register_task(
         task_type=ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION,
@@ -544,6 +556,15 @@ def mark_activity_participation_refund_succeeded(refund_no: str):
     )
 
 
+def cancel_provider_order_review_timeout(order_no: str, reason: str):
+    return cancel_business_task(
+        task_type=ScheduledTask.Type.PROVIDER_ORDER_REVIEW_TIMEOUT,
+        business_type="provider_order",
+        business_key=order_no,
+        reason=reason,
+    )
+
+
 def mark_activity_publish_refund_succeeded(refund_no: str):
     return _mark_refund_task_succeeded(
         task_type=ScheduledTask.Type.ACTIVITY_PUBLISH_REFUND,
@@ -587,6 +608,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
     acceptance_created = 0
     rejection_support_created = 0
     confirmation_created = 0
+    review_created = 0
     settlement_created = 0
     settlement_task_created = 0
     payment_orders = (
@@ -662,6 +684,26 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
         _, created = register_provider_order_confirmation_timeout(order)
         confirmation_created += int(created)
 
+    review_timeout = timedelta(days=platform_operation_rules()["provider_order_review_timeout_days"])
+    review_orders = (
+        _requiring_task_synchronization(
+            ProviderOrder.objects.filter(status=ProviderOrder.Status.PENDING_REVIEW),
+            task_type=ScheduledTask.Type.PROVIDER_ORDER_REVIEW_TIMEOUT,
+            deadline_field="review_expires_at",
+        )
+        .only("order_no", "customer_confirmed_at", "auto_confirmed_at", "review_expires_at")
+        .order_by("id")[:batch_size]
+    )
+    for order in review_orders:
+        if not order.review_expires_at:
+            confirmed_at = order.customer_confirmed_at or order.auto_confirmed_at
+            if not confirmed_at:
+                continue
+            order.review_expires_at = confirmed_at + review_timeout
+            order.save(update_fields=("review_expires_at", "updated_at"))
+        _, created = register_provider_order_review_timeout(order)
+        review_created += int(created)
+
     confirmed_without_settlement = ProviderOrder.objects.filter(
         Q(customer_confirmed_at__isnull=False) | Q(auto_confirmed_at__isnull=False),
         settlement__isnull=True,
@@ -734,6 +776,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
         "acceptance_created": acceptance_created,
         "rejection_support_created": rejection_support_created,
         "confirmation_created": confirmation_created,
+        "review_created": review_created,
         "settlement_created": settlement_created,
         "settlement_task_created": settlement_task_created,
         "refund_task_created": refund_task_created,
@@ -1296,6 +1339,28 @@ def _execute_activity_participation_payment_expiry(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _execute_provider_order_review_timeout(task, now):
+    from orders.services import auto_review_provider_order
+
+    outcome = auto_review_provider_order(task.business_key, now=now)
+    if outcome["state"] == "after_sales":
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result=outcome,
+            available_at=now + timedelta(minutes=5),
+        )
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()},
+            available_at=deadline,
+        )
+    if outcome["state"] == "expired":
+        return TaskExecutionOutcome(status=ScheduledTask.Status.SUCCEEDED, result=outcome)
+    return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
+
+
 def _execute_activity_cancel_compensation(task, now, *, payment_kind):
     from activities.huifu import process_activity_huifu_cancel_compensation
 
@@ -1605,6 +1670,7 @@ TASK_HANDLERS = {
     ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT: (
         _execute_provider_order_confirmation_timeout
     ),
+    ScheduledTask.Type.PROVIDER_ORDER_REVIEW_TIMEOUT: _execute_provider_order_review_timeout,
     ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT: _execute_provider_order_settlement,
     ScheduledTask.Type.PROVIDER_ORDER_CANCEL_COMPENSATION: (
         _execute_provider_order_cancel_compensation

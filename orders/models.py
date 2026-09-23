@@ -121,6 +121,7 @@ class ProviderOrder(models.Model):
     confirmation_expires_at = models.DateTimeField("用户确认截止时间", null=True, blank=True)
     customer_confirmed_at = models.DateTimeField("用户确认完成时间", null=True, blank=True)
     auto_confirmed_at = models.DateTimeField("系统自动确认时间", null=True, blank=True)
+    review_expires_at = models.DateTimeField("评价截止时间", null=True, blank=True)
     cancelled_at = models.DateTimeField("取消时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -161,6 +162,38 @@ class ProviderOrder(models.Model):
 
 def generate_provider_payment_no():
     return f"POP{uuid.uuid4().hex[:20].upper()}"
+
+
+class UserCoupon(models.Model):
+    class Status(models.TextChoices):
+        AVAILABLE = "available", "可使用"
+        RESERVED = "reserved", "订单占用中"
+        USED = "used", "已使用"
+
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="coupons"
+    )
+    face_amount = models.PositiveIntegerField("面额（分）")
+    min_order_amount = models.PositiveIntegerField("订单使用门槛（分）")
+    expires_at = models.DateTimeField("过期时间")
+    status = models.CharField(max_length=12, choices=Status, default=Status.AVAILABLE)
+    reserved_order = models.OneToOneField(
+        ProviderOrder, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="reserved_coupon",
+    )
+    used_at = models.DateTimeField(null=True, blank=True)
+    source = models.CharField(max_length=24, default="manual")
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="issued_coupons",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "user_coupon"
+        ordering = ("-created_at", "-id")
+        indexes = [models.Index(fields=("owner", "status", "expires_at"))]
 
 
 class ProviderOrderPaymentOrder(models.Model):
@@ -605,6 +638,10 @@ class ProviderOrderSettlement(models.Model):
                 fields=("provider", "status", "-created_at"),
                 name="provider_set_owner_status_idx",
             ),
+            models.Index(
+                fields=("provider", "status", "frozen_at"),
+                name="provider_set_turnover_idx",
+            ),
         ]
         constraints = [
             models.CheckConstraint(
@@ -675,6 +712,7 @@ class ProviderOrderReview(models.Model):
         verbose_name="评价图片",
     )
     is_anonymous = models.BooleanField("匿名评价", default=False)
+    is_auto_generated = models.BooleanField("系统默认好评", default=False)
     is_visible = models.BooleanField("公开显示", default=True)
     audit_status = models.CharField(
         "审核状态", max_length=16, choices=AuditStatus, default=AuditStatus.PENDING

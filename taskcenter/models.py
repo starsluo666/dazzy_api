@@ -22,6 +22,10 @@ class ScheduledTask(models.Model):
             "provider_order_confirmation_timeout",
             "达人订单确认超时",
         )
+        PROVIDER_ORDER_REVIEW_TIMEOUT = (
+            "provider_order_review_timeout",
+            "达人订单评价超时",
+        )
         PROVIDER_ORDER_SETTLEMENT = (
             "provider_order_settlement",
             "达人订单资金结算",
