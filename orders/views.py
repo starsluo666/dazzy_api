@@ -641,7 +641,7 @@ class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
         if order.status != ProviderOrder.Status.DEPARTED:
             raise ValidationError({"status": "订单不在已出发状态。"})
         if not order.arrival_photo_id:
-            raise ValidationError({"arrival_photo": "请先上传集合地点照片。"})
+            raise ValidationError({"arrival_photo": "请先上传清晰包含本人及到场环境的集合照片。"})
         order.status = ProviderOrder.Status.IN_SERVICE
         order.service_started_at = timezone.now()
         order.save(update_fields=("status", "service_started_at", "updated_at"))

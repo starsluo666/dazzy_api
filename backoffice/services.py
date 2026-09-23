@@ -690,6 +690,8 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
         profile.display_name = profile_revision.display_name
         profile.bio = profile_revision.bio
         profile.lifestyle_photo = profile_revision.lifestyle_photo
+        from providers.media import apply_revision_gallery
+        apply_revision_gallery(profile, profile_revision)
         profile.service_city_code = profile_revision.service_city_code
         profile.service_city_name = profile_revision.service_city_name
         profile.max_service_radius_km = profile_revision.max_service_radius_km
@@ -780,6 +782,8 @@ def review_provider_profile_revision(*, revision_id, decision, reason, actor, ac
         ):
             setattr(profile, field, getattr(revision, field))
         profile.save()
+        from providers.media import apply_revision_gallery
+        apply_revision_gallery(profile, revision)
     revision.status = (
         ProviderProfileRevision.Status.APPROVED
         if decision == "approve" else ProviderProfileRevision.Status.REJECTED

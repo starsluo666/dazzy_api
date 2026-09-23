@@ -54,7 +54,7 @@ class ProviderFavoriteListView(APIView):
         query.is_valid(raise_exception=True)
         page = query.validated_data["page"]
         page_size = query.validated_data["page_size"]
-        favorites = ProviderFavorite.objects.filter(user=request.user, provider__status="approved").select_related("provider__user").prefetch_related("provider__services__category")
+        favorites = ProviderFavorite.objects.filter(user=request.user, provider__status="approved").select_related("provider__user", "provider__lifestyle_photo").prefetch_related("provider__services__category")
         total = favorites.count()
         items = [favorite.provider for favorite in favorites[(page - 1) * page_size:page * page_size]]
         return Response({"data": {"items": ProviderListItemSerializer(items, many=True, context={"request": request}).data, "pagination": {"page": page, "page_size": page_size, "total": total}}})
@@ -87,7 +87,7 @@ class BrowsingHistoryListView(APIView):
         query.is_valid(raise_exception=True)
         page = query.validated_data["page"]
         page_size = query.validated_data["page_size"]
-        queryset = BrowsingHistory.objects.filter(user=request.user).select_related("provider__user", "activity__category", "activity__organizer", "activity__cover")
+        queryset = BrowsingHistory.objects.filter(user=request.user).select_related("provider__user", "provider__lifestyle_photo", "activity__category", "activity__organizer", "activity__cover")
         if target_type in ("provider", "activity"):
             queryset = queryset.filter(target_type=target_type)
         total = queryset.count()

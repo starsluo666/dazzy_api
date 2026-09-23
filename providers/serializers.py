@@ -185,6 +185,13 @@ class ProviderApplicationSubmitSerializer(serializers.Serializer):
 
 
 class ProviderProfileManageSerializer(serializers.ModelSerializer):
+    media_ids = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=9, required=False, write_only=True)
+    media = serializers.SerializerMethodField()
+
+    def get_media(self, obj):
+        from .media import gallery_payload
+        return gallery_payload(obj)
+
     lifestyle_photo_id = serializers.PrimaryKeyRelatedField(
         source="lifestyle_photo",
         queryset=MediaAsset.objects.filter(
@@ -204,6 +211,8 @@ class ProviderProfileManageSerializer(serializers.ModelSerializer):
         fields = (
             "display_name",
             "bio",
+            "media_ids",
+            "media",
             "lifestyle_photo_id",
             "lifestyle_photo_url",
             "service_city_code",
@@ -531,7 +540,7 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
         )
 
     def get_avatar_url(self, obj) -> str | None:
-        return build_media_url(obj.user.avatar_object_key)
+        return build_media_url(obj.lifestyle_photo.object_key) if obj.lifestyle_photo_id else None
 
     def get_birth_date(self, obj):
         return obj.application_birth_date or obj.user.birth_date
@@ -549,6 +558,12 @@ class ProviderListItemSerializer(serializers.ModelSerializer):
 
 
 class ProviderDetailSerializer(ProviderListItemSerializer):
+    media = serializers.SerializerMethodField()
+
+    def get_media(self, obj):
+        from .media import gallery_payload
+        return gallery_payload(obj)
+
     gender = serializers.CharField(source="user.gender")
     lifestyle_photo_url = serializers.SerializerMethodField()
     credit_score = serializers.IntegerField()
@@ -557,6 +572,7 @@ class ProviderDetailSerializer(ProviderListItemSerializer):
 
     class Meta(ProviderListItemSerializer.Meta):
         fields = ProviderListItemSerializer.Meta.fields + (
+            "media",
             "gender",
             "birth_date",
             "lifestyle_photo_url",

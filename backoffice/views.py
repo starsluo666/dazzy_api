@@ -1581,11 +1581,13 @@ class ProviderApplicationReviewView(APIView):
 def _profile_revision_payload(revision):
     if not revision:
         return None
+    from providers.media import gallery_payload
     return {
         "id": revision.id,
         "display_name": revision.display_name,
         "bio": revision.bio,
         "lifestyle_photo_url": build_media_url(revision.lifestyle_photo.object_key),
+        "media": gallery_payload(revision),
         "service_city_code": revision.service_city_code,
         "service_city_name": revision.service_city_name,
         "max_service_radius_km": revision.max_service_radius_km,
@@ -1703,7 +1705,7 @@ class ProviderChangeReviewListView(APIView):
             queryset = ProviderProfileRevision.objects.filter(
                 status=requested_status,
                 provider__onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
-            ).select_related("provider__user", "lifestyle_photo")
+            ).select_related("provider__user", "lifestyle_photo").prefetch_related("gallery_items__asset")
             if not access.all_data:
                 queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
             queryset = queryset.order_by("-submitted_at", "-id")

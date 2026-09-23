@@ -105,11 +105,14 @@ class AccountSecurityView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from providers.models import ProviderProfile
+        credit_score = ProviderProfile.objects.filter(user=request.user).values_list("credit_score", flat=True).first()
         phone = request.user.phone
         return Response(
             {
                 "data": {
                     "phone_masked": f"{phone[:3]}****{phone[-4:]}",
+                    "provider_credit_score": credit_score,
                     "password_set": request.user.has_usable_password(),
                     "account_status": request.user.account_status,
                     "account_status_label": request.user.get_account_status_display(),

@@ -45,6 +45,7 @@ class PublicImageUploadView(APIView):
     scope = MediaAsset.Scope.PUBLIC
     prefix_setting = "COS_PUBLIC_PREFIX"
     field_label = "图片"
+    supported_formats = "JPG、PNG 或 WebP"
 
     def upload_stream(self, *, body, object_key: str, content_type: str) -> str:
         return upload_public_stream(body=body, object_key=object_key, content_type=content_type)
@@ -73,11 +74,12 @@ class PublicImageUploadView(APIView):
             raise ValidationError({"file": f"请选择{self.field_label}。"})
         extension = self.allowed_types.get(uploaded.content_type)
         if not extension:
-            raise ValidationError({"file": f"{self.field_label}仅支持 JPG、PNG 或 WebP。"})
+            raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
         if uploaded.size > self.max_size:
             size_mb = self.max_size // (1024 * 1024)
             raise ValidationError({"file": f"{self.field_label}大小不能超过{size_mb}MB。"})
         self.validate_image_content(uploaded)
+        extension = self.allowed_types[uploaded.content_type]
         object_key = str(
             PurePosixPath(getattr(settings, self.prefix_setting))
             / self.folder
@@ -136,6 +138,29 @@ class ProviderLifestylePhotoUploadView(PublicImageUploadView):
             {"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key)}},
             status=201,
         )
+
+
+class ProviderVideoUploadView(ProviderLifestylePhotoUploadView):
+    max_size = 50 * 1024 * 1024
+    folder = "provider-videos"
+    category = MediaAsset.Category.PROVIDER_VIDEO
+    field_label = "展示视频"
+    supported_formats = "MP4 或 MOV"
+    allowed_types = {"video/mp4": ".mp4", "video/quicktime": ".mov", "application/octet-stream": ".mp4"}
+
+    def validate_image_content(self, uploaded):
+        from .video import validate_provider_video
+        validate_provider_video(uploaded)
+
+    def post(self, request):
+        from providers.models import ProviderProfile
+
+        if not ProviderProfile.objects.filter(
+            user=request.user,
+            status=ProviderProfile.Status.APPROVED,
+        ).exists():
+            raise ValidationError({"file": "达人申请通过后才可上传展示视频。"})
+        return super().post(request)
 
 
 class ProviderIdentityPhotoUploadView(PublicImageUploadView):

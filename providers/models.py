@@ -392,6 +392,32 @@ class ProviderProfileRevision(models.Model):
         verbose_name_plural = verbose_name
 
 
+class ProviderProfileMedia(models.Model):
+    provider = models.ForeignKey(ProviderProfile, on_delete=models.CASCADE, related_name="gallery_items")
+    asset = models.ForeignKey("mediafiles.MediaAsset", on_delete=models.PROTECT)
+    position = models.PositiveSmallIntegerField()
+
+    class Meta:
+        ordering = ("position",)
+        constraints = [
+            models.UniqueConstraint(fields=("provider", "position"), name="uniq_provider_media_position"),
+            models.UniqueConstraint(fields=("provider", "asset"), name="uniq_provider_media_asset"),
+        ]
+
+
+class ProviderProfileRevisionMedia(models.Model):
+    revision = models.ForeignKey(ProviderProfileRevision, on_delete=models.CASCADE, related_name="gallery_items")
+    asset = models.ForeignKey("mediafiles.MediaAsset", on_delete=models.PROTECT)
+    position = models.PositiveSmallIntegerField()
+
+    class Meta:
+        ordering = ("position",)
+        constraints = [
+            models.UniqueConstraint(fields=("revision", "position"), name="uniq_revision_media_position"),
+            models.UniqueConstraint(fields=("revision", "asset"), name="uniq_revision_media_asset"),
+        ]
+
+
 class ProviderServiceRevision(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "待审核"

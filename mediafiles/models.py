@@ -12,6 +12,7 @@ class MediaAsset(models.Model):
     class Category(models.TextChoices):
         AVATAR = "avatar", "用户头像"
         PROVIDER_PHOTO = "provider_photo", "达人展示照片"
+        PROVIDER_VIDEO = "provider_video", "达人展示视频"
         CERTIFICATION = "certification", "资质材料"
         IDENTITY = "identity", "实名认证材料"
         ACTIVITY_COVER = "activity_cover", "活动封面"

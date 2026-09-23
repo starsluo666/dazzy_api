@@ -9,6 +9,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from config.geospatial import gcj02_to_wgs84
+from .media import resolve_gallery, save_revision_gallery
 
 from .models import (
     ProviderCategoryGrant,
@@ -35,6 +36,9 @@ def save_provider_application(*, user, data) -> ProviderProfile:
         profile.rejection_reason = ""
         profile.reviewed_at = None
     profile.save()
+    if "lifestyle_photo" in data:
+        # Application clients still submit a single cover; never retain a stale gallery.
+        profile.gallery_items.all().delete()
     return profile
 
 
@@ -134,7 +138,8 @@ def submit_provider_profile_revision(*, provider: ProviderProfile, data: dict) -
         raise ValidationError({"detail": "达人资料正在审核中，请等待审核结果。"})
     display_name = data.get("display_name", locked.display_name or locked.user.nickname).strip()
     bio = data.get("bio", locked.bio).strip()
-    lifestyle_photo = data.get("lifestyle_photo", locked.lifestyle_photo)
+    assets = resolve_gallery(locked, data)
+    lifestyle_photo = assets[0]
     service_city_code = data.get("service_city_code", locked.service_city_code).strip()
     service_city_name = data.get("service_city_name", locked.service_city_name).strip()
     missing = []
@@ -159,6 +164,7 @@ def submit_provider_profile_revision(*, provider: ProviderProfile, data: dict) -
             "max_service_radius_km", locked.max_service_radius_km
         ),
     )
+    save_revision_gallery(revision, assets)
     maybe_submit_provider_onboarding(provider=locked)
     return revision
 

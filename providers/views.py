@@ -601,6 +601,8 @@ class CurrentProviderWorkbenchView(APIView):
             {
                 "data": {
                     "nickname": provider.public_display_name,
+                    "rating": str(provider.rating),
+                    "credit_score": provider.credit_score,
                     "avatar_url": build_media_url(provider.user.avatar_object_key),
                     "is_accepting_orders": provider.is_accepting_orders,
                     "is_online": provider_is_online(provider),

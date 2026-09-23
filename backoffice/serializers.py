@@ -922,6 +922,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     onboarding_status_label = serializers.CharField(source="get_onboarding_status_display")
     lifestyle_photo_available = serializers.SerializerMethodField()
+    media = serializers.SerializerMethodField()
     lifestyle_photo_url = serializers.SerializerMethodField()
     is_online = serializers.SerializerMethodField()
     has_live_location = serializers.SerializerMethodField()
@@ -947,7 +948,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "account_status", "account_status_label", "status", "status_label",
             "onboarding_status", "onboarding_status_label", "onboarding_submitted_at",
             "onboarding_reviewed_at", "onboarding_rejection_reason", "bio",
-            "lifestyle_photo_available", "lifestyle_photo_url", "service_city_code",
+            "lifestyle_photo_available", "lifestyle_photo_url", "media", "service_city_code",
             "service_city_name", "is_online", "has_live_location", "current_longitude",
             "current_latitude", "location_accuracy_m", "location_updated_at",
             "location_expires_at",
@@ -967,6 +968,12 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
 
     def get_lifestyle_photo_available(self, obj):
         return bool(obj.lifestyle_photo_id)
+
+    def get_media(self, obj):
+        from providers.media import gallery_payload
+        if not (self.context.get("can_review", False) and self.context.get("include_detail", False)):
+            return []
+        return gallery_payload(obj)
 
     def get_lifestyle_photo_url(self, obj):
         if not obj.lifestyle_photo_id or not self.context.get("can_review", False):
