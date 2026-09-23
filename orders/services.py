@@ -27,6 +27,7 @@ from .models import (
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
+    ProviderOrderReview,
     ProviderOrderSettlement,
 )
 from .huifu import (
@@ -1627,7 +1628,10 @@ def process_provider_order_refund(refund_no: str, *, now=None):
 
 
 def refresh_provider_review_metrics(provider) -> None:
-    aggregate = provider.order_reviews.filter(is_visible=True).aggregate(rating=Avg("rating"))
+    aggregate = provider.order_reviews.filter(
+        audit_status=ProviderOrderReview.AuditStatus.APPROVED,
+        is_visible=True,
+    ).aggregate(rating=Avg("rating"))
     provider.rating = aggregate["rating"] or Decimal("0.00")
     provider.service_count = ProviderOrder.objects.filter(
         provider=provider,

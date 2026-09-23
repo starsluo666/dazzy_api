@@ -158,6 +158,7 @@ class ProviderOrderingSetting(models.Model):
 
 class PlatformOperationSetting(models.Model):
     singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
+    customer_service_phone = models.CharField(max_length=32, blank=True, default="")
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
     provider_order_settlement_freeze_days = models.PositiveSmallIntegerField(default=1)

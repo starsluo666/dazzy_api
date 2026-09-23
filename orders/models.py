@@ -643,6 +643,11 @@ class ProviderOrderSettlement(models.Model):
         return f"{self.settlement_no} / {self.order.order_no}"
 
 class ProviderOrderReview(models.Model):
+    class AuditStatus(models.TextChoices):
+        PENDING = "pending", "待审核"
+        APPROVED = "approved", "审核通过"
+        REJECTED = "rejected", "审核驳回"
+
     order = models.OneToOneField(
         ProviderOrder,
         on_delete=models.PROTECT,
@@ -671,6 +676,19 @@ class ProviderOrderReview(models.Model):
     )
     is_anonymous = models.BooleanField("匿名评价", default=False)
     is_visible = models.BooleanField("公开显示", default=True)
+    audit_status = models.CharField(
+        "审核状态", max_length=16, choices=AuditStatus, default=AuditStatus.PENDING
+    )
+    audit_rejection_reason = models.CharField("审核驳回原因", max_length=500, blank=True)
+    audited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="audited_provider_order_reviews",
+        null=True,
+        blank=True,
+        verbose_name="审核人",
+    )
+    audited_at = models.DateTimeField("审核时间", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -685,6 +703,7 @@ class ProviderOrderReview(models.Model):
         ]
         indexes = [
             models.Index(fields=("provider", "is_visible", "-created_at")),
+            models.Index(fields=("audit_status", "-created_at")),
         ]
         verbose_name = "达人订单评价"
         verbose_name_plural = verbose_name

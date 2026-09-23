@@ -130,7 +130,7 @@ class ProviderOrderReviewSerializer(serializers.ModelSerializer):
         model = ProviderOrderReview
         fields = (
             "rating", "content", "customer_name", "image_urls", "is_anonymous",
-            "created_at",
+            "audit_status", "audit_rejection_reason", "created_at",
         )
 
     def get_customer_name(self, obj):

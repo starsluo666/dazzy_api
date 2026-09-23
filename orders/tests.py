@@ -1238,7 +1238,7 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(reviewed.json()["data"]["review"]["customer_name"], "匿名用户")
         self.assertEqual(len(reviewed.json()["data"]["review"]["image_urls"]), 1)
         self.provider.refresh_from_db()
-        self.assertEqual(self.provider.rating, Decimal("5.00"))
+        self.assertEqual(self.provider.rating, Decimal("0.00"))
         self.assertEqual(self.provider.service_count, 1)
 
         repeated_review = self.client.post(
@@ -1254,6 +1254,10 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(my_reviews.json()["data"]["pagination"]["total"], 1)
         self.assertEqual(my_reviews.json()["data"]["items"][0]["order_no"], order.order_no)
         self.assertTrue(my_reviews.json()["data"]["items"][0]["is_anonymous"])
+        self.assertEqual(
+            my_reviews.json()["data"]["items"][0]["audit_status"],
+            "pending",
+        )
 
     def test_completion_uses_configured_confirmation_timeout_snapshot(self):
         PlatformOperationSetting.objects.create(provider_order_confirmation_timeout_days=5)

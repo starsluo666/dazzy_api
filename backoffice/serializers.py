@@ -22,6 +22,7 @@ from orders.models import (
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
+    ProviderOrderReview,
     ProviderOrderSettlement,
 )
 from providers.models import ProviderProfile, ServiceCategory
@@ -794,6 +795,8 @@ class AdminUserListSerializer(serializers.ModelSerializer):
     risk_flag = serializers.SerializerMethodField()
     order_count = serializers.IntegerField(read_only=True, default=0)
     activity_count = serializers.IntegerField(read_only=True, default=0)
+    browsing_count = serializers.IntegerField(read_only=True, default=0)
+    review_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = User
@@ -801,7 +804,8 @@ class AdminUserListSerializer(serializers.ModelSerializer):
             "public_id", "nickname", "phone_masked", "avatar_url", "gender",
             "gender_label", "birth_date", "account_status", "account_status_label",
             "identity", "provider_status", "provider_status_label", "risk_flag",
-            "order_count", "activity_count", "date_joined", "last_login",
+            "order_count", "activity_count", "browsing_count", "review_count",
+            "date_joined", "last_login",
         )
 
     def get_phone_masked(self, obj):
@@ -1093,6 +1097,11 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
         allow_blank=True,
         choices=ProviderOrder.Status.choices,
     )
+    review_audit_status = serializers.ChoiceField(
+        required=False,
+        default="all",
+        choices=("all", *ProviderOrderReview.AuditStatus.values),
+    )
     anomaly = serializers.ChoiceField(
         required=False,
         default="all",
@@ -1108,14 +1117,14 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
 
 
 class ProviderOrderReviewActionSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=("hide", "restore"))
+    action = serializers.ChoiceField(choices=("approve", "reject", "hide", "restore"))
     reason = serializers.CharField(
         required=False, allow_blank=True, max_length=500, default=""
     )
 
     def validate(self, attrs):
-        if attrs["action"] == "hide" and len(attrs.get("reason", "").strip()) < 2:
-            raise serializers.ValidationError({"reason": "屏蔽评价时请填写至少2个字的原因。"})
+        if attrs["action"] in ("reject", "hide") and len(attrs.get("reason", "").strip()) < 2:
+            raise serializers.ValidationError({"reason": "驳回或屏蔽评价时请填写至少2个字的原因。"})
         return attrs
 
 
@@ -1373,6 +1382,11 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "image_urls": [build_media_url(image.object_key) for image in review.images.all()],
             "created_at": review.created_at,
             "is_visible": review.is_visible,
+            "audit_status": review.audit_status,
+            "audit_status_label": review.get_audit_status_display(),
+            "audit_rejection_reason": review.audit_rejection_reason,
+            "audited_by_name": review.audited_by.nickname if review.audited_by else None,
+            "audited_at": review.audited_at,
         }
 
     def get_contact_phone_masked(self, obj):
@@ -1703,6 +1717,19 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
         if not obj.default_activity_cover_id:
             return None
         return build_media_url(obj.default_activity_cover.object_key)
+
+    def validate_customer_service_phone(self, value):
+        value = value.strip()
+        if value and (len(value) < 5 or len(value) > 32):
+            raise serializers.ValidationError("客服电话长度必须在 5 到 32 个字符之间。")
+        allowed = set("0123456789+-() ")
+        if value and any(char not in allowed for char in value):
+            raise serializers.ValidationError("客服电话只能包含数字、空格、+、- 和括号。")
+        dial_number = "".join(char for char in value if char not in "()- ")
+        digits = dial_number.removeprefix("+")
+        if value and (not digits.isascii() or not digits.isdigit() or not 5 <= len(digits) <= 20):
+            raise serializers.ValidationError("客服电话需包含 5 到 20 位数字，+ 只能出现在开头。")
+        return value
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

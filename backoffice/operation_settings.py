@@ -3,6 +3,7 @@ from decimal import Decimal
 
 
 DEFAULT_PLATFORM_OPERATION_RULES = {
+    "customer_service_phone": "",
     "provider_order_payment_timeout_minutes": 15,
     "provider_order_confirmation_timeout_days": 3,
     "provider_order_settlement_freeze_days": 1,

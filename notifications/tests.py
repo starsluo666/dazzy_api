@@ -51,6 +51,16 @@ class NotificationApiTests(APITestCase):
             reverse("notification-list"), {"category": "support"}
         )
         self.assertEqual(filtered.data["data"]["pagination"]["total"], 1)
+        read_list = self.client.get(
+            reverse("notification-list"), {"is_read": "true"}
+        )
+        self.assertEqual(read_list.data["data"]["pagination"]["total"], 1)
+        self.assertTrue(read_list.data["data"]["items"][0]["is_read"])
+        unread_list = self.client.get(
+            reverse("notification-list"), {"is_read": "false"}
+        )
+        self.assertEqual(unread_list.data["data"]["pagination"]["total"], 1)
+        self.assertFalse(unread_list.data["data"]["items"][0]["is_read"])
 
         marked = self.client.post(
             reverse("notification-read", args=(self.notification.public_id,))

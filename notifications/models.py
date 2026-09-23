@@ -29,6 +29,7 @@ class UserNotification(models.Model):
         ORDER_AFTER_SALES_STARTED = "order_after_sales_started", "订单售后处理中"
         ORDER_AFTER_SALES_RESULT = "order_after_sales_result", "订单售后结果"
         ORDER_REFUND_COMPLETED = "order_refund_completed", "订单退款完成"
+        ORDER_REVIEW_RESULT = "order_review_result", "评价审核结果"
         PROVIDER_NEW_ORDER = "provider_new_order", "达人收到新订单"
         PROVIDER_ORDER_SETTLED = "provider_order_settled", "达人订单结算完成"
 

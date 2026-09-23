@@ -385,15 +385,17 @@ class ProviderModelTests(TestCase):
             rating=5,
             content="服务很好",
             is_anonymous=True,
+            audit_status=ProviderOrderReview.AuditStatus.APPROVED,
         )
         visible_review.images.add(image)
-        ProviderOrderReview.objects.create(
+        unpublished_review = ProviderOrderReview.objects.create(
             order=hidden_order,
             customer=customer,
             provider=provider,
             rating=1,
             content="不应公开",
             is_visible=False,
+            audit_status=ProviderOrderReview.AuditStatus.APPROVED,
         )
 
         response = self.client.get(f"/api/v1/providers/{provider_user.public_id}/reviews/")
@@ -411,6 +413,20 @@ class ProviderModelTests(TestCase):
             f"/api/v1/providers/{provider_user.public_id}/reviews/", {"rating": 4}
         )
         self.assertEqual(filtered.json()["data"]["pagination"]["total"], 0)
+
+        # 即使公开开关开启，待审和驳回内容也不能进入公开列表或评分统计。
+        for audit_status in (
+            ProviderOrderReview.AuditStatus.PENDING,
+            ProviderOrderReview.AuditStatus.REJECTED,
+        ):
+            unpublished_review.audit_status = audit_status
+            unpublished_review.is_visible = True
+            unpublished_review.save()
+            response = self.client.get(
+                f"/api/v1/providers/{provider_user.public_id}/reviews/"
+            )
+            self.assertEqual(response.json()["data"]["pagination"]["total"], 1)
+            self.assertEqual(response.json()["data"]["summary"]["distribution"]["1"], 0)
 
     def test_provider_list_hides_approved_profile_without_active_service(self):
         user = User.objects.create_user(phone="13800000009", password="test-password")

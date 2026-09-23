@@ -54,6 +54,7 @@ from .serializers import (
 from .services import (
     PROVIDER_REJECTION_SUPPORT_TIMEOUT,
     apply_provider_order_payment_success,
+    refresh_provider_review_metrics,
     cancel_provider_order_with_compensation,
     confirm_provider_order_huifu_payment_status,
     create_customer_provider_order_after_sales_case,
@@ -61,7 +62,6 @@ from .services import (
     create_provider_order_payment_order,
     ensure_provider_order_settlement,
     ensure_slot_available,
-    refresh_provider_review_metrics,
     process_huifu_payment_notification,
 )
 from .wechat_oauth import (

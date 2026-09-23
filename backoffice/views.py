@@ -25,11 +25,13 @@ from activities.models import (
     ActivitySettlement,
 )
 from config.api import paginated_response
+from engagements.models import BrowsingHistory
 from mediafiles.services import build_media_url
 from orders.models import (
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
+    ProviderOrderReview,
     ProviderOrderSettlement,
 )
 from providers.models import (
@@ -161,6 +163,16 @@ def scoped_users(access):
 
 
 def admin_user_queryset(access):
+    browsing_filter = Q()
+    review_filter = Q()
+    if not access.all_data:
+        browsing_filter = (
+            Q(browsing_history__provider__service_city_code__in=access.city_codes)
+            | Q(browsing_history__activity__city_code__in=access.city_codes)
+        )
+        review_filter = Q(
+            provider_order_reviews__provider__service_city_code__in=access.city_codes
+        )
     return (
         scoped_users(access)
         .select_related(
@@ -172,6 +184,12 @@ def admin_user_queryset(access):
             order_count=Count("provider_orders", distinct=True),
             activity_count=Count("organized_activities", distinct=True)
             + Count("activity_participations", distinct=True),
+            browsing_count=Count(
+                "browsing_history", filter=browsing_filter, distinct=True
+            ),
+            review_count=Count(
+                "provider_order_reviews", filter=review_filter, distinct=True
+            ),
         )
     )
 
@@ -522,7 +540,7 @@ def order_anomaly_query(code):
 def provider_order_queryset(access):
     return scoped_provider_orders(access).select_related(
         "customer", "provider__user", "service__category", "arrival_photo",
-        "review__customer",
+        "review__customer", "review__audited_by",
         "payment_order",
         "settlement",
         "support_contacted_by",
@@ -1829,6 +1847,59 @@ class AdminUserDetailView(APIView):
             }
             for address in user.addresses.all()[:20]
         ]
+        browsing_history = BrowsingHistory.objects.filter(user=user).select_related(
+            "provider__user", "activity"
+        )
+        reviews = ProviderOrderReview.objects.filter(customer=user).select_related(
+            "order", "provider__user"
+        )
+        if not access.all_data:
+            browsing_history = browsing_history.filter(
+                Q(provider__service_city_code__in=access.city_codes)
+                | Q(activity__city_code__in=access.city_codes)
+            )
+            reviews = reviews.filter(provider__service_city_code__in=access.city_codes)
+        data["browsing_history"] = [
+            {
+                "id": item.id,
+                "target_type": item.target_type,
+                "target_type_label": item.get_target_type_display(),
+                "target_id": (
+                    str(item.provider.user.public_id)
+                    if item.provider_id
+                    else str(item.activity_id)
+                ),
+                "title": (
+                    item.provider.public_display_name
+                    if item.provider_id
+                    else item.activity.title
+                ),
+                "city_name": (
+                    item.provider.service_city_name
+                    if item.provider_id
+                    else item.activity.city_name
+                ),
+                "view_count": item.view_count,
+                "first_viewed_at": item.created_at,
+                "last_viewed_at": item.viewed_at,
+            }
+            for item in browsing_history.order_by("-viewed_at")[:50]
+        ]
+        data["reviews"] = [
+            {
+                "id": item.id,
+                "order_no": item.order.order_no,
+                "provider_name": item.provider.public_display_name,
+                "service_name": item.order.service_name_snapshot,
+                "rating": item.rating,
+                "content": item.content,
+                "audit_status": item.audit_status,
+                "audit_status_label": item.get_audit_status_display(),
+                "is_visible": item.is_visible,
+                "created_at": item.created_at,
+            }
+            for item in reviews.order_by("-created_at")[:50]
+        ]
         return Response({"data": data})
 
 
@@ -2055,6 +2126,9 @@ class ProviderOrderAdminListView(APIView):
                 status=ProviderOrder.Status.PENDING_CONFIRMATION
             ).count(),
             "anomalies": summary_queryset.filter(order_anomaly_query("all")).count(),
+            "pending_reviews": summary_queryset.filter(
+                review__audit_status=ProviderOrderReview.AuditStatus.PENDING
+            ).count(),
         }
         stage_statuses = {
             "active": (ProviderOrder.Status.DEPARTED, ProviderOrder.Status.IN_SERVICE),
@@ -2071,6 +2145,8 @@ class ProviderOrderAdminListView(APIView):
             queryset = queryset.filter(status__in=stage_statuses[params["stage"]])
         if order_status := params.get("status"):
             queryset = queryset.filter(status=order_status)
+        if params["review_audit_status"] != "all":
+            queryset = queryset.filter(review__audit_status=params["review_audit_status"])
         if params["anomaly"] != "all":
             anomaly_code = "all" if params["anomaly"] == "any" else params["anomaly"]
             queryset = queryset.filter(order_anomaly_query(anomaly_code))

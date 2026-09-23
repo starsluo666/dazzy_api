@@ -24,6 +24,7 @@ from activities.models import (
 )
 from activities.services import process_activity_timeouts
 from locations.models import UserAddress
+from engagements.models import BrowsingHistory
 from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from orders.models import (
@@ -183,11 +184,11 @@ class BackofficeProviderReviewTests(APITestCase):
     ):
         now = timezone.now()
         completion_submitted_at = now - timedelta(days=completion_age_days)
-        service = ProviderService.objects.create(
+        service, _ = ProviderService.objects.get_or_create(
             provider=provider,
             category=self.order_category,
             billing_type=ProviderService.BillingType.PER_SESSION,
-            price_amount=16800,
+            defaults={"price_amount": 16800},
         )
         photo = None
         if with_evidence:
@@ -981,6 +982,7 @@ class BackofficeProviderReviewTests(APITestCase):
         response = self.client.patch(
             detail_url,
             {
+                "customer_service_phone": "400-123-4567",
                 "provider_order_payment_timeout_minutes": 20,
                 "provider_order_confirmation_timeout_days": 5,
                 "provider_order_settlement_freeze_days": 2,
@@ -1001,6 +1003,7 @@ class BackofficeProviderReviewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         setting = PlatformOperationSetting.current()
+        self.assertEqual(setting.customer_service_phone, "400-123-4567")
         self.assertEqual(setting.provider_order_payment_timeout_minutes, 20)
         self.assertEqual(setting.provider_order_confirmation_timeout_days, 5)
         self.assertEqual(setting.provider_order_settlement_freeze_days, 2)
@@ -1144,6 +1147,7 @@ class BackofficeProviderReviewTests(APITestCase):
             provider=self.handan,
             rating=5,
             content="服务很周到",
+            audit_status=ProviderOrderReview.AuditStatus.APPROVED,
         )
         self.handan.rating = Decimal("5.00")
         self.handan.service_count = 1
@@ -1178,6 +1182,153 @@ class BackofficeProviderReviewTests(APITestCase):
                 action="order.review.restore", target_id=str(review.id)
             ).exists()
         )
+
+    def test_order_review_requires_audit_and_notifies_customer(self):
+        approved_order = self.create_fulfillment_order(
+            order_no="ADMIN-REVIEW-APPROVE",
+            provider=self.handan,
+            status=ProviderOrder.Status.COMPLETED,
+        )
+        approved_review = ProviderOrderReview.objects.create(
+            order=approved_order,
+            customer=self.order_customer,
+            provider=self.handan,
+            rating=4,
+            content="服务认真，体验很好",
+        )
+        url = reverse(
+            "backoffice-provider-order-review-action", args=(approved_order.order_no,)
+        )
+
+        self.client.force_authenticate(self.order_customer)
+        self.assertEqual(
+            self.client.post(url, {"action": "approve"}, format="json").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.client.force_authenticate(self.admin_user)
+        self.assertEqual(
+            self.client.post(url, {"action": "restore"}, format="json").status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        approved = self.client.post(url, {"action": "approve"}, format="json")
+
+        self.assertEqual(approved.status_code, status.HTTP_200_OK)
+        approved_review.refresh_from_db()
+        self.handan.refresh_from_db()
+        self.assertEqual(
+            approved_review.audit_status, ProviderOrderReview.AuditStatus.APPROVED
+        )
+        self.assertEqual(approved_review.audited_by, self.admin_user)
+        self.assertEqual(self.handan.rating, Decimal("4.00"))
+        self.assertEqual(
+            self.client.post(url, {"action": "approve"}, format="json").status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                recipient=self.order_customer,
+                event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
+            ).count(),
+            1,
+        )
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.order_customer,
+                event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
+                title="评价审核通过",
+            ).exists()
+        )
+        rejected_order = self.create_fulfillment_order(
+            order_no="ADMIN-REVIEW-REJECT",
+            provider=self.handan,
+            status=ProviderOrder.Status.COMPLETED,
+        )
+        rejected_review = ProviderOrderReview.objects.create(
+            order=rejected_order,
+            customer=self.order_customer,
+            provider=self.handan,
+            rating=1,
+            content="包含不适合公开展示的内容",
+        )
+        rejected_url = reverse(
+            "backoffice-provider-order-review-action", args=(rejected_order.order_no,)
+        )
+
+        self.assertEqual(
+            self.client.post(
+                rejected_url, {"action": "reject", "reason": " "}, format="json"
+            ).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        rejected = self.client.post(
+            rejected_url,
+            {"action": "reject", "reason": "内容包含个人隐私"},
+            format="json",
+        )
+
+        self.assertEqual(rejected.status_code, status.HTTP_200_OK)
+        rejected_review.refresh_from_db()
+        self.assertEqual(
+            rejected_review.audit_status, ProviderOrderReview.AuditStatus.REJECTED
+        )
+        self.assertEqual(rejected_review.audit_rejection_reason, "内容包含个人隐私")
+        self.handan.refresh_from_db()
+        self.assertEqual(self.handan.rating, Decimal("4.00"))
+        self.assertTrue(
+            UserNotification.objects.filter(
+                recipient=self.order_customer,
+                event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
+                title="评价审核未通过",
+            ).exists()
+        )
+        BrowsingHistory.objects.create(
+            user=self.order_customer,
+            target_type=BrowsingHistory.TargetType.PROVIDER,
+            provider=self.handan,
+            view_count=3,
+        )
+        foreign_order = self.create_fulfillment_order(
+            order_no="ADMIN-REVIEW-OTHER-CITY",
+            provider=self.beijing,
+            status=ProviderOrder.Status.COMPLETED,
+        )
+        ProviderOrderReview.objects.create(
+            order=foreign_order, customer=self.order_customer,
+            provider=self.beijing, rating=3, content="其他城市的评价",
+        )
+        BrowsingHistory.objects.create(
+            user=self.order_customer,
+            target_type=BrowsingHistory.TargetType.PROVIDER,
+            provider=self.beijing,
+        )
+        self.assertEqual(
+            self.client.post(
+                reverse("backoffice-provider-order-review-action", args=(foreign_order.order_no,)),
+                {"action": "approve"}, format="json",
+            ).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        detail = self.client.get(
+            reverse("backoffice-user-detail", args=(self.order_customer.public_id,))
+        )
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["data"]["browsing_count"], 1)
+        self.assertEqual(detail.data["data"]["browsing_history"][0]["view_count"], 3)
+        self.assertEqual(detail.data["data"]["review_count"], 2)
+        self.assertEqual(len(detail.data["data"]["reviews"]), 2)
+
+    def test_customer_service_phone_validation_and_overview(self):
+        self.client.force_authenticate(self.platform_admin)
+        url = reverse("backoffice-platform-operation-setting")
+        for phone in ("-----", "+()+()", "12+34567", "客服电话"):
+            response = self.client.patch(url, {"customer_service_phone": phone}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        for phone in ("400-123-4567", "+86 (0310) 1234567", ""):
+            response = self.client.patch(url, {"customer_service_phone": phone}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            overview = self.client.get("/api/v1/users/me/overview/")
+            self.assertEqual(overview.status_code, status.HTTP_200_OK)
+            self.assertEqual(overview.data["data"]["customer_service_phone"], phone)
 
     def test_audit_logs_support_search_filters_and_pagination(self):
         AdminAuditLog.objects.create(

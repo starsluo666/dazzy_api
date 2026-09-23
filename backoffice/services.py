@@ -1179,22 +1179,58 @@ def moderate_provider_order_review(
         ProviderOrderReview.objects.select_for_update().select_related("provider"),
         order=order,
     )
-    before_visible = review.is_visible
-    review.is_visible = action == "restore"
-    if review.is_visible != before_visible:
-        review.save(update_fields=("is_visible", "updated_at"))
-        refresh_provider_review_metrics(review.provider)
+    before = {
+        "order_no": order.order_no,
+        "audit_status": review.audit_status,
+        "is_visible": review.is_visible,
+    }
+    reason = reason.strip()
+    update_fields = ["updated_at"]
+    if action in ("approve", "reject"):
+        if review.audit_status != ProviderOrderReview.AuditStatus.PENDING:
+            raise ValidationError("该评价已经审核，不能重复审核。")
+        review.audit_status = (
+            ProviderOrderReview.AuditStatus.APPROVED
+            if action == "approve"
+            else ProviderOrderReview.AuditStatus.REJECTED
+        )
+        review.audit_rejection_reason = reason if action == "reject" else ""
+        review.audited_by = actor
+        review.audited_at = timezone.now()
+        update_fields.extend((
+            "audit_status", "audit_rejection_reason", "audited_by", "audited_at",
+        ))
+    else:
+        if review.audit_status != ProviderOrderReview.AuditStatus.APPROVED:
+            raise ValidationError("只有审核通过的评价可以下架或恢复展示。")
+        review.is_visible = action == "restore"
+        update_fields.append("is_visible")
+    review.save(update_fields=tuple(update_fields))
+    refresh_provider_review_metrics(review.provider)
+    if action in ("approve", "reject"):
+        create_order_notification(
+            order=order,
+            event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
+            title="评价审核通过" if action == "approve" else "评价审核未通过",
+            content=(
+                "您的订单评价已审核通过并公开展示。"
+                if action == "approve"
+                else f"您的订单评价未通过审核。原因：{reason}"
+            ),
+            dedupe_suffix=str(review.audited_at.timestamp()),
+        )
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),
         action=f"order.review.{action}",
         target_type="provider_order_review",
         target_id=str(review.id),
-        before={"order_no": order.order_no, "is_visible": before_visible},
+        before=before,
         after={
             "order_no": order.order_no,
+            "audit_status": review.audit_status,
             "is_visible": review.is_visible,
-            "reason": reason.strip(),
+            "reason": reason,
         },
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),

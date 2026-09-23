@@ -10,6 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from orders.models import ProviderOrder
 from engagements.models import ProviderFavorite
+from backoffice.operation_settings import platform_operation_rules
 from config.throttles import SmsSendIpDailyThrottle
 
 from .serializers import (
@@ -197,6 +198,7 @@ class CurrentUserOverviewView(APIView):
         return Response(
             {
                 "data": {
+                    "customer_service_phone": platform_operation_rules()["customer_service_phone"],
                     # 钱包和优惠券模型尚未建立，返回 null，避免展示模拟数据。
                     "balance_amount": None,
                     "coupon_count": None,

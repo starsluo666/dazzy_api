@@ -184,7 +184,9 @@ class ProviderReviewListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         base = ProviderOrderReview.objects.filter(
-            provider=provider, is_visible=True
+            provider=provider,
+            audit_status=ProviderOrderReview.AuditStatus.APPROVED,
+            is_visible=True,
         ).select_related("customer", "order").prefetch_related("images")
         distribution = {str(value): 0 for value in range(1, 6)}
         for item in base.values("rating").annotate(count=Count("id")):
