@@ -15,6 +15,8 @@ from backoffice.operation_settings import platform_operation_rules
 from config.throttles import SmsSendIpDailyThrottle
 
 from .serializers import (
+    ChangePhoneCodeSerializer,
+    ChangePhoneSerializer,
     ChangePasswordSerializer,
     CloseAccountSerializer,
     LogoutSerializer,
@@ -25,6 +27,7 @@ from .serializers import (
     SmsCodeRequestSerializer,
     SmsLoginSerializer,
     UserSerializer,
+    WechatMiniProgramLoginSerializer,
 )
 from .services import send_sms_code
 
@@ -88,6 +91,19 @@ class SmsLoginView(APIView):
         return Response({"data": auth_payload(serializer.validated_data["user"])})
 
 
+class WechatMiniProgramLoginView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_wechat_login"
+
+    def post(self, request):
+        serializer = WechatMiniProgramLoginSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": auth_payload(serializer.save())})
+
+
 class ResetPasswordView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -129,6 +145,44 @@ class ChangePasswordView(APIView):
     @transaction.atomic
     def post(self, request):
         serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": auth_payload(serializer.save())})
+
+
+class ChangePhoneCodeView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle, SmsSendIpDailyThrottle]
+    throttle_scope = "auth_sms_send"
+
+    def post(self, request):
+        serializer = ChangePhoneCodeSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        phone = serializer.validated_data["phone"]
+        result = send_sms_code(
+            phone=phone, purpose=serializer.validated_data["purpose"]
+        )
+        data = {
+            "expires_in": result.expires_in,
+            "retry_after": result.retry_after,
+            "destination_masked": f"{phone[:3]}****{phone[-4:]}",
+        }
+        if result.debug_code:
+            data["debug_code"] = result.debug_code
+        return Response({"data": data})
+
+
+class ChangePhoneView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = ChangePhoneSerializer(
+            data=request.data, context={"request": request}
+        )
         serializer.is_valid(raise_exception=True)
         return Response({"data": auth_payload(serializer.save())})
 

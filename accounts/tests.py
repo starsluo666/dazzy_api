@@ -2,10 +2,11 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
-from .models import User
+from .models import User, WechatMiniProgramIdentity
 from .services import send_sms_code, verify_sms_code
 
 
@@ -131,6 +132,54 @@ class AuthenticationApiTests(APITestCase):
         self.assertTrue(response.data["data"]["password_set"])
         self.assertEqual(response.data["data"]["account_status"], "active")
         self.assertEqual(response.data["data"]["account_status_label"], "正常")
+
+    @override_settings(SMS_CODE_RESEND_SECONDS=0)
+    def test_authenticated_user_can_change_phone_with_two_sms_codes(self):
+        user = User.objects.create_user(phone=self.phone, password=self.password)
+        self.client.force_authenticate(user)
+
+        current_code = self.client.post(
+            "/api/v1/auth/phone/change/code/",
+            {"target": "current"},
+            format="json",
+        )
+        new_code = self.client.post(
+            "/api/v1/auth/phone/change/code/",
+            {"target": "new", "new_phone": "13900000002"},
+            format="json",
+        )
+        self.assertEqual(current_code.status_code, 200)
+        self.assertEqual(new_code.status_code, 200)
+
+        response = self.client.post(
+            "/api/v1/auth/phone/change/",
+            {
+                "current_code": "123456",
+                "new_phone": "13900000002",
+                "new_code": "123456",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["user"]["phone"], "13900000002")
+        user.refresh_from_db()
+        self.assertEqual(user.phone, "13900000002")
+        self.assertEqual(user.auth_version, 2)
+
+    def test_change_phone_rejects_phone_bound_to_another_account(self):
+        user = User.objects.create_user(phone=self.phone, password=self.password)
+        User.objects.create_user(phone="13900000003", password=self.password)
+        self.client.force_authenticate(user)
+
+        response = self.client.post(
+            "/api/v1/auth/phone/change/code/",
+            {"target": "new", "new_phone": "13900000003"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("已绑定其他账号", str(response.data))
 
     def test_change_password_rotates_current_session_and_invalidates_old_tokens(self):
         User.objects.create_user(phone=self.phone, password=self.password)
@@ -338,6 +387,88 @@ class AuthenticationApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(limited.status_code, 429)
+
+
+@override_settings(
+    WECHAT_CUSTOMER_MINI_PROGRAM_APP_ID="wx-customer-test",
+    WECHAT_CUSTOMER_MINI_PROGRAM_APP_SECRET="customer-secret",
+    WECHAT_PROVIDER_MINI_PROGRAM_APP_ID="wx-provider-test",
+    WECHAT_PROVIDER_MINI_PROGRAM_APP_SECRET="provider-secret",
+)
+class WechatMiniProgramLoginApiTests(APITestCase):
+    @patch("accounts.serializers.exchange_phone_code", return_value="13800000888")
+    @patch(
+        "accounts.serializers.exchange_login_code",
+        return_value=("customer-openid", "shared-unionid"),
+    )
+    def test_first_login_links_existing_phone_account(self, _login, _phone):
+        user = User.objects.create_user(phone="13800000888", password="test-pass-123")
+
+        response = self.client.post(
+            "/api/v1/auth/login/wechat-mini-program/",
+            {
+                "client_type": "customer",
+                "login_code": "login-code",
+                "phone_code": "phone-code",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["user"]["public_id"], str(user.public_id))
+        identity = WechatMiniProgramIdentity.objects.get(user=user)
+        self.assertEqual(identity.app_id, "wx-customer-test")
+        self.assertEqual(identity.openid, "customer-openid")
+
+    @patch("accounts.serializers.exchange_phone_code", return_value="13900000888")
+    @patch(
+        "accounts.serializers.exchange_login_code",
+        return_value=("new-openid", "new-unionid"),
+    )
+    def test_first_login_creates_passwordless_account(self, _login, _phone):
+        response = self.client.post(
+            "/api/v1/auth/login/wechat-mini-program/",
+            {
+                "client_type": "customer",
+                "login_code": "login-code",
+                "phone_code": "phone-code",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user = User.objects.get(phone="13900000888")
+        self.assertFalse(user.has_usable_password())
+        self.assertTrue(
+            WechatMiniProgramIdentity.objects.filter(
+                user=user, app_id="wx-customer-test", openid="new-openid"
+            ).exists()
+        )
+
+    @patch("accounts.serializers.exchange_phone_code")
+    @patch(
+        "accounts.serializers.exchange_login_code",
+        return_value=("bound-openid", "bound-unionid"),
+    )
+    def test_bound_wechat_identity_does_not_require_phone_authorization(
+        self, _login, phone_exchange
+    ):
+        user = User.objects.create_user(phone="13700000888", password=None)
+        WechatMiniProgramIdentity.objects.create(
+            user=user,
+            app_id="wx-customer-test",
+            openid="bound-openid",
+            authorized_at=timezone.now(),
+        )
+
+        response = self.client.post(
+            "/api/v1/auth/login/wechat-mini-program/",
+            {"client_type": "customer", "login_code": "login-code"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        phone_exchange.assert_not_called()
 
 
 class AccountClosureApiTests(APITestCase):

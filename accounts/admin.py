@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import User, WechatOfficialAccountIdentity
+from .models import User, WechatMiniProgramIdentity, WechatOfficialAccountIdentity
 
 
 @admin.register(User)
@@ -54,3 +54,8 @@ class WechatOfficialAccountIdentityAdmin(admin.ModelAdmin):
         if len(obj.unionid) <= 10:
             return "***"
         return f"{obj.unionid[:5]}***{obj.unionid[-5:]}"
+
+
+@admin.register(WechatMiniProgramIdentity)
+class WechatMiniProgramIdentityAdmin(WechatOfficialAccountIdentityAdmin):
+    pass

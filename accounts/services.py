@@ -8,7 +8,13 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.throttling import BaseThrottle
 
 
-SMS_PURPOSES = {"register", "login", "reset_password"}
+SMS_PURPOSES = {
+    "register",
+    "login",
+    "reset_password",
+    "change_phone_current",
+    "change_phone_new",
+}
 
 
 def _code_key(phone: str, purpose: str) -> str:

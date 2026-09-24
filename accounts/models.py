@@ -87,3 +87,36 @@ class WechatOfficialAccountIdentity(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id} / {self.app_id}"
+
+
+class WechatMiniProgramIdentity(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="wechat_mini_program_identities",
+        verbose_name="用户",
+    )
+    app_id = models.CharField("小程序 AppID", max_length=32)
+    openid = models.CharField("小程序 OpenID", max_length=128)
+    unionid = models.CharField("微信 UnionID", max_length=128, blank=True)
+    authorized_at = models.DateTimeField("最近授权时间")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "accounts_wechat_mini_program_identity"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "app_id"),
+                name="uniq_wechat_mini_user_app",
+            ),
+            models.UniqueConstraint(
+                fields=("app_id", "openid"),
+                name="uniq_wechat_mini_app_openid",
+            ),
+        ]
+        verbose_name = "微信小程序身份"
+        verbose_name_plural = verbose_name
+
+    def __str__(self) -> str:
+        return f"{self.user_id} / {self.app_id}"

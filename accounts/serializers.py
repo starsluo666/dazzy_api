@@ -10,13 +10,18 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from mediafiles.services import build_media_url
 
 from .account_closure import account_closure_blockers
-from .models import User
+from .models import User, WechatMiniProgramIdentity
 from .services import (
     auth_client_identifier,
     clear_auth_failures,
     ensure_auth_attempt_allowed,
     record_auth_failure,
     verify_sms_code,
+)
+from .wechat_mini_program import (
+    WechatMiniProgramConfig,
+    exchange_login_code,
+    exchange_phone_code,
 )
 
 
@@ -184,6 +189,113 @@ class SmsLoginSerializer(serializers.Serializer):
         return attrs
 
 
+class WechatMiniProgramLoginSerializer(serializers.Serializer):
+    client_type = serializers.ChoiceField(choices=("customer", "provider"))
+    login_code = serializers.CharField(min_length=1, max_length=256, trim_whitespace=True)
+    phone_code = serializers.CharField(
+        min_length=1, max_length=256, trim_whitespace=True, required=False
+    )
+
+    def validate(self, attrs):
+        config = WechatMiniProgramConfig.from_client_type(attrs["client_type"])
+        openid, unionid = exchange_login_code(config=config, code=attrs["login_code"])
+        identity = (
+            WechatMiniProgramIdentity.objects.select_related("user")
+            .filter(app_id=config.app_id, openid=openid)
+            .first()
+        )
+        if identity:
+            user = identity.user
+            if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+                raise serializers.ValidationError("账号当前不可用，请联系客服。")
+            identity.unionid = unionid
+            identity.authorized_at = timezone.now()
+            identity.save(update_fields=("unionid", "authorized_at", "updated_at"))
+            attrs["user"] = user
+            return attrs
+
+        phone_code = attrs.get("phone_code", "")
+        if not phone_code:
+            raise serializers.ValidationError(
+                {"phone_code": "首次使用微信登录，请授权绑定微信手机号。"}
+            )
+        phone = validate_phone(exchange_phone_code(config=config, code=phone_code))
+        attrs.update(
+            {
+                "wechat_config": config,
+                "wechat_openid": openid,
+                "wechat_unionid": unionid,
+                "wechat_phone": phone,
+            }
+        )
+        return attrs
+
+    def save(self, **kwargs):
+        existing_user = self.validated_data.get("user")
+        if existing_user:
+            return existing_user
+
+        config = self.validated_data["wechat_config"]
+        openid = self.validated_data["wechat_openid"]
+        unionid = self.validated_data["wechat_unionid"]
+        phone = self.validated_data["wechat_phone"]
+        with transaction.atomic():
+            identity = (
+                WechatMiniProgramIdentity.objects.select_for_update()
+                .select_related("user")
+                .filter(app_id=config.app_id, openid=openid)
+                .first()
+            )
+            if identity:
+                user = identity.user
+            else:
+                user = User.objects.select_for_update().filter(phone=phone).first()
+                if user is None:
+                    try:
+                        with transaction.atomic():
+                            user = User.objects.create_user(
+                                phone=phone,
+                                password=None,
+                                nickname=f"用户{phone[-4:]}",
+                            )
+                    except IntegrityError:
+                        user = User.objects.select_for_update().get(phone=phone)
+                existing_app_identity = (
+                    WechatMiniProgramIdentity.objects.select_for_update()
+                    .filter(user=user, app_id=config.app_id)
+                    .first()
+                )
+                if existing_app_identity:
+                    existing_app_identity.openid = openid
+                    existing_app_identity.unionid = unionid
+                    existing_app_identity.authorized_at = timezone.now()
+                    try:
+                        existing_app_identity.save(
+                            update_fields=("openid", "unionid", "authorized_at", "updated_at")
+                        )
+                    except IntegrityError as exc:
+                        raise serializers.ValidationError(
+                            "该微信账号已绑定其他平台账号，请联系客服处理。"
+                        ) from exc
+                else:
+                    try:
+                        WechatMiniProgramIdentity.objects.create(
+                            user=user,
+                            app_id=config.app_id,
+                            openid=openid,
+                            unionid=unionid,
+                            authorized_at=timezone.now(),
+                        )
+                    except IntegrityError as exc:
+                        raise serializers.ValidationError(
+                            "微信账号绑定冲突，请重新登录或联系客服。"
+                        ) from exc
+
+            if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+                raise serializers.ValidationError("账号当前不可用，请联系客服。")
+            return user
+
+
 class ResetPasswordSerializer(serializers.Serializer):
     phone = serializers.CharField(validators=[validate_phone])
     code = serializers.CharField(min_length=6, max_length=6)
@@ -231,6 +343,70 @@ def invalidate_user_sessions(user: User) -> User:
         BlacklistedToken.objects.get_or_create(token=token)
     user.refresh_from_db(fields=("auth_version",))
     return user
+
+
+class ChangePhoneCodeSerializer(serializers.Serializer):
+    target = serializers.ChoiceField(choices=("current", "new"))
+    new_phone = serializers.CharField(
+        required=False, allow_blank=True, validators=[validate_phone]
+    )
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if attrs["target"] == "current":
+            attrs["phone"] = user.phone
+            attrs["purpose"] = "change_phone_current"
+            return attrs
+
+        new_phone = attrs.get("new_phone", "")
+        if not new_phone:
+            raise serializers.ValidationError({"new_phone": "请输入新手机号。"})
+        if new_phone == user.phone:
+            raise serializers.ValidationError({"new_phone": "新手机号不能与当前手机号相同。"})
+        if User.objects.filter(phone=new_phone).exists():
+            raise serializers.ValidationError({"new_phone": "该手机号已绑定其他账号。"})
+        attrs["phone"] = new_phone
+        attrs["purpose"] = "change_phone_new"
+        return attrs
+
+
+class ChangePhoneSerializer(serializers.Serializer):
+    current_code = serializers.CharField(min_length=6, max_length=6)
+    new_phone = serializers.CharField(validators=[validate_phone])
+    new_code = serializers.CharField(min_length=6, max_length=6)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if attrs["new_phone"] == user.phone:
+            raise serializers.ValidationError({"new_phone": "新手机号不能与当前手机号相同。"})
+        if User.objects.exclude(pk=user.pk).filter(phone=attrs["new_phone"]).exists():
+            raise serializers.ValidationError({"new_phone": "该手机号已绑定其他账号。"})
+        return attrs
+
+    def save(self, **kwargs):
+        user = User.objects.select_for_update().get(pk=self.context["request"].user.pk)
+        new_phone = self.validated_data["new_phone"]
+        if User.objects.exclude(pk=user.pk).filter(phone=new_phone).exists():
+            raise serializers.ValidationError({"new_phone": "该手机号已绑定其他账号。"})
+        verify_sms_code(
+            phone=user.phone,
+            purpose="change_phone_current",
+            code=self.validated_data["current_code"],
+        )
+        verify_sms_code(
+            phone=new_phone,
+            purpose="change_phone_new",
+            code=self.validated_data["new_code"],
+        )
+        user.phone = new_phone
+        try:
+            with transaction.atomic():
+                user.save(update_fields=("phone",))
+        except IntegrityError as exc:
+            raise serializers.ValidationError(
+                {"new_phone": "该手机号已绑定其他账号。"}
+            ) from exc
+        return invalidate_user_sessions(user)
 
 
 class ChangePasswordSerializer(serializers.Serializer):
