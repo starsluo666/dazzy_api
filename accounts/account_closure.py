@@ -33,8 +33,21 @@ def account_closure_blockers(user) -> list[dict[str, object]]:
         ProviderOrderSettlement,
     )
     from supportcases.models import SupportCase
+    from wallets.models import UserWallet, WalletRechargeOrder
 
     checks = (
+        (
+            "wallet_balance", "未结清钱包余额",
+            UserWallet.objects.filter(user=user).filter(
+                Q(available_balance__gt=0) | Q(frozen_balance__gt=0)
+            ),
+        ),
+        (
+            "wallet_recharges", "待核对充值单",
+            WalletRechargeOrder.objects.filter(
+                user=user, status=WalletRechargeOrder.Status.PENDING_PAYMENT,
+            ),
+        ),
         (
             "provider_orders",
             "待履约陪玩订单",

@@ -2818,6 +2818,9 @@ class BackofficeSystemManagementTests(APITestCase):
         }
         self.assertIn("organization.manage", permission_codes)
         self.assertIn("order.after_sales.review", permission_codes)
+        self.assertIn("coupon.view", permission_codes)
+        self.assertIn("coupon.manage", permission_codes)
+        self.assertIn("coupon.issue", permission_codes)
 
         role_response = self.client.post(
             reverse("backoffice-roles"),

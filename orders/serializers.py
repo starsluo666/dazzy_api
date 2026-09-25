@@ -168,13 +168,37 @@ class MyProviderOrderReviewSerializer(ProviderOrderReviewSerializer):
 class ProviderOrderPaymentSummarySerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     channel_label = serializers.CharField(source="get_channel_display")
+    wallet_amount = serializers.SerializerMethodField()
+    external_amount = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderOrderPaymentOrder
         fields = (
             "payment_no", "channel", "channel_label", "status", "status_label",
-            "payable_amount", "paid_at", "closed_at",
+            "payable_amount", "wallet_amount", "external_amount", "paid_at", "closed_at",
         )
+
+    def _allocation(self, obj):
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        if not hasattr(obj, "_wallet_allocation_cache"):
+            obj._wallet_allocation_cache = preview_wallet_payment(
+                user_id=obj.payer_id,
+                payable_amount=obj.payable_amount,
+                business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
+                business_order_no=obj.order.order_no,
+                external_only=obj.status != obj.Status.PENDING_PAYMENT or bool(obj.req_seq_id),
+            )
+        return obj._wallet_allocation_cache
+
+    def get_wallet_amount(self, obj):
+        allocation = self._allocation(obj)
+        return allocation.wallet_amount if allocation else 0
+
+    def get_external_amount(self, obj):
+        allocation = self._allocation(obj)
+        return allocation.external_amount if allocation else obj.payable_amount
 
 
 class ProviderOrderRefundSummarySerializer(serializers.ModelSerializer):
@@ -183,7 +207,8 @@ class ProviderOrderRefundSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = ProviderOrderRefundOrder
         fields = (
-            "refund_no", "status", "status_label", "refund_amount", "reason",
+            "refund_no", "status", "status_label", "refund_amount",
+            "wallet_refund_amount", "external_refund_amount", "reason",
             "requested_at", "refunded_at",
         )
 

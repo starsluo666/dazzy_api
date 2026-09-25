@@ -9,7 +9,7 @@ from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from providers.models import ProviderProfile
 from providers.models import ProviderService, ServiceCategory
-from orders.models import ProviderOrder, UserCoupon
+from orders.models import CouponTemplate, ProviderOrder, UserCoupon
 
 from .models import SupportCase, SupportCaseRecord
 
@@ -92,6 +92,22 @@ class SupportCaseApiTests(APITestCase):
         self.assertEqual(response.data["data"]["case_no"], first.data["data"]["case_no"])
         self.assertEqual(SupportCase.objects.count(), 1)
 
+    def test_legacy_consultation_type_cannot_be_created(self):
+        response = self.client.post(
+            reverse("support-case-list"),
+            {
+                "case_type": "consultation",
+                "target_type": "general",
+                "reason": "platform_process",
+                "description": "尝试通过旧类型提交一条新的咨询记录。",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("case_type", response.data)
+        self.assertEqual(SupportCase.objects.count(), 0)
+
     def test_attachment_must_belong_to_current_user(self):
         stranger = User.objects.create_user(phone="18800003333", nickname="其他用户")
         self.attachment.owner = stranger
@@ -170,7 +186,10 @@ class AdminSupportCaseApiTests(APITestCase):
             organization=organization,
             name="客服专员",
             code="support-agent",
-            permissions=["support.case.view", "support.case.manage"],
+            permissions=[
+                "support.case.view", "support.case.manage",
+                "coupon.view", "coupon.manage", "coupon.issue",
+            ],
             data_scope=AdminRole.DataScope.CITY,
         )
         self.operator = User.objects.create_user(
@@ -241,6 +260,142 @@ class AdminSupportCaseApiTests(APITestCase):
         self.assertEqual(issued.data["data"]["face_amount"], 2000)
         self.assertEqual(UserCoupon.objects.filter(owner=self.case.reporter).count(), 1)
         self.assertTrue(AdminAuditLog.objects.filter(action="coupon.issue").exists())
+
+    def test_coupon_view_and_issue_permissions_are_independent(self):
+        membership = self.operator.backoffice_memberships.select_related("role").get()
+        membership.role.permissions = ["coupon.view"]
+        membership.role.save(update_fields=("permissions",))
+
+        listing = self.client.get(reverse("backoffice-coupons"))
+        self.assertEqual(listing.status_code, 200)
+        issued = self.client.post(
+            reverse("backoffice-coupons"),
+            {"user_public_id": str(self.case.reporter.public_id)}, format="json",
+        )
+        self.assertEqual(issued.status_code, 403)
+
+    def test_coupon_template_issue_revoke_and_safe_delete(self):
+        created = self.client.post(
+            reverse("backoffice-coupon-templates"),
+            {
+                "name": "服务体验券", "description": "达人服务订单可用",
+                "face_amount": 3000, "min_order_amount": 15000,
+                "valid_days": 60, "is_active": True,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        template_id = created.data["data"]["public_id"]
+
+        issued = self.client.post(
+            reverse("backoffice-coupons"),
+            {
+                "user_public_id": str(self.case.reporter.public_id),
+                "template_public_id": template_id,
+            },
+            format="json",
+        )
+        self.assertEqual(issued.status_code, 201)
+        self.assertEqual(issued.data["data"]["face_amount"], 3000)
+        self.assertEqual(issued.data["data"]["template_name"], "服务体验券")
+        coupon_id = issued.data["data"]["public_id"]
+
+        blocked_delete = self.client.delete(
+            reverse("backoffice-coupon-template-detail", args=(template_id,))
+        )
+        self.assertEqual(blocked_delete.status_code, 400)
+
+        revoked = self.client.post(
+            reverse("backoffice-coupon-revoke", args=(coupon_id,)),
+            {"reason": "测试撤销未使用优惠券"},
+            format="json",
+        )
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(revoked.data["data"]["status"], UserCoupon.Status.REVOKED)
+        self.assertTrue(UserNotification.objects.filter(
+            recipient=self.case.reporter,
+            event_type=UserNotification.EventType.COUPON_REVOKED,
+        ).exists())
+
+        unused = CouponTemplate.objects.create(
+            name="未发放模板", face_amount=1000, min_order_amount=0,
+            valid_days=30, created_by=self.operator, updated_by=self.operator,
+        )
+        deleted = self.client.delete(
+            reverse("backoffice-coupon-template-detail", args=(unused.public_id,))
+        )
+        self.assertEqual(deleted.status_code, 204)
+        self.assertFalse(CouponTemplate.objects.filter(pk=unused.pk).exists())
+
+    def test_coupon_records_support_filters_and_pagination(self):
+        template_ids = []
+        coupon_ids = []
+        for index in range(2):
+            template = self.client.post(
+                reverse("backoffice-coupon-templates"),
+                {
+                    "name": f"筛选测试券{index + 1}",
+                    "description": "用于验证发放记录查询",
+                    "face_amount": 1000 + index * 500,
+                    "min_order_amount": 5000,
+                    "valid_days": 30,
+                    "is_active": True,
+                },
+                format="json",
+            )
+            self.assertEqual(template.status_code, 201)
+            template_id = template.data["data"]["public_id"]
+            template_ids.append(template_id)
+            issued = self.client.post(
+                reverse("backoffice-coupons"),
+                {
+                    "user_public_id": str(self.case.reporter.public_id),
+                    "template_public_id": template_id,
+                },
+                format="json",
+            )
+            self.assertEqual(issued.status_code, 201)
+            coupon_ids.append(issued.data["data"]["public_id"])
+
+        revoked = self.client.post(
+            reverse("backoffice-coupon-revoke", args=(coupon_ids[1],)),
+            {"reason": "验证撤销状态筛选"},
+            format="json",
+        )
+        self.assertEqual(revoked.status_code, 200)
+
+        today = timezone.localdate().isoformat()
+        available = self.client.get(
+            reverse("backoffice-coupons"),
+            {
+                "search": "1111",
+                "template_public_id": template_ids[0],
+                "status": "available",
+                "source": "manual",
+                "issued_by_search": "客服小乐",
+                "created_from": today,
+                "created_to": today,
+                "page": 1,
+                "page_size": 1,
+            },
+        )
+        self.assertEqual(available.status_code, 200)
+        self.assertEqual(available.data["data"]["pagination"]["total"], 1)
+        self.assertEqual(available.data["data"]["items"][0]["public_id"], coupon_ids[0])
+        self.assertEqual(available.data["data"]["items"][0]["user_phone_masked"], "188****1111")
+
+        revoked_list = self.client.get(
+            reverse("backoffice-coupons"),
+            {"template_public_id": template_ids[1], "status": "revoked"},
+        )
+        self.assertEqual(revoked_list.status_code, 200)
+        self.assertEqual(revoked_list.data["data"]["pagination"]["total"], 1)
+
+        invalid_range = self.client.get(
+            reverse("backoffice-coupons"),
+            {"created_from": "2026-09-26", "created_to": "2026-09-25"},
+        )
+        self.assertEqual(invalid_range.status_code, 400)
 
     def test_coupon_endpoints_reject_invalid_user_identifier(self):
         url = reverse("backoffice-coupons")
@@ -338,7 +493,7 @@ class AdminSupportCaseApiTests(APITestCase):
         )
         self.client.force_authenticate(self.case.reporter)
         feedback = self.client.post(reverse("support-case-list"), {
-            "case_type": "consultation", "target_type": "provider_order",
+            "case_type": "complaint", "target_type": "provider_order",
             "target_id": order.order_no, "reason": "platform_process",
             "description": "反馈这个订单遇到的平台流程问题。",
         }, format="json")

@@ -66,7 +66,14 @@ class RegisterView(APIView):
     def post(self, request):
         serializer = RegisterSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        return Response({"data": auth_payload(serializer.save())}, status=status.HTTP_201_CREATED)
+        user = serializer.save()
+        from growth.services import register_invited_user
+
+        register_invited_user(
+            user=user,
+            invite_code=serializer.validated_data.get("invite_code"),
+        )
+        return Response({"data": auth_payload(user)}, status=status.HTTP_201_CREATED)
 
 
 class PasswordLoginView(APIView):
@@ -96,12 +103,21 @@ class WechatMiniProgramLoginView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_wechat_login"
 
+    @transaction.atomic
     def post(self, request):
         serializer = WechatMiniProgramLoginSerializer(
             data=request.data, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
-        return Response({"data": auth_payload(serializer.save())})
+        user = serializer.save()
+        if serializer.created_new_user:
+            from growth.services import register_invited_user
+
+            register_invited_user(
+                user=user,
+                invite_code=serializer.validated_data.get("invite_code"),
+            )
+        return Response({"data": auth_payload(user)})
 
 
 class ResetPasswordView(APIView):
@@ -257,8 +273,8 @@ class CurrentUserOverviewView(APIView):
             {
                 "data": {
                     "customer_service_phone": platform_operation_rules()["customer_service_phone"],
-                    # 钱包尚未建立，保留 null；优惠券数量来自真实券记录。
-                    "balance_amount": None,
+                    # 余额与优惠券数量均来自真实账户记录。
+                    "balance_amount": getattr(getattr(request.user, "wallet", None), "available_balance", 0),
                     "coupon_count": UserCoupon.objects.filter(
                         owner=request.user, status="available", expires_at__gt=timezone.now()
                     ).count(),

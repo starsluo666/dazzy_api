@@ -12,7 +12,7 @@ def generate_support_case_no():
 class SupportCase(models.Model):
     class CaseType(models.TextChoices):
         CONSULTATION = "consultation", "咨询"
-        COMPLAINT = "complaint", "投诉"
+        COMPLAINT = "complaint", "投诉/反馈"
         REPORT = "report", "举报"
 
     class TargetType(models.TextChoices):

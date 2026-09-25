@@ -13,6 +13,7 @@ class UserNotification(models.Model):
 
     class EventType(models.TextChoices):
         COUPON_ISSUED = "coupon_issued", "优惠券已发放"
+        COUPON_REVOKED = "coupon_revoked", "优惠券已撤销"
         SUPPORT_REPLY = "support_reply", "客服回复"
         SUPPORT_RESULT = "support_result", "工单处理结果"
         SUPPORT_REVIEW_RESULT = "support_review_result", "工单复核结果"

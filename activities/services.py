@@ -91,6 +91,54 @@ def _register_activity_cancel_compensation_if_needed(order, *, payment_kind: str
     return getattr(task_services, register_name)(order)
 
 
+def _release_activity_wallet_payment(order, *, payment_kind: str):
+    from wallets.models import WalletPaymentAllocation
+    from wallets.services import release_wallet_payment
+
+    business_type = (
+        WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH
+        if payment_kind == "activity_publish"
+        else WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION
+    )
+    return release_wallet_payment(
+        business_type=business_type,
+        business_order_no=order.order_no,
+    )
+
+
+def _activity_refund_route(
+    *, payment_kind: str, business_order_no: str, refund_amount: int,
+    reserved_refund_amount: int = 0, reserved_wallet_refund_amount: int = 0,
+):
+    from wallets.models import WalletPaymentAllocation
+
+    business_type = (
+        WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH
+        if payment_kind == "activity_publish"
+        else WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION
+    )
+    allocation = WalletPaymentAllocation.objects.select_for_update().filter(
+        business_type=business_type,
+        business_order_no=business_order_no,
+    ).first()
+    if allocation and allocation.wallet_released:
+        if reserved_refund_amount + refund_amount > allocation.external_amount:
+            raise ValidationError("退款金额超过已收取的外部支付金额。")
+    if allocation is None or allocation.wallet_released:
+        return 0, refund_amount
+    cumulative_refund = reserved_refund_amount + refund_amount
+    if cumulative_refund >= allocation.payable_amount:
+        target_wallet_refund = allocation.wallet_amount
+    else:
+        target_wallet_refund = (
+            cumulative_refund * allocation.wallet_amount // allocation.payable_amount
+        )
+    wallet_refund_amount = max(
+        target_wallet_refund - reserved_wallet_refund_amount, 0
+    )
+    return wallet_refund_amount, refund_amount - wallet_refund_amount
+
+
 @transaction.atomic
 def refund_publish_order(
     *,
@@ -127,12 +175,17 @@ def refund_publish_order(
     if not 0 <= service_fee_refund_amount <= publish_order.platform_service_fee_amount:
         raise ValidationError("发起人平台服务费退款金额无效。")
     refund_amount = principal_refund_amount + service_fee_refund_amount
-    is_real_payment = ActivityHuifuPaymentOrder.objects.filter(
+    wallet_refund_amount, external_refund_amount = _activity_refund_route(
+        payment_kind="activity_publish",
+        business_order_no=publish_order.order_no,
+        refund_amount=refund_amount,
+    )
+    has_huifu_payment = ActivityHuifuPaymentOrder.objects.filter(
         publish_order=publish_order
     ).exists()
     initial_status = (
         ActivityRefundRecord.Status.PENDING
-        if is_real_payment and refund_amount
+        if refund_amount and (has_huifu_payment or wallet_refund_amount)
         else ActivityRefundRecord.Status.SIMULATED_REFUNDED
     )
     completed_at = None if initial_status == ActivityRefundRecord.Status.PENDING else timezone.now()
@@ -145,6 +198,8 @@ def refund_publish_order(
             "principal_amount": principal_refund_amount,
             "service_fee_amount": service_fee_refund_amount,
             "refund_amount": refund_amount,
+            "wallet_refund_amount": wallet_refund_amount,
+            "external_refund_amount": external_refund_amount,
             "retained_principal_amount": (
                 publish_order.aa_principal_amount - principal_refund_amount
             ),
@@ -207,9 +262,28 @@ def complete_activity_publish_refund(
         publish_order = ActivityPublishOrder.objects.select_for_update().get(
             pk=refund.publish_order_id
         )
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import complete_wallet_refund
+
+        payment_allocation = None
+        if WalletPaymentAllocation.objects.filter(
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+            business_order_no=publish_order.order_no,
+        ).exists():
+            payment_allocation = complete_wallet_refund(
+                business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+                business_order_no=publish_order.order_no,
+                wallet_refund_amount=refund.wallet_refund_amount,
+                external_refund_amount=refund.external_refund_amount,
+                refund_reference_no=refund.refund_no,
+            )
         publish_order.status = (
             ActivityPublishOrder.Status.REFUNDED
-            if refund.refund_amount >= publish_order.payable_amount
+            if (
+                refund.refund_amount >= publish_order.payable_amount
+                or payment_allocation
+                and payment_allocation.status == WalletPaymentAllocation.Status.REFUNDED
+            )
             else ActivityPublishOrder.Status.PARTIALLY_REFUNDED
         )
         publish_order.save(update_fields=("status", "updated_at"))
@@ -242,6 +316,12 @@ def process_activity_publish_refund(refund_no: str, *, now=None):
         ActivityRefundRecord.Status.SIMULATED_REFUNDED,
     ):
         return refund, False
+    if refund.external_refund_amount == 0:
+        return complete_activity_publish_refund(
+            refund.refund_no,
+            gateway_refund_no=f"BALANCE-{refund.refund_no}",
+            refunded_at=now or timezone.now(),
+        )
     from .huifu import process_activity_huifu_publish_refund
 
     return process_activity_huifu_publish_refund(refund_no, now=now)
@@ -311,6 +391,9 @@ def get_or_create_publish_order(*, activity_id: int, user):
         existing.status = ActivityPublishOrder.Status.CANCELLED
         existing.closed_at = now
         existing.save(update_fields=("status", "closed_at", "updated_at"))
+        _release_activity_wallet_payment(
+            existing, payment_kind="activity_publish"
+        )
         _register_activity_cancel_compensation_if_needed(
             existing,
             payment_kind="activity_publish",
@@ -360,6 +443,7 @@ def expire_activity_publish_payment(*, order_no: str, now=None) -> dict:
     order.status = ActivityPublishOrder.Status.CANCELLED
     order.closed_at = now
     order.save(update_fields=("status", "closed_at", "updated_at"))
+    _release_activity_wallet_payment(order, payment_kind="activity_publish")
     _register_activity_cancel_compensation_if_needed(
         order,
         payment_kind="activity_publish",
@@ -394,6 +478,7 @@ def simulate_publish_payment(*, activity_id: int, user):
         order.status = ActivityPublishOrder.Status.CANCELLED
         order.closed_at = now
         order.save(update_fields=("status", "closed_at", "updated_at"))
+        _release_activity_wallet_payment(order, payment_kind="activity_publish")
         _register_activity_cancel_compensation_if_needed(
             order,
             payment_kind="activity_publish",
@@ -472,6 +557,9 @@ def _close_pending_payment_order(order, *, now):
     order.status = ActivityParticipationPaymentOrder.Status.CLOSED
     order.closed_at = now
     order.save(update_fields=("status", "closed_at", "updated_at"))
+    _release_activity_wallet_payment(
+        order, payment_kind="activity_participation"
+    )
     _register_activity_cancel_compensation_if_needed(
         order,
         payment_kind="activity_participation",
@@ -835,6 +923,17 @@ def create_activity_participation_refund(
     try:
         with transaction.atomic():
             refund_amount = principal_refund_amount + service_fee_refund_amount
+            reserved_routes = payment_order.refund_orders.aggregate(
+                total=Sum("refund_amount"),
+                wallet=Sum("wallet_refund_amount"),
+            )
+            wallet_refund_amount, external_refund_amount = _activity_refund_route(
+                payment_kind="activity_participation",
+                business_order_no=payment_order.order_no,
+                refund_amount=refund_amount,
+                reserved_refund_amount=reserved_routes["total"] or 0,
+                reserved_wallet_refund_amount=reserved_routes["wallet"] or 0,
+            )
             refund = ActivityParticipationRefundOrder.objects.create(
                 idempotency_key=idempotency_key,
                 activity=participation.activity,
@@ -845,6 +944,8 @@ def create_activity_participation_refund(
                 principal_refund_amount=principal_refund_amount,
                 service_fee_refund_amount=service_fee_refund_amount,
                 refund_amount=refund_amount,
+                wallet_refund_amount=wallet_refund_amount,
+                external_refund_amount=external_refund_amount,
                 retained_principal_amount=retained_principal_amount,
                 retained_service_fee_amount=retained_service_fee_amount,
                 retained_principal_destination=retained_principal_destination,
@@ -909,6 +1010,21 @@ def complete_activity_participation_refund(
         if refund.status == ActivityParticipationRefundOrder.Status.SUCCEEDED:
             return refund, False
         completed_at = refunded_at or timezone.now()
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import complete_wallet_refund
+
+        payment_allocation = None
+        if WalletPaymentAllocation.objects.filter(
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+            business_order_no=payment_order.order_no,
+        ).exists():
+            payment_allocation = complete_wallet_refund(
+                business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+                business_order_no=payment_order.order_no,
+                wallet_refund_amount=refund.wallet_refund_amount,
+                external_refund_amount=refund.external_refund_amount,
+                refund_reference_no=refund.refund_no,
+            )
         refund.status = ActivityParticipationRefundOrder.Status.SUCCEEDED
         refund.gateway_refund_no = gateway_refund_no
         refund.refunded_at = completed_at
@@ -923,7 +1039,11 @@ def complete_activity_participation_refund(
             )
         )
         _, _, refunded_total = _succeeded_refund_totals(payment_order)
-        if refunded_total >= payment_order.payable_amount:
+        if (
+            refunded_total >= payment_order.payable_amount
+            or payment_allocation
+            and payment_allocation.status == WalletPaymentAllocation.Status.REFUNDED
+        ):
             payment_order.status = ActivityParticipationPaymentOrder.Status.REFUNDED
         elif refunded_total:
             payment_order.status = (
@@ -961,6 +1081,12 @@ def process_activity_participation_refund(refund_no: str, *, now=None):
     refund_ref = ActivityParticipationRefundOrder.objects.select_related(
         "payment_order"
     ).get(refund_no=refund_no)
+    if refund_ref.external_refund_amount == 0:
+        return complete_activity_participation_refund(
+            refund_no,
+            gateway_refund_no=f"BALANCE-{refund_no}",
+            refunded_at=now,
+        )
     if refund_ref.payment_order.channel in (
         ActivityParticipationPaymentOrder.Channel.WECHAT,
         ActivityParticipationPaymentOrder.Channel.ALIPAY,
@@ -982,7 +1108,7 @@ def process_activity_participation_refund(refund_no: str, *, now=None):
         refund.failure_reason = ""
         refund.save(update_fields=("status", "failure_reason", "updated_at"))
         channel = refund.payment_order.channel
-        amount = refund.refund_amount
+        amount = refund.external_refund_amount
 
     try:
         result = get_activity_payment_gateway(channel).refund(

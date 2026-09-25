@@ -27,6 +27,7 @@ from orders.huifu import (
 )
 from taskcenter.models import ScheduledTask
 from taskcenter.services import process_due_tasks
+from wallets.models import UserWallet, WalletPaymentAllocation
 
 from .models import (
     Activity,
@@ -161,6 +162,153 @@ class ActivityModelTests(TestCase):
         self.assertEqual(call["amount"], order.payable_amount)
         self.assertEqual(call["attach"], f"activity-participation:{order.order_no}")
         self.assertEqual(call["sub_openid"], "participant-openid")
+
+    @override_settings(DEBUG=True)
+    @patch("config.payment_capabilities.ensure_activity_real_payment_available")
+    @patch("activities.huifu.get_huifu_payment_gateway")
+    def test_activity_full_balance_payment_bypasses_huifu_and_consumes_wallet(
+        self, gateway, ensure_real_payment
+    ):
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800000121",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        participation, order, _created = get_or_create_participation_order(
+            activity_id=activity.pk,
+            user=participant,
+            channel=ActivityParticipationPaymentOrder.Channel.WECHAT,
+        )
+        wallet = UserWallet.objects.create(
+            user=participant,
+            available_balance=order.payable_amount + 500,
+        )
+
+        result, created = create_activity_huifu_payment_session(
+            payment_kind="activity_participation",
+            activity_id=activity.pk,
+            user_id=participant.pk,
+            payment_scene="official_account",
+            sub_openid="",
+        )
+
+        participation.refresh_from_db()
+        order.refresh_from_db()
+        wallet.refresh_from_db()
+        allocation = WalletPaymentAllocation.objects.get(
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+            business_order_no=order.order_no,
+        )
+        self.assertTrue(created)
+        self.assertEqual(result.trade_type, "BALANCE")
+        self.assertEqual(result.external_amount, 0)
+        self.assertEqual(participation.status, ActivityParticipation.Status.ACTIVE)
+        self.assertEqual(order.channel, ActivityParticipationPaymentOrder.Channel.BALANCE)
+        self.assertEqual(allocation.status, WalletPaymentAllocation.Status.CONSUMED)
+        self.assertEqual(wallet.available_balance, 500)
+        self.assertEqual(wallet.frozen_balance, 0)
+        ensure_real_payment.assert_not_called()
+        gateway.assert_not_called()
+
+    @override_settings(DEBUG=True)
+    @patch("config.payment_capabilities.ensure_activity_real_payment_available")
+    @patch("activities.huifu.get_huifu_payment_gateway")
+    def test_activity_mixed_payment_only_sends_external_remainder_to_huifu(
+        self, gateway, _ensure_real_payment
+    ):
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800000122",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        _participation, order, _created = get_or_create_participation_order(
+            activity_id=activity.pk,
+            user=participant,
+            channel=ActivityParticipationPaymentOrder.Channel.WECHAT,
+        )
+        UserWallet.objects.create(user=participant, available_balance=2_000)
+        gateway.return_value.merchant_id = "6666000000000000"
+        gateway.return_value.create_payment.return_value = HuifuPaymentSessionResult(
+            req_seq_id=order.order_no,
+            req_date=timezone.localdate().strftime("%Y%m%d"),
+            huifu_id="6666000000000000",
+            trade_type="T_JSAPI",
+            trans_stat="P",
+            hf_seq_id="HF-ACTIVITY-MIXED",
+            party_order_id="PARTY-ACTIVITY-MIXED",
+            out_trans_id="",
+            pay_info={"package": "prepay_id=ACTIVITY-MIXED"},
+            response_code="00000000",
+            response_digest="b" * 64,
+        )
+
+        result, created = create_activity_huifu_payment_session(
+            payment_kind="activity_participation",
+            activity_id=activity.pk,
+            user_id=participant.pk,
+            payment_scene="official_account",
+            sub_openid="participant-openid",
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(result.wallet_amount, 2_000)
+        self.assertEqual(result.external_amount, order.payable_amount - 2_000)
+        self.assertEqual(
+            gateway.return_value.create_payment.call_args.kwargs["amount"],
+            order.payable_amount - 2_000,
+        )
+
+    @override_settings(DEBUG=True)
+    def test_activity_balance_refund_returns_to_wallet_without_gateway(self):
+        from .services import process_activity_participation_refund
+
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800000123",
+            password="test",
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        participation, order, _created = get_or_create_participation_order(
+            activity_id=activity.pk,
+            user=participant,
+            channel=ActivityParticipationPaymentOrder.Channel.WECHAT,
+        )
+        wallet = UserWallet.objects.create(
+            user=participant, available_balance=order.payable_amount
+        )
+        create_activity_huifu_payment_session(
+            payment_kind="activity_participation",
+            activity_id=activity.pk,
+            user_id=participant.pk,
+            payment_scene="official_account",
+            sub_openid="",
+        )
+        refund, created = create_activity_participation_refund(
+            participation=participation,
+            payment_order=order,
+            refund_type=ActivityParticipationRefundOrder.RefundType.ADMIN_CANCELLATION,
+            idempotency_key=f"test-balance-refund:{order.order_no}",
+            principal_refund_amount=order.aa_principal_amount,
+            service_fee_refund_amount=order.platform_service_fee_amount,
+            reason="测试余额退款",
+        )
+
+        completed, changed = process_activity_participation_refund(refund.refund_no)
+
+        wallet.refresh_from_db()
+        order.refresh_from_db()
+        self.assertTrue(created)
+        self.assertTrue(changed)
+        self.assertEqual(refund.wallet_refund_amount, order.payable_amount)
+        self.assertEqual(refund.external_refund_amount, 0)
+        self.assertEqual(completed.status, ActivityParticipationRefundOrder.Status.SUCCEEDED)
+        self.assertEqual(order.status, ActivityParticipationPaymentOrder.Status.REFUNDED)
+        self.assertEqual(wallet.available_balance, order.payable_amount)
 
     @override_settings(DEBUG=True)
     @patch("activities.huifu.get_huifu_payment_gateway")

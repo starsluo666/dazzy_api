@@ -6,7 +6,12 @@ from .models import SupportCase, SupportCaseRecord
 
 
 class SupportCaseCreateSerializer(serializers.Serializer):
-    case_type = serializers.ChoiceField(choices=SupportCase.CaseType.choices)
+    case_type = serializers.ChoiceField(
+        choices=(
+            (SupportCase.CaseType.COMPLAINT, "投诉/反馈"),
+            (SupportCase.CaseType.REPORT, "举报"),
+        )
+    )
     target_type = serializers.ChoiceField(choices=SupportCase.TargetType.choices)
     target_id = serializers.CharField(required=False, allow_blank=True, max_length=64)
     reason = serializers.ChoiceField(choices=SupportCase.Reason.choices)

@@ -15,6 +15,10 @@ urlpatterns = [
     path("api/v1/", include("home.urls")),
     path("api/v1/", include("supportcases.urls")),
     path("api/v1/", include("notifications.urls")),
+    path("api/v1/", include("growth.urls")),
+    path("api/v1/", include("wallets.urls")),
+    path("api/v1/admin/", include("growth.admin_urls")),
+    path("api/v1/admin/", include("wallets.admin_urls")),
     path("api/v1/admin/", include("supportcases.admin_urls")),
     path("api/v1/admin/", include("backoffice.urls")),
 ]

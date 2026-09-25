@@ -19,6 +19,7 @@ from activities.serializers import ActivityParticipationRefundOrderSerializer
 from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 from orders.models import (
+    CouponTemplate,
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
@@ -874,10 +875,68 @@ class ProviderCreditAdjustmentInputSerializer(serializers.Serializer):
 class AdminCouponListQuerySerializer(serializers.Serializer):
     user_public_id = serializers.UUIDField(required=False)
     search = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    user_search = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    template_public_id = serializers.UUIDField(required=False)
+    status = serializers.ChoiceField(
+        required=False,
+        allow_blank=True,
+        choices=("available", "reserved", "used", "expired", "revoked"),
+    )
+    source = serializers.ChoiceField(
+        required=False,
+        allow_blank=True,
+        choices=(
+            "manual", "report_reward", "customer_service",
+            "newcomer_gift", "invite_registration", "invite_first_order",
+        ),
+    )
+    issued_by_search = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    created_from = serializers.DateField(required=False)
+    created_to = serializers.DateField(required=False)
+    page = serializers.IntegerField(required=False, default=1, min_value=1)
+    page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=100)
+
+    def validate(self, attrs):
+        if attrs.get("created_from") and attrs.get("created_to"):
+            if attrs["created_from"] > attrs["created_to"]:
+                raise serializers.ValidationError({"created_to": "结束日期不能早于开始日期。"})
+        return attrs
+
+
+class AdminCouponTemplateSerializer(serializers.ModelSerializer):
+    issued_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = CouponTemplate
+        fields = (
+            "public_id", "name", "description", "face_amount", "min_order_amount",
+            "valid_days", "is_active", "issued_count", "created_at", "updated_at",
+        )
+        read_only_fields = ("public_id", "issued_count", "created_at", "updated_at")
+
+    def validate_face_amount(self, value):
+        if not 1 <= value <= 100_000:
+            raise serializers.ValidationError("优惠券面额必须在 0.01–1000 元之间。")
+        return value
+
+    def validate_min_order_amount(self, value):
+        if not 0 <= value <= 10_000_000:
+            raise serializers.ValidationError("使用门槛必须在 0–100000 元之间。")
+        return value
+
+    def validate_valid_days(self, value):
+        if not 1 <= value <= 3650:
+            raise serializers.ValidationError("有效期必须在 1–3650 天之间。")
+        return value
 
 
 class AdminCouponIssueSerializer(serializers.Serializer):
     user_public_id = serializers.UUIDField()
+    template_public_id = serializers.UUIDField(required=False)
+
+
+class AdminCouponRevokeSerializer(serializers.Serializer):
+    reason = serializers.CharField(min_length=2, max_length=500, trim_whitespace=True)
 
 
 class ProviderCommissionOverrideSerializer(serializers.Serializer):

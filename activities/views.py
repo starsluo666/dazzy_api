@@ -382,26 +382,67 @@ class ActivityParticipationPaymentAuthorizationView(APIView):
         ).order_by("-created_at", "-id").first()
         if order is None:
             raise ValidationError({"order": "活动报名支付单不存在或已失效。"})
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        breakdown = preview_wallet_payment(
+            user_id=request.user.pk,
+            payable_amount=order.payable_amount,
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+            business_order_no=order.order_no,
+        )
+        if breakdown.balance_sufficient:
+            return Response({"data": {
+                "authorized": True,
+                "authorize_url": "",
+                "payment_method": "balance",
+                "wallet_amount": breakdown.wallet_amount,
+                "external_amount": 0,
+            }})
         ensure_activity_real_payment_available("activity_participation")
         authorization = build_payment_authorization(
             user_id=request.user.pk,
             order_no=str(pk),
             payment_kind="activity_participation",
         )
-        return Response({"data": authorization})
+        return Response({"data": {
+            **authorization,
+            "payment_method": "mixed" if breakdown.wallet_amount else "external",
+            "wallet_amount": breakdown.wallet_amount,
+            "external_amount": breakdown.external_amount,
+        }})
 
 
 class ActivityParticipationPaymentSessionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
-        if not app_id:
-            raise WechatOAuthConfigurationError()
-        sub_openid = get_official_account_openid(
+        order = ActivityParticipationPaymentOrder.objects.filter(
+            participation__activity_id=pk,
+            payer=request.user,
+            status=ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at", "-id").first()
+        if order is None:
+            raise ValidationError({"order": "活动报名支付单不存在或已失效。"})
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        breakdown = preview_wallet_payment(
             user_id=request.user.pk,
-            app_id=app_id,
+            payable_amount=order.payable_amount,
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+            business_order_no=order.order_no,
         )
+        sub_openid = ""
+        if breakdown.external_amount:
+            app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
+            if not app_id:
+                raise WechatOAuthConfigurationError()
+            sub_openid = get_official_account_openid(
+                user_id=request.user.pk,
+                app_id=app_id,
+            )
         result, created = create_activity_huifu_payment_session(
             payment_kind="activity_participation",
             activity_id=pk,
@@ -410,7 +451,14 @@ class ActivityParticipationPaymentSessionView(APIView):
             sub_openid=sub_openid,
         )
         return Response(
-            {"data": {"invoke_type": "WECHAT_JSAPI", "pay_info": result.pay_info}},
+            {"data": {
+                "invoke_type": (
+                    "BALANCE" if result.trade_type == "BALANCE" else "WECHAT_JSAPI"
+                ),
+                "pay_info": result.pay_info,
+                "wallet_amount": result.wallet_amount,
+                "external_amount": result.external_amount,
+            }},
             status=201 if created else 200,
         )
 
@@ -512,26 +560,67 @@ class ActivityPublishPaymentAuthorizationView(APIView):
         ).order_by("-created_at", "-id").first()
         if order is None:
             raise ValidationError({"order": "活动发布支付单不存在或已失效。"})
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        breakdown = preview_wallet_payment(
+            user_id=request.user.pk,
+            payable_amount=order.payable_amount,
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+            business_order_no=order.order_no,
+        )
+        if breakdown.balance_sufficient:
+            return Response({"data": {
+                "authorized": True,
+                "authorize_url": "",
+                "payment_method": "balance",
+                "wallet_amount": breakdown.wallet_amount,
+                "external_amount": 0,
+            }})
         ensure_activity_real_payment_available("activity_publish")
         authorization = build_payment_authorization(
             user_id=request.user.pk,
             order_no=str(pk),
             payment_kind="activity_publish",
         )
-        return Response({"data": authorization})
+        return Response({"data": {
+            **authorization,
+            "payment_method": "mixed" if breakdown.wallet_amount else "external",
+            "wallet_amount": breakdown.wallet_amount,
+            "external_amount": breakdown.external_amount,
+        }})
 
 
 class ActivityPublishPaymentSessionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
-        if not app_id:
-            raise WechatOAuthConfigurationError()
-        sub_openid = get_official_account_openid(
+        order = ActivityPublishOrder.objects.filter(
+            activity_id=pk,
+            payer=request.user,
+            status=ActivityPublishOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at", "-id").first()
+        if order is None:
+            raise ValidationError({"order": "活动发布支付单不存在或已失效。"})
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        breakdown = preview_wallet_payment(
             user_id=request.user.pk,
-            app_id=app_id,
+            payable_amount=order.payable_amount,
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+            business_order_no=order.order_no,
         )
+        sub_openid = ""
+        if breakdown.external_amount:
+            app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
+            if not app_id:
+                raise WechatOAuthConfigurationError()
+            sub_openid = get_official_account_openid(
+                user_id=request.user.pk,
+                app_id=app_id,
+            )
         result, created = create_activity_huifu_payment_session(
             payment_kind="activity_publish",
             activity_id=pk,
@@ -540,7 +629,14 @@ class ActivityPublishPaymentSessionView(APIView):
             sub_openid=sub_openid,
         )
         return Response(
-            {"data": {"invoke_type": "WECHAT_JSAPI", "pay_info": result.pay_info}},
+            {"data": {
+                "invoke_type": (
+                    "BALANCE" if result.trade_type == "BALANCE" else "WECHAT_JSAPI"
+                ),
+                "pay_info": result.pay_info,
+                "wallet_amount": result.wallet_amount,
+                "external_amount": result.external_amount,
+            }},
             status=201 if created else 200,
         )
 

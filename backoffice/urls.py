@@ -46,6 +46,9 @@ from .views import (
     ProviderOrderingSettingView,
     PlatformOperationSettingView,
     AdminCouponListIssueView,
+    AdminCouponRevokeView,
+    AdminCouponTemplateDetailView,
+    AdminCouponTemplateListCreateView,
     ProviderCommissionOverrideView,
     ProviderApplicationDetailView,
     ProviderApplicationListView,
@@ -60,7 +63,10 @@ from .views import (
 )
 
 urlpatterns = [
+    path("coupon-templates/", AdminCouponTemplateListCreateView.as_view(), name="backoffice-coupon-templates"),
+    path("coupon-templates/<uuid:template_id>/", AdminCouponTemplateDetailView.as_view(), name="backoffice-coupon-template-detail"),
     path("coupons/", AdminCouponListIssueView.as_view(), name="backoffice-coupons"),
+    path("coupons/<uuid:coupon_id>/revoke/", AdminCouponRevokeView.as_view(), name="backoffice-coupon-revoke"),
     path("providers/<int:profile_id>/commission-override/", ProviderCommissionOverrideView.as_view(), name="backoffice-provider-commission-override"),
     path("auth/login/", AdminPasswordLoginView.as_view(), name="backoffice-auth-login"),
     path("auth/refresh/", AdminTokenRefreshView.as_view(), name="backoffice-auth-refresh"),

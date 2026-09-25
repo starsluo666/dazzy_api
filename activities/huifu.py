@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -34,6 +35,14 @@ from .models import (
 PAYMENT_SESSION_STALE_AFTER = timedelta(seconds=30)
 HUIFU_CLOSE_MINIMUM_AGE = timedelta(minutes=1)
 PAYMENT_SCENE_TRADE_TYPES = {"official_account": "T_JSAPI"}
+
+
+@dataclass(frozen=True)
+class ActivityPaymentSessionResult:
+    trade_type: str
+    pay_info: dict
+    wallet_amount: int
+    external_amount: int
 
 
 def _amount_to_cents(value: str) -> int:
@@ -150,17 +159,36 @@ def create_activity_huifu_payment_session(
     sub_openid: str,
 ):
     from config.payment_capabilities import ensure_activity_real_payment_available
+    from wallets.models import WalletPaymentAllocation
+    from wallets.services import prepare_wallet_payment, preview_wallet_payment
 
-    ensure_activity_real_payment_available(payment_kind)
     try:
         trade_type = PAYMENT_SCENE_TRADE_TYPES[payment_scene]
     except KeyError as exc:
         raise ValidationError({"payment_scene": "当前活动支付场景尚未开放。"}) from exc
-    if not sub_openid:
-        raise ValidationError({"authorization": "请先完成微信服务号网页授权。"})
-    gateway = get_huifu_payment_gateway()
-    gateway.validate_for_payment(trade_type=trade_type)
     now = timezone.now()
+    initial_order = _resolve_business_order(
+        payment_kind=payment_kind,
+        activity_id=activity_id,
+        user_id=user_id,
+    )
+    business_type = (
+        WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH
+        if payment_kind == "activity_publish"
+        else WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION
+    )
+    preview = preview_wallet_payment(
+        user_id=user_id,
+        payable_amount=initial_order.payable_amount,
+        business_type=business_type,
+        business_order_no=initial_order.order_no,
+    )
+    if preview.external_amount:
+        ensure_activity_real_payment_available(payment_kind)
+        if not sub_openid:
+            raise ValidationError({"authorization": "请先完成微信服务号网页授权。"})
+        gateway = get_huifu_payment_gateway()
+        gateway.validate_for_payment(trade_type=trade_type)
 
     with transaction.atomic():
         order = _resolve_business_order(
@@ -176,49 +204,96 @@ def create_activity_huifu_payment_session(
         payment = _gateway_payment_for_order(
             order, payment_kind=payment_kind, lock=True
         )
-        if payment is None:
+        allocation = prepare_wallet_payment(
+            user_id=user_id,
+            business_type=business_type,
+            business_order_no=order.order_no,
+            payable_amount=order.payable_amount,
+            external_only=bool(payment and payment.req_seq_id),
+        )
+        wallet_only = allocation.external_amount == 0
+        if not wallet_only:
+            ensure_activity_real_payment_available(payment_kind)
+            if not sub_openid:
+                raise ValidationError({"authorization": "请先完成微信服务号网页授权。"})
+            gateway = get_huifu_payment_gateway()
+            gateway.validate_for_payment(trade_type=trade_type)
+        payment = _gateway_payment_for_order(
+            order, payment_kind=payment_kind, lock=True
+        )
+        if payment is None and not wallet_only:
             payment = _create_gateway_payment(order, payment_kind=payment_kind)
         if (
-            payment.preorder_status == ActivityHuifuPaymentOrder.PreorderStatus.READY
+            not wallet_only
+            and payment is not None
+            and payment.preorder_status == ActivityHuifuPaymentOrder.PreorderStatus.READY
             and payment.payment_scene == payment_scene
             and payment.trade_type == trade_type
             and payment.payment_invoke_payload
         ):
-            return _stored_session(payment), False
+            stored = _stored_session(payment)
+            return ActivityPaymentSessionResult(
+                trade_type=stored.trade_type,
+                pay_info=stored.pay_info,
+                wallet_amount=allocation.wallet_amount,
+                external_amount=allocation.external_amount,
+            ), False
         if (
-            payment.preorder_status == ActivityHuifuPaymentOrder.PreorderStatus.SUBMITTING
+            not wallet_only
+            and payment is not None
+            and payment.preorder_status
+            == ActivityHuifuPaymentOrder.PreorderStatus.SUBMITTING
             and payment.preorder_requested_at
             and payment.preorder_requested_at > now - PAYMENT_SESSION_STALE_AFTER
         ):
             raise HuifuPaymentSessionInProgress()
-        if payment.payment_scene and payment.payment_scene != payment_scene:
+        if (
+            not wallet_only
+            and payment is not None
+            and payment.payment_scene
+            and payment.payment_scene != payment_scene
+        ):
             raise ValidationError({"payment_scene": "当前支付单已绑定其他支付场景。"})
 
-        payment.req_date = payment.req_date or timezone.localtime(now).strftime("%Y%m%d")
-        payment.req_seq_id = payment.req_seq_id or order.order_no
-        payment.gateway_merchant_id = gateway.merchant_id
-        payment.payment_scene = payment_scene
-        payment.trade_type = trade_type
-        payment.preorder_status = ActivityHuifuPaymentOrder.PreorderStatus.SUBMITTING
-        payment.preorder_requested_at = now
-        payment.preorder_attempts += 1
-        payment.gateway_response_code = ""
-        payment.payment_invoke_payload = {}
-        payment.save()
-        values = _business_values(order, payment_kind=payment_kind)
-        request_values = {
-            "req_date": payment.req_date,
-            "req_seq_id": payment.req_seq_id,
-            "amount": values["amount"],
-            "goods_desc": values["goods_desc"],
-            "trade_type": trade_type,
-            "attach": values["attach"],
-            "time_expire": timezone.localtime(values["expires_at"]).strftime(
-                "%Y%m%d%H%M%S"
-            ),
-            "sub_openid": sub_openid,
-        }
-        payment_id = payment.pk
+        if wallet_only:
+            if payment_kind == "activity_publish":
+                _apply_publish_payment_success(
+                    order.pk, gateway_trade_no=f"BALANCE-{order.order_no}", paid_at=now,
+                )
+            else:
+                _apply_participation_payment_success(
+                    order.pk, gateway_trade_no=f"BALANCE-{order.order_no}", paid_at=now,
+                )
+            return ActivityPaymentSessionResult(
+                trade_type="BALANCE", pay_info={},
+                wallet_amount=allocation.wallet_amount, external_amount=0,
+            ), True
+        else:
+            payment.req_date = payment.req_date or timezone.localtime(now).strftime("%Y%m%d")
+            payment.req_seq_id = payment.req_seq_id or order.order_no
+            payment.gateway_merchant_id = gateway.merchant_id
+            payment.payment_scene = payment_scene
+            payment.trade_type = trade_type
+            payment.preorder_status = ActivityHuifuPaymentOrder.PreorderStatus.SUBMITTING
+            payment.preorder_requested_at = now
+            payment.preorder_attempts += 1
+            payment.gateway_response_code = ""
+            payment.payment_invoke_payload = {}
+            payment.save()
+            values = _business_values(order, payment_kind=payment_kind)
+            request_values = {
+                "req_date": payment.req_date,
+                "req_seq_id": payment.req_seq_id,
+                "amount": allocation.external_amount,
+                "goods_desc": values["goods_desc"],
+                "trade_type": trade_type,
+                "attach": values["attach"],
+                "time_expire": timezone.localtime(values["expires_at"]).strftime(
+                    "%Y%m%d%H%M%S"
+                ),
+                "sub_openid": sub_openid,
+            }
+            payment_id = payment.pk
 
     try:
         result = gateway.create_payment(**request_values)
@@ -252,7 +327,13 @@ def create_activity_huifu_payment_session(
             ActivityParticipationPaymentOrder.objects.filter(
                 pk=payment.participation_order_id
             ).update(channel=ActivityParticipationPaymentOrder.Channel.WECHAT)
-        return _stored_session(payment), True
+        stored = _stored_session(payment)
+        return ActivityPaymentSessionResult(
+            trade_type=stored.trade_type,
+            pay_info=stored.pay_info,
+            wallet_amount=allocation.wallet_amount,
+            external_amount=allocation.external_amount,
+        ), True
 
 
 def _payment_business_order(payment: ActivityHuifuPaymentOrder):
@@ -274,8 +355,17 @@ def _query_payment(
     )
     if query.huifu_id != payment.gateway_merchant_id:
         raise HuifuGatewayError("支付查询返回的商户号与本地支付单不一致。")
+    from wallets.models import WalletPaymentAllocation
+
+    allocation = WalletPaymentAllocation.objects.filter(
+        business_type=kind,
+        business_order_no=order.order_no,
+    ).first()
+    expected_external_amount = (
+        allocation.external_amount if allocation else order.payable_amount
+    )
     if query.trans_amt:
-        if _amount_to_cents(query.trans_amt) != order.payable_amount:
+        if _amount_to_cents(query.trans_amt) != expected_external_amount:
             raise HuifuGatewayError("支付查询金额与本地支付单不一致。")
     elif query.trans_stat == "S":
         raise HuifuGatewayError("支付成功查询未返回交易金额。")
@@ -291,10 +381,12 @@ def _query_payment(
     return query
 
 
+@transaction.atomic
 def _apply_publish_payment_success(order_id: int, *, gateway_trade_no: str, paid_at):
     from taskcenter.services import cancel_activity_publish_payment_expiry
 
     needs_refund = False
+    late_refund_amount = None
     with transaction.atomic():
         order = ActivityPublishOrder.objects.select_for_update().select_related(
             "activity", "payer"
@@ -315,6 +407,33 @@ def _apply_publish_payment_success(order_id: int, *, gateway_trade_no: str, paid
             ActivityPublishOrder.Status.CANCELLED,
         ):
             raise HuifuGatewayError("活动发布支付单状态异常，需要人工核对。")
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import consume_wallet_payment, release_wallet_payment
+
+        allocation = WalletPaymentAllocation.objects.select_for_update().filter(
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+            business_order_no=order.order_no,
+        ).first()
+        if allocation and allocation.status == WalletPaymentAllocation.Status.HELD:
+            if late:
+                late_refund_amount = allocation.external_amount
+                release_wallet_payment(
+                    business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+                    business_order_no=order.order_no,
+                )
+            else:
+                consume_wallet_payment(
+                    business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+                    business_order_no=order.order_no,
+                )
+        elif (
+            allocation
+            and not late
+            and allocation.wallet_released
+        ):
+            raise HuifuGatewayError("活动发布余额已解冻，需要人工核对该笔支付。")
+        elif late and allocation:
+            late_refund_amount = allocation.external_amount
         order.status = ActivityPublishOrder.Status.PAID
         order.paid_at = paid_at
         order.closed_at = None
@@ -341,16 +460,27 @@ def _apply_publish_payment_success(order_id: int, *, gateway_trade_no: str, paid
     if needs_refund:
         from .services import refund_publish_order
 
+        captured_amount = (
+            order.payable_amount
+            if late_refund_amount is None
+            else late_refund_amount
+        )
+        principal_refund_amount = min(order.aa_principal_amount, captured_amount)
+        service_fee_refund_amount = captured_amount - principal_refund_amount
+
         refund_publish_order(
             activity=order.activity,
             publish_order=order,
             refund_type=ActivityRefundRecord.RefundType.ADMIN_CANCELLATION,
             reason="活动发布支付超时后到账，系统自动原路退款。",
             operator=None,
+            principal_refund_amount=principal_refund_amount,
+            service_fee_refund_amount=service_fee_refund_amount,
         )
     return order, True, needs_refund
 
 
+@transaction.atomic
 def _apply_participation_payment_success(
     order_id: int, *, gateway_trade_no: str, paid_at
 ):
@@ -361,6 +491,7 @@ def _apply_participation_payment_success(
     from taskcenter.services import cancel_activity_participation_payment_expiry
 
     needs_refund = False
+    late_refund_amount = None
     with transaction.atomic():
         order = (
             ActivityParticipationPaymentOrder.objects.select_for_update()
@@ -391,8 +522,39 @@ def _apply_participation_payment_success(
             ActivityParticipationPaymentOrder.Status.CLOSED,
         ):
             raise HuifuGatewayError("活动报名支付单状态异常，需要人工核对。")
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import consume_wallet_payment, release_wallet_payment
+
+        allocation = WalletPaymentAllocation.objects.select_for_update().filter(
+            business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+            business_order_no=order.order_no,
+        ).first()
+        if allocation and allocation.status == WalletPaymentAllocation.Status.HELD:
+            if late:
+                late_refund_amount = allocation.external_amount
+                release_wallet_payment(
+                    business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+                    business_order_no=order.order_no,
+                )
+            else:
+                consume_wallet_payment(
+                    business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+                    business_order_no=order.order_no,
+                )
+        elif (
+            allocation
+            and not late
+            and allocation.wallet_released
+        ):
+            raise HuifuGatewayError("活动报名余额已解冻，需要人工核对该笔支付。")
+        elif late and allocation:
+            late_refund_amount = allocation.external_amount
         order.status = ActivityParticipationPaymentOrder.Status.PAID
-        order.channel = ActivityParticipationPaymentOrder.Channel.WECHAT
+        order.channel = (
+            ActivityParticipationPaymentOrder.Channel.BALANCE
+            if allocation and allocation.external_amount == 0
+            else ActivityParticipationPaymentOrder.Channel.WECHAT
+        )
         order.gateway_trade_no = gateway_trade_no
         order.paid_at = paid_at
         order.closed_at = None
@@ -445,13 +607,20 @@ def _apply_participation_payment_success(
                 robust=True,
             )
     if needs_refund:
+        captured_amount = (
+            order.payable_amount
+            if late_refund_amount is None
+            else late_refund_amount
+        )
+        principal_refund_amount = min(order.aa_principal_amount, captured_amount)
+        service_fee_refund_amount = captured_amount - principal_refund_amount
         create_activity_participation_refund(
             participation=order.participation,
             payment_order=order,
             refund_type=ActivityParticipationRefundOrder.RefundType.PAYMENT_TIMEOUT,
             idempotency_key=f"activity-payment-timeout:{order.order_no}",
-            principal_refund_amount=order.aa_principal_amount,
-            service_fee_refund_amount=order.platform_service_fee_amount,
+            principal_refund_amount=principal_refund_amount,
+            service_fee_refund_amount=service_fee_refund_amount,
             reason="活动报名支付超时或名额释放后到账，系统自动原路退款。",
         )
     return order, True, needs_refund
@@ -491,9 +660,6 @@ def confirm_activity_huifu_payment_status(
         activity_id=activity_id,
         user_id=user_id,
     )
-    payment = _gateway_payment_for_order(order, payment_kind=payment_kind)
-    if payment is None or not payment.req_date or not payment.req_seq_id:
-        return {"state": "not_started", "order_no": order.order_no}
     if payment_kind == "activity_publish":
         refund = ActivityRefundRecord.objects.filter(publish_order=order).first()
         refund_succeeded_statuses = (
@@ -536,6 +702,9 @@ def confirm_activity_huifu_payment_status(
         return {"state": "paid", "order_no": order.order_no, "changed": False}
     if order.status == order.Status.REFUNDED:
         return {"state": "refunded", "order_no": order.order_no, "changed": False}
+    payment = _gateway_payment_for_order(order, payment_kind=payment_kind)
+    if payment is None or not payment.req_date or not payment.req_seq_id:
+        return {"state": "not_started", "order_no": order.order_no}
     query = _query_payment(payment)
     applied = _apply_payment_success(payment, query)
     if applied is not None:
@@ -588,6 +757,24 @@ def _ensure_cancel_compensation_refund(*, payment_kind: str, order) -> dict:
     )
     if refund_state is not None:
         return refund_state
+    from wallets.models import WalletPaymentAllocation
+
+    business_type = (
+        WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH
+        if payment_kind == "activity_publish"
+        else WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION
+    )
+    allocation = WalletPaymentAllocation.objects.filter(
+        business_type=business_type,
+        business_order_no=order.order_no,
+    ).first()
+    captured_amount = (
+        allocation.external_amount
+        if allocation and allocation.wallet_released
+        else order.payable_amount
+    )
+    principal_refund_amount = min(order.aa_principal_amount, captured_amount)
+    service_fee_refund_amount = captured_amount - principal_refund_amount
     if payment_kind == "activity_publish":
         from .services import refund_publish_order
 
@@ -597,6 +784,8 @@ def _ensure_cancel_compensation_refund(*, payment_kind: str, order) -> dict:
             refund_type=ActivityRefundRecord.RefundType.ADMIN_CANCELLATION,
             reason="活动发布支付超时或取消后到账，系统自动原路退款。",
             operator=None,
+            principal_refund_amount=principal_refund_amount,
+            service_fee_refund_amount=service_fee_refund_amount,
         )
     else:
         from .services import create_activity_participation_refund
@@ -606,8 +795,8 @@ def _ensure_cancel_compensation_refund(*, payment_kind: str, order) -> dict:
             payment_order=order,
             refund_type=ActivityParticipationRefundOrder.RefundType.PAYMENT_TIMEOUT,
             idempotency_key=f"activity-payment-timeout:{order.order_no}",
-            principal_refund_amount=order.aa_principal_amount,
-            service_fee_refund_amount=order.platform_service_fee_amount,
+            principal_refund_amount=principal_refund_amount,
+            service_fee_refund_amount=service_fee_refund_amount,
             reason="活动报名支付超时或名额释放后到账，系统自动原路退款。",
         )
     return _cancel_compensation_refund_state(
@@ -805,7 +994,17 @@ def process_activity_huifu_payment_notification(
         if payment.gateway_merchant_id != fields["huifu_id"]:
             raise ValidationError({"notification": "支付通知商户号与本地支付单不一致。"})
         _, order = _payment_business_order(payment)
-        if fields["trans_amt"] and _amount_to_cents(fields["trans_amt"]) != order.payable_amount:
+        from wallets.models import WalletPaymentAllocation
+
+        kind, order = _payment_business_order(payment)
+        allocation = WalletPaymentAllocation.objects.filter(
+            business_type=kind,
+            business_order_no=order.order_no,
+        ).first()
+        expected_external_amount = (
+            allocation.external_amount if allocation else order.payable_amount
+        )
+        if fields["trans_amt"] and _amount_to_cents(fields["trans_amt"]) != expected_external_amount:
             raise ValidationError({"notification": "支付通知金额与本地支付单不一致。"})
         event, _ = ActivityHuifuNotification.objects.get_or_create(
             event_key=event_key,
@@ -885,14 +1084,14 @@ def _query_refund(
     )
     if query.huifu_id != refund_request.gateway_merchant_id:
         raise HuifuGatewayError("退款查询返回的商户号与本地退款单不一致。")
-    if query.ord_amt and _amount_to_cents(query.ord_amt) != refund.refund_amount:
+    if query.ord_amt and _amount_to_cents(query.ord_amt) != refund.external_refund_amount:
         raise HuifuGatewayError("退款查询金额与本地退款单不一致。")
     if query.trans_stat == "S" and not query.ord_amt:
         raise HuifuGatewayError("退款成功查询未返回退款金额。")
     if (
         query.trans_stat == "S"
         and query.actual_ref_amt
-        and _amount_to_cents(query.actual_ref_amt) != refund.refund_amount
+        and _amount_to_cents(query.actual_ref_amt) != refund.external_refund_amount
     ):
         raise HuifuGatewayError("退款查询实际退款金额与本地退款单不一致。")
     queried_at = timezone.now()
@@ -1017,7 +1216,7 @@ def _process_refund(*, payment_kind: str, refund_no: str, now=None):
         request_values = {
             "req_date": refund_request.req_date,
             "req_seq_id": refund_request.req_seq_id,
-            "amount": refund.refund_amount,
+            "amount": refund.external_refund_amount,
             "org_req_date": payment.req_date,
             "org_req_seq_id": payment.req_seq_id,
             "org_hf_seq_id": payment.gateway_trade_no,
@@ -1031,7 +1230,7 @@ def _process_refund(*, payment_kind: str, refund_no: str, now=None):
     fallback_hf_seq_id = refund_request.gateway_refund_no
     if should_submit:
         submitted = gateway.refund_payment(**request_values)
-        if submitted.ord_amt and _amount_to_cents(submitted.ord_amt) != refund.refund_amount:
+        if submitted.ord_amt and _amount_to_cents(submitted.ord_amt) != refund.external_refund_amount:
             raise HuifuGatewayError("退款受理金额与本地退款单不一致。")
         fallback_hf_seq_id = submitted.gateway_refund_no
         ActivityHuifuRefundOrder.objects.filter(pk=refund_request_id).update(
@@ -1098,7 +1297,7 @@ def process_activity_huifu_refund_notification(
         if refund_request.gateway_merchant_id != fields["huifu_id"]:
             raise ValidationError({"notification": "退款通知商户号与本地退款单不一致。"})
         _kind, refund, _payment = _refund_business(refund_request)
-        if fields["ord_amt"] and _amount_to_cents(fields["ord_amt"]) != refund.refund_amount:
+        if fields["ord_amt"] and _amount_to_cents(fields["ord_amt"]) != refund.external_refund_amount:
             raise ValidationError({"notification": "退款通知金额与本地退款单不一致。"})
         event, _ = ActivityHuifuNotification.objects.get_or_create(
             event_key=event_key,

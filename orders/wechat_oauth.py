@@ -22,6 +22,7 @@ PAYMENT_RETURN_TARGETS = {
     "provider_order": ("/pages/booking/payment", "orderNo"),
     "activity_publish": ("/pages/activities/publish-payment", "id"),
     "activity_participation": ("/pages/activities/participation-payment", "id"),
+    "wallet_recharge": ("/pages/wallet/recharge", "orderNo"),
 }
 
 
@@ -197,6 +198,15 @@ def _payment_authorization_business_exists(
             participation__activity_id=order_no,
             payer_id=user_id,
             status=ActivityParticipationPaymentOrder.Status.PENDING_PAYMENT,
+            expires_at__gt=now,
+        ).exists()
+    if payment_kind == "wallet_recharge":
+        from wallets.models import WalletRechargeOrder
+
+        return WalletRechargeOrder.objects.filter(
+            order_no=order_no,
+            user_id=user_id,
+            status=WalletRechargeOrder.Status.PENDING_PAYMENT,
             expires_at__gt=now,
         ).exists()
     return False

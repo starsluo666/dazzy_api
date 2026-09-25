@@ -32,6 +32,8 @@ INSTALLED_APPS = [
     "taskcenter",
     "supportcases",
     "notifications",
+    "growth.apps.GrowthConfig",
+    "wallets.apps.WalletsConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -105,6 +107,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ("json",)
 CELERY_TIMEZONE = "Asia/Shanghai"
 CELERY_BEAT_SCHEDULE = {
+    "reconcile-pending-recharges": {
+        "task": "wallets.reconcile_pending_recharges",
+        "schedule": 60.0,
+    },
     "process-due-scheduled-tasks": {
         "task": "taskcenter.process_due_scheduled_tasks",
         "schedule": 10.0,

@@ -92,7 +92,7 @@ class CurrentUserCouponListView(APIView):
 
     def get(self, request):
         now = timezone.now()
-        owned = UserCoupon.objects.filter(owner=request.user)
+        owned = UserCoupon.objects.filter(owner=request.user).select_related("template")
         # Never hide a usable coupon behind a long history of used/expired ones.
         active = list(owned.filter(status=UserCoupon.Status.AVAILABLE, expires_at__gt=now))
         history = list(owned.exclude(
@@ -272,6 +272,7 @@ class ProviderOrderCancelView(ProviderOrderDetailView):
 
 
 class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
+    @transaction.atomic
     def post(self, request, order_no):
         if not settings.DEBUG:
             raise ValidationError("模拟支付仅在本地环境开放。")
@@ -285,28 +286,44 @@ class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
         if order.status != ProviderOrder.Status.PENDING_PAYMENT:
             raise ValidationError({"status": "订单不在待支付状态。"})
         if order.payment_expires_at <= timezone.now():
-            apply_provider_order_payment_success(
-                order_no=order_no,
-                customer_id=request.user.pk,
-                channel=ProviderOrderPaymentOrder.Channel.MOCK_WECHAT,
-                gateway_trade_no=f"EXPIRED-{order_no}",
-                paid_amount=order.payable_amount,
-                signature_verified=True,
-            )
+            from .services import expire_provider_order_payment
+
+            expire_provider_order_payment(order.order_no)
             return Response({"error": {"status": "支付已超时，档期已释放。"}}, status=409)
         payment, _ = create_provider_order_payment_order(order)
-        channel = ProviderOrderPaymentOrder.Channel.MOCK_WECHAT
-        result = get_provider_order_payment_gateway(channel).confirm_payment(
-            payment_no=payment.payment_no,
-            amount=payment.payable_amount,
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import prepare_wallet_payment
+
+        allocation = prepare_wallet_payment(
+            user_id=request.user.pk,
+            business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
+            business_order_no=order.order_no,
+            payable_amount=payment.payable_amount,
         )
+        channel = (
+            ProviderOrderPaymentOrder.Channel.BALANCE
+            if allocation.external_amount == 0
+            else ProviderOrderPaymentOrder.Channel.MOCK_WECHAT
+        )
+        if allocation.external_amount:
+            result = get_provider_order_payment_gateway(channel).confirm_payment(
+                payment_no=payment.payment_no,
+                amount=allocation.external_amount,
+            )
+            gateway_trade_no = result.gateway_trade_no
+            signature_verified = result.signature_verified
+            paid_amount = result.paid_amount
+        else:
+            gateway_trade_no = f"BALANCE-{payment.payment_no}"
+            signature_verified = True
+            paid_amount = 0
         order, _payment, _changed = apply_provider_order_payment_success(
             order_no=order_no,
             customer_id=request.user.pk,
             channel=channel,
-            gateway_trade_no=result.gateway_trade_no,
-            paid_amount=result.paid_amount,
-            signature_verified=result.signature_verified,
+            gateway_trade_no=gateway_trade_no,
+            paid_amount=paid_amount,
+            signature_verified=signature_verified,
         )
         return Response({"data": ProviderOrderSerializer(order).data})
 
@@ -327,17 +344,27 @@ class ProviderOrderPaymentSessionView(ProviderOrderDetailView):
         order = self.get_object(request, order_no)
         sub_openid = ""
         if payment_scene == "official_account":
-            app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
-            if not app_id:
-                raise WechatOAuthConfigurationError()
-            sub_openid = get_official_account_openid(
+            from wallets.models import WalletPaymentAllocation
+            from wallets.services import preview_wallet_payment
+
+            breakdown = preview_wallet_payment(
                 user_id=request.user.pk,
-                app_id=app_id,
+                payable_amount=order.payable_amount,
+                business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
+                business_order_no=order.order_no,
             )
-            if not sub_openid:
-                raise ValidationError(
-                    {"authorization": "请先在微信服务号内完成网页授权。"}
+            if breakdown.external_amount:
+                app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
+                if not app_id:
+                    raise WechatOAuthConfigurationError()
+                sub_openid = get_official_account_openid(
+                    user_id=request.user.pk,
+                    app_id=app_id,
                 )
+                if not sub_openid:
+                    raise ValidationError(
+                        {"authorization": "请先在微信服务号内完成网页授权。"}
+                    )
         result, created = create_provider_order_huifu_payment_session(
             order_id=order.pk,
             customer_id=request.user.pk,
@@ -348,11 +375,15 @@ class ProviderOrderPaymentSessionView(ProviderOrderDetailView):
             {
                 "data": {
                     "invoke_type": (
-                        "WECHAT_JSAPI"
+                        "BALANCE"
+                        if result.trade_type == "BALANCE"
+                        else "WECHAT_JSAPI"
                         if result.trade_type == "T_JSAPI"
                         else "WECHAT_APP"
                     ),
                     "pay_info": result.pay_info,
+                    "wallet_amount": result.wallet_amount,
+                    "external_amount": result.external_amount,
                 }
             },
             status=201 if created else 200,
@@ -380,12 +411,42 @@ class ProviderOrderPaymentAuthorizationView(ProviderOrderDetailView):
             raise ValidationError({"order": "当前订单状态不允许发起支付。"})
         if order.payment_expires_at <= timezone.now():
             raise ValidationError({"order": "订单支付时限已过，请重新下单。"})
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        breakdown = preview_wallet_payment(
+            user_id=request.user.pk,
+            payable_amount=order.payable_amount,
+            business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
+            business_order_no=order.order_no,
+        )
+        if breakdown.balance_sufficient:
+            return Response(
+                {
+                    "data": {
+                        "authorized": True,
+                        "authorize_url": "",
+                        "payment_method": "balance",
+                        "wallet_amount": breakdown.wallet_amount,
+                        "external_amount": 0,
+                    }
+                }
+            )
         ensure_provider_order_payment_scene_available("official_account")
         authorization = build_payment_authorization(
             user_id=request.user.pk,
             order_no=order.order_no,
         )
-        return Response({"data": authorization})
+        return Response(
+            {
+                "data": {
+                    **authorization,
+                    "payment_method": "mixed" if breakdown.wallet_amount else "external",
+                    "wallet_amount": breakdown.wallet_amount,
+                    "external_amount": breakdown.external_amount,
+                }
+            }
+        )
 
 
 class PaymentCapabilitiesView(APIView):

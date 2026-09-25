@@ -85,6 +85,7 @@ class RegisterSerializer(serializers.Serializer):
     phone = serializers.CharField(validators=[validate_phone])
     code = serializers.CharField(min_length=6, max_length=6)
     password = serializers.CharField(write_only=True, validators=[validate_password])
+    invite_code = serializers.UUIDField(required=False, allow_null=True)
 
     def validate_phone(self, value):
         if User.objects.filter(phone=value).exists():
@@ -195,6 +196,7 @@ class WechatMiniProgramLoginSerializer(serializers.Serializer):
     phone_code = serializers.CharField(
         min_length=1, max_length=256, trim_whitespace=True, required=False
     )
+    invite_code = serializers.UUIDField(required=False, allow_null=True)
 
     def validate(self, attrs):
         config = WechatMiniProgramConfig.from_client_type(attrs["client_type"])
@@ -231,6 +233,7 @@ class WechatMiniProgramLoginSerializer(serializers.Serializer):
         return attrs
 
     def save(self, **kwargs):
+        self.created_new_user = False
         existing_user = self.validated_data.get("user")
         if existing_user:
             return existing_user
@@ -258,6 +261,7 @@ class WechatMiniProgramLoginSerializer(serializers.Serializer):
                                 password=None,
                                 nickname=f"用户{phone[-4:]}",
                             )
+                            self.created_new_user = True
                     except IntegrityError:
                         user = User.objects.select_for_update().get(phone=phone)
                 existing_app_identity = (

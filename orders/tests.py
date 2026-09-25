@@ -141,6 +141,74 @@ class ProviderOrderApiTests(TestCase):
         self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
         return ProviderOrder.objects.get(order_no=order_no)
 
+    def test_legacy_external_payment_does_not_charge_new_wallet_balance(self):
+        from wallets.models import UserWallet, WalletPaymentAllocation
+        from .services import apply_provider_order_payment_success
+
+        created = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        order = ProviderOrder.objects.get(order_no=created.json()["data"]["order_no"])
+        wallet = UserWallet.objects.create(user=self.customer, available_balance=100_000)
+        apply_provider_order_payment_success(
+            order_no=order.order_no, customer_id=self.customer.pk,
+            channel="wechat", gateway_trade_no="LEGACY-EXTERNAL",
+            paid_amount=order.payable_amount, signature_verified=True,
+        )
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.available_balance, 100_000)
+        allocation = WalletPaymentAllocation.objects.get(business_order_no=order.order_no)
+        self.assertEqual(allocation.wallet_amount, 0)
+        self.assertEqual(allocation.external_amount, order.payable_amount)
+
+    def test_cancelled_mixed_payment_unfreezes_balance_and_only_refunds_external(self):
+        from wallets.models import UserWallet
+        from wallets.services import prepare_wallet_payment
+        from .services import _apply_cancelled_huifu_payment_success
+
+        created = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        order = ProviderOrder.objects.get(order_no=created.json()["data"]["order_no"])
+        wallet = UserWallet.objects.create(user=self.customer, available_balance=10_000)
+        prepare_wallet_payment(
+            user_id=self.customer.pk, business_type="provider_order",
+            business_order_no=order.order_no, payable_amount=order.payable_amount,
+        )
+        order.status = ProviderOrder.Status.CANCELLED
+        order.save()
+        for _ in range(2):
+            _apply_cancelled_huifu_payment_success(
+                payment=order.payment_order, gateway_trade_no="LATE-MIXED",
+                trade_type="T_JSAPI", paid_at=timezone.now(),
+            )
+        wallet.refresh_from_db()
+        refund = order.refund_orders.get()
+        self.assertEqual(wallet.available_balance, 10_000)
+        self.assertEqual(wallet.frozen_balance, 0)
+        self.assertEqual(refund.wallet_refund_amount, 0)
+        self.assertEqual(refund.external_refund_amount, order.payable_amount - 10_000)
+        _complete_provider_order_refund(
+            refund.refund_no, gateway_refund_no="REFUND-LATE-MIXED", refunded_at=timezone.now(),
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.REFUNDED)
+
+    def test_balance_payment_failure_rolls_back_hold(self):
+        from wallets.models import UserWallet, WalletPaymentAllocation
+        from .services import create_provider_order_huifu_payment_session
+
+        created = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        order = ProviderOrder.objects.get(order_no=created.json()["data"]["order_no"])
+        wallet = UserWallet.objects.create(user=self.customer, available_balance=100_000)
+        with patch("orders.services.create_provider_new_order_notification", side_effect=RuntimeError("injected")):
+            with self.assertRaises(RuntimeError):
+                create_provider_order_huifu_payment_session(
+                    order_id=order.pk, customer_id=self.customer.pk, payment_scene="official_account",
+                )
+        wallet.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(wallet.available_balance, 100_000)
+        self.assertEqual(wallet.frozen_balance, 0)
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_PAYMENT)
+        self.assertFalse(WalletPaymentAllocation.objects.filter(business_order_no=order.order_no).exists())
+
     def test_preview_calculates_server_side_amounts(self):
         response = self.client.post(
             "/api/v1/provider-orders/preview/", self.payload(), content_type="application/json"
@@ -363,7 +431,7 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(
             set(first.json()["data"]),
-            {"invoke_type", "pay_info"},
+            {"invoke_type", "pay_info", "wallet_amount", "external_amount"},
         )
         self.assertEqual(first.json()["data"]["invoke_type"], "WECHAT_JSAPI")
         self.assertEqual(first.json()["data"]["pay_info"]["package"], "prepay_id=PREPAY")

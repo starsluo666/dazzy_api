@@ -252,6 +252,7 @@ class ActivityParticipationPaymentOrder(models.Model):
         MOCK_ALIPAY = "mock_alipay", "模拟支付宝"
         WECHAT = "wechat", "微信支付"
         ALIPAY = "alipay", "支付宝"
+        BALANCE = "balance", "余额支付"
 
     class Status(models.TextChoices):
         PENDING_PAYMENT = "pending_payment", "待支付"
@@ -379,6 +380,10 @@ class ActivityParticipationRefundOrder(models.Model):
     principal_refund_amount = models.PositiveBigIntegerField("AA本金退款（分）")
     service_fee_refund_amount = models.PositiveBigIntegerField("平台服务费退款（分）")
     refund_amount = models.PositiveBigIntegerField("退款总额（分）")
+    wallet_refund_amount = models.PositiveBigIntegerField("余额退款（分）", default=0)
+    external_refund_amount = models.PositiveBigIntegerField(
+        "外部渠道退款（分）", default=0
+    )
     retained_principal_amount = models.PositiveBigIntegerField("扣除AA本金（分）", default=0)
     retained_service_fee_amount = models.PositiveBigIntegerField(
         "扣除平台服务费（分）", default=0
@@ -424,10 +429,26 @@ class ActivityParticipationRefundOrder(models.Model):
                     + F("service_fee_refund_amount")
                 ),
                 name="activity_participation_refund_amount_matches",
-            )
+            ),
+            models.CheckConstraint(
+                condition=Q(
+                    refund_amount=F("wallet_refund_amount")
+                    + F("external_refund_amount")
+                ),
+                name="activity_participation_refund_route_matches",
+            ),
         ]
         verbose_name = "活动报名退款单"
         verbose_name_plural = verbose_name
+
+    def save(self, *args, **kwargs):
+        if (
+            self.refund_amount
+            and not self.wallet_refund_amount
+            and not self.external_refund_amount
+        ):
+            self.external_refund_amount = self.refund_amount
+        return super().save(*args, **kwargs)
 
 
 def generate_activity_after_sales_case_no():
@@ -630,6 +651,10 @@ class ActivityRefundRecord(models.Model):
     principal_amount = models.PositiveBigIntegerField("AA本金退款（分）")
     service_fee_amount = models.PositiveBigIntegerField("平台服务费退款（分）")
     refund_amount = models.PositiveBigIntegerField("退款总额（分）")
+    wallet_refund_amount = models.PositiveBigIntegerField("余额退款（分）", default=0)
+    external_refund_amount = models.PositiveBigIntegerField(
+        "外部渠道退款（分）", default=0
+    )
     retained_principal_amount = models.PositiveBigIntegerField(
         "扣除发起人AA本金（分）", default=0
     )
@@ -669,10 +694,26 @@ class ActivityRefundRecord(models.Model):
             models.CheckConstraint(
                 condition=Q(refund_amount=F("principal_amount") + F("service_fee_amount")),
                 name="activity_refund_amount_matches_components",
-            )
+            ),
+            models.CheckConstraint(
+                condition=Q(
+                    refund_amount=F("wallet_refund_amount")
+                    + F("external_refund_amount")
+                ),
+                name="activity_refund_route_matches",
+            ),
         ]
         verbose_name = "活动退款记录"
         verbose_name_plural = verbose_name
+
+    def save(self, *args, **kwargs):
+        if (
+            self.refund_amount
+            and not self.wallet_refund_amount
+            and not self.external_refund_amount
+        ):
+            self.external_refund_amount = self.refund_amount
+        return super().save(*args, **kwargs)
 
 
 class ActivityHuifuPaymentOrder(models.Model):

@@ -164,13 +164,42 @@ def generate_provider_payment_no():
     return f"POP{uuid.uuid4().hex[:20].upper()}"
 
 
+class CouponTemplate(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    name = models.CharField("优惠券名称", max_length=80)
+    description = models.CharField("使用说明", max_length=255, blank=True, default="")
+    face_amount = models.PositiveIntegerField("面额（分）")
+    min_order_amount = models.PositiveIntegerField("订单使用门槛（分）", default=0)
+    valid_days = models.PositiveSmallIntegerField("领取后有效天数", default=30)
+    is_active = models.BooleanField("是否启用", default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="created_coupon_templates",
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="updated_coupon_templates",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "coupon_template"
+        ordering = ("-created_at", "-id")
+
+
 class UserCoupon(models.Model):
     class Status(models.TextChoices):
         AVAILABLE = "available", "可使用"
         RESERVED = "reserved", "订单占用中"
         USED = "used", "已使用"
+        REVOKED = "revoked", "已撤销"
 
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    template = models.ForeignKey(
+        CouponTemplate, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="coupons",
+    )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="coupons"
     )
@@ -188,6 +217,12 @@ class UserCoupon(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
         related_name="issued_coupons",
     )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="revoked_coupons",
+    )
+    revoke_reason = models.CharField(max_length=500, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -199,6 +234,8 @@ class UserCoupon(models.Model):
 class ProviderOrderPaymentOrder(models.Model):
     class Channel(models.TextChoices):
         UNSELECTED = "unselected", "待选择"
+        BALANCE = "balance", "余额支付"
+        MIXED = "mixed", "余额组合支付"
         MOCK_WECHAT = "mock_wechat", "模拟微信支付"
         MOCK_ALIPAY = "mock_alipay", "模拟支付宝"
         WECHAT = "wechat", "微信支付"
@@ -450,6 +487,8 @@ class ProviderOrderRefundOrder(models.Model):
     transport_fee_refund_amount = models.PositiveBigIntegerField("交通费退款（分）")
     other_fee_refund_amount = models.PositiveBigIntegerField("其他费用退款（分）")
     refund_amount = models.PositiveBigIntegerField("退款总额（分）")
+    wallet_refund_amount = models.PositiveBigIntegerField("余额退款（分）", default=0)
+    external_refund_amount = models.PositiveBigIntegerField("外部渠道退款（分）", default=0)
     allocation_snapshot = models.JSONField("退款分配快照", default=dict)
     status = models.CharField(
         "退款状态", max_length=20, choices=Status, default=Status.PENDING
@@ -511,6 +550,15 @@ class ProviderOrderRefundOrder(models.Model):
                 condition=Q(refund_amount__gt=0),
                 name="provider_refund_amount_positive",
             ),
+            models.CheckConstraint(
+                condition=Q(
+                    refund_amount=(
+                        models.F("wallet_refund_amount")
+                        + models.F("external_refund_amount")
+                    )
+                ),
+                name="provider_refund_route_matches",
+            ),
             models.UniqueConstraint(
                 fields=("gateway_refund_no",),
                 condition=~Q(gateway_refund_no=""),
@@ -527,6 +575,15 @@ class ProviderOrderRefundOrder(models.Model):
 
     def __str__(self):
         return f"{self.refund_no} / {self.order.order_no}"
+
+    def save(self, *args, **kwargs):
+        if (
+            self.refund_amount
+            and not self.wallet_refund_amount
+            and not self.external_refund_amount
+        ):
+            self.external_refund_amount = self.refund_amount
+        return super().save(*args, **kwargs)
 
 
 class HuifuRefundNotification(models.Model):

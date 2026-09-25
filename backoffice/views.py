@@ -28,6 +28,7 @@ from config.api import paginated_response
 from engagements.models import BrowsingHistory
 from mediafiles.services import build_media_url
 from orders.models import (
+    CouponTemplate,
     ProviderOrder,
     ProviderOrderPaymentOrder,
     ProviderOrderRefundOrder,
@@ -104,6 +105,8 @@ from .serializers import (
     ProviderCommissionOverrideSerializer,
     AdminCouponIssueSerializer,
     AdminCouponListQuerySerializer,
+    AdminCouponRevokeSerializer,
+    AdminCouponTemplateSerializer,
     ProviderOrderAfterSalesCaseActionSerializer,
     ProviderOrderAfterSalesCaseCreateSerializer,
     ProviderOrderAfterSalesCaseQuerySerializer,
@@ -2675,6 +2678,107 @@ class PlatformOperationSettingView(APIView):
         return Response({"data": serializer.data})
 
 
+class AdminCouponTemplateListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("coupon.view")
+        templates = CouponTemplate.objects.annotate(issued_count=Count("coupons"))
+        return Response({"data": {"items": AdminCouponTemplateSerializer(templates, many=True).data}})
+
+    @transaction.atomic
+    def post(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("coupon.manage")
+        serializer = AdminCouponTemplateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save(created_by=request.user, updated_by=request.user)
+        payload = AdminCouponTemplateSerializer(template).data
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="coupon.template.create", target_type="coupon_template",
+            target_id=str(template.public_id), before={}, after=payload,
+            ip_address=client_ip(request),
+        )
+        return Response({"data": payload}, status=201)
+
+
+class AdminCouponTemplateDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def patch(self, request, template_id):
+        access = resolve_admin_access(request.user)
+        access.require("coupon.manage")
+        template = get_object_or_404(
+            CouponTemplate.objects.select_for_update(),
+            public_id=template_id,
+        )
+        template.issued_count = template.coupons.count()
+        before = AdminCouponTemplateSerializer(template).data
+        serializer = AdminCouponTemplateSerializer(template, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save(updated_by=request.user)
+        template.issued_count = template.coupons.count()
+        payload = AdminCouponTemplateSerializer(template).data
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="coupon.template.update", target_type="coupon_template",
+            target_id=str(template.public_id), before=before, after=payload,
+            ip_address=client_ip(request),
+        )
+        return Response({"data": payload})
+
+    @transaction.atomic
+    def delete(self, request, template_id):
+        access = resolve_admin_access(request.user)
+        access.require("coupon.manage")
+        template = get_object_or_404(
+            CouponTemplate.objects.select_for_update(),
+            public_id=template_id,
+        )
+        template.issued_count = template.coupons.count()
+        if template.issued_count:
+            raise ValidationError({"detail": "该模板已有发放记录，不能删除，请改为停用。"})
+        if (
+            template.newcomer_gift_items.exists()
+            or template.growth_registration_reward_configs.exists()
+            or template.growth_first_order_reward_configs.exists()
+        ):
+            raise ValidationError({"detail": "该模板正在被营销规则引用，请先移除规则引用或改为停用。"})
+        before = AdminCouponTemplateSerializer(template).data
+        public_id = str(template.public_id)
+        template.delete()
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="coupon.template.delete", target_type="coupon_template",
+            target_id=public_id, before=before, after={},
+            ip_address=client_ip(request),
+        )
+        return Response(status=204)
+
+
+def admin_coupon_payload(coupon):
+    return {
+        **coupon_payload(coupon),
+        "expires_at": coupon.expires_at.isoformat(),
+        "revoked_at": coupon.revoked_at.isoformat() if coupon.revoked_at else None,
+        "created_at": coupon.created_at.isoformat(),
+        "user_public_id": str(coupon.owner.public_id),
+        "user_name": coupon.owner.nickname,
+        "user_phone_masked": (
+            f"{coupon.owner.phone[:3]}****{coupon.owner.phone[-4:]}"
+            if len(coupon.owner.phone) == 11 else coupon.owner.phone
+        ),
+        "issued_by": coupon.issued_by.nickname if coupon.issued_by else None,
+        "revoked_by": coupon.revoked_by.nickname if coupon.revoked_by else None,
+    }
+
+
 class AdminCouponListIssueView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2695,38 +2799,93 @@ class AdminCouponListIssueView(APIView):
 
     def get(self, request):
         access = resolve_admin_access(request.user)
-        access.require("support.case.manage")
+        access.require("coupon.view")
         query = AdminCouponListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
+        params = query.validated_data
         coupon_users = self.scoped_coupon_users(access)
         queryset = UserCoupon.objects.filter(owner__in=coupon_users)
-        if user_id := query.validated_data.get("user_public_id"):
+        if user_id := params.get("user_public_id"):
             queryset = queryset.filter(owner__public_id=user_id)
-        items = queryset.select_related("owner", "issued_by")[:100]
-        search = query.validated_data.get("search", "")
-        users = coupon_users.filter(Q(nickname__icontains=search) | Q(phone__icontains=search))[:20] if search else []
+        if search := params.get("search", "").strip():
+            queryset = queryset.filter(
+                Q(owner__nickname__icontains=search) | Q(owner__phone__icontains=search)
+            )
+        if template_id := params.get("template_public_id"):
+            queryset = queryset.filter(template__public_id=template_id)
+        if status_filter := params.get("status", ""):
+            if status_filter == "expired":
+                queryset = queryset.filter(
+                    status=UserCoupon.Status.AVAILABLE,
+                    expires_at__lte=timezone.now(),
+                )
+            elif status_filter == UserCoupon.Status.AVAILABLE:
+                queryset = queryset.filter(
+                    status=UserCoupon.Status.AVAILABLE,
+                    expires_at__gt=timezone.now(),
+                )
+            else:
+                queryset = queryset.filter(status=status_filter)
+        if source := params.get("source", ""):
+            queryset = queryset.filter(source=source)
+        if issued_by_search := params.get("issued_by_search", "").strip():
+            queryset = queryset.filter(
+                Q(issued_by__nickname__icontains=issued_by_search)
+                | Q(issued_by__phone__icontains=issued_by_search)
+            )
+        if created_from := params.get("created_from"):
+            queryset = queryset.filter(created_at__date__gte=created_from)
+        if created_to := params.get("created_to"):
+            queryset = queryset.filter(created_at__date__lte=created_to)
+
+        queryset = queryset.select_related("owner", "issued_by", "template", "revoked_by")
+        page = params["page"]
+        page_size = params["page_size"]
+        total = queryset.count()
+        items = queryset.order_by("-created_at", "-id")[
+            (page - 1) * page_size : page * page_size
+        ]
+
+        user_search = params.get("user_search", "").strip()
+        if not user_search and "user_search" not in request.query_params:
+            # 兼容旧管理端使用 search 查询发券对象。
+            user_search = params.get("search", "").strip()
+        users = (
+            coupon_users.filter(
+                Q(nickname__icontains=user_search) | Q(phone__icontains=user_search)
+            ).order_by("-date_joined")[:20]
+            if user_search else []
+        )
         return Response({"data": {"users": [
             {"public_id": str(user.public_id), "nickname": user.nickname,
              "phone_masked": f"{user.phone[:3]}****{user.phone[-4:]}" if len(user.phone) == 11 else ""}
             for user in users
-        ], "items": [
-            {**coupon_payload(item), "user_public_id": str(item.owner.public_id),
-             "user_name": item.owner.nickname, "issued_by": item.issued_by.nickname if item.issued_by else None}
-            for item in items
-        ]}})
+        ], "items": [admin_coupon_payload(item) for item in items],
+            "pagination": {"page": page, "page_size": page_size, "total": total},
+        }})
 
     @transaction.atomic
     def post(self, request):
         access = resolve_admin_access(request.user)
-        access.require("support.case.manage")
+        access.require("coupon.issue")
         serializer = AdminCouponIssueSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         public_id = serializer.validated_data["user_public_id"]
+        template_public_id = serializer.validated_data.get("template_public_id")
+        template = None
+        if template_public_id:
+            template = get_object_or_404(
+                CouponTemplate.objects.select_for_update(),
+                public_id=template_public_id,
+                is_active=True,
+            )
         scoped_owner = get_object_or_404(self.scoped_coupon_users(access), public_id=public_id)
         owner = User.objects.select_for_update().get(pk=scoped_owner.pk)
         if owner.account_status != User.AccountStatus.ACTIVE:
             raise ValidationError({"user_public_id": "仅可向正常状态的用户发放优惠券。"})
-        coupon = issue_coupon(owner=owner, source="customer_service", issued_by=request.user)
+        coupon = issue_coupon(
+            owner=owner, source="manual", issued_by=request.user, template=template,
+        )
         AdminAuditLog.objects.create(
             actor=request.user,
             organization=access.member.organization if access.member else None,
@@ -2735,7 +2894,60 @@ class AdminCouponListIssueView(APIView):
                               "min_order_amount": coupon.min_order_amount},
             ip_address=client_ip(request),
         )
-        return Response({"data": coupon_payload(coupon)}, status=201)
+        coupon = UserCoupon.objects.select_related(
+            "owner", "issued_by", "template", "revoked_by"
+        ).get(pk=coupon.pk)
+        return Response({"data": admin_coupon_payload(coupon)}, status=201)
+
+
+class AdminCouponRevokeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, coupon_id):
+        access = resolve_admin_access(request.user)
+        access.require("coupon.issue")
+        serializer = AdminCouponRevokeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        coupon = get_object_or_404(
+            UserCoupon.objects.select_for_update(of=("self",)).select_related(
+                "owner", "issued_by", "template", "revoked_by",
+            ),
+            public_id=coupon_id,
+            owner__in=AdminCouponListIssueView.scoped_coupon_users(access),
+        )
+        if coupon.status != UserCoupon.Status.AVAILABLE or coupon.expires_at <= timezone.now():
+            raise ValidationError({"detail": "只有尚未使用且未过期的优惠券可以撤销。"})
+        before = admin_coupon_payload(coupon)
+        coupon.status = UserCoupon.Status.REVOKED
+        coupon.revoked_at = timezone.now()
+        coupon.revoked_by = request.user
+        coupon.revoke_reason = serializer.validated_data["reason"]
+        coupon.save(update_fields=("status", "revoked_at", "revoked_by", "revoke_reason"))
+
+        from notifications.models import UserNotification
+        from notifications.services import create_notification
+
+        create_notification(
+            recipient=coupon.owner,
+            category=UserNotification.Category.SYSTEM,
+            event_type=UserNotification.EventType.COUPON_REVOKED,
+            title="优惠券已撤销",
+            content=f"{coupon.template.name if coupon.template else '优惠券'}已被平台撤销。原因：{coupon.revoke_reason}",
+            target_type="coupon", target_id=str(coupon.public_id),
+            target_title="我的优惠券", action_text="查看优惠券",
+            action_url="/pages/coupons/index",
+            dedupe_key=f"coupon:revoked:{coupon.public_id}",
+        )
+        after = admin_coupon_payload(coupon)
+        AdminAuditLog.objects.create(
+            actor=request.user,
+            organization=access.member.organization if access.member else None,
+            action="coupon.revoke", target_type="coupon",
+            target_id=str(coupon.public_id), before=before, after=after,
+            ip_address=client_ip(request),
+        )
+        return Response({"data": after})
 
 
 class ProviderCommissionOverrideView(APIView):

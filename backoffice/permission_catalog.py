@@ -72,6 +72,25 @@ PERMISSION_GROUPS = (
         ),
     },
     {
+        "key": "marketing",
+        "label": "营销管理",
+        "permissions": (
+            ("coupon.view", "查看优惠券及发放记录"),
+            ("coupon.manage", "管理优惠券模板"),
+            ("coupon.issue", "向用户发放优惠券"),
+            ("growth.view", "查看拉新活动配置与邀请记录"),
+            ("growth.manage", "管理新人礼包与邀请规则"),
+        ),
+    },
+    {
+        "key": "finance",
+        "label": "财务管理",
+        "permissions": (
+            ("wallet.view", "查看用户钱包与充值记录"),
+            ("wallet.manage", "管理充值折扣配置"),
+        ),
+    },
+    {
         "key": "system",
         "label": "系统管理",
         "permissions": (

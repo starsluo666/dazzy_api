@@ -57,7 +57,7 @@ class AuthenticationApiTests(APITestCase):
         self.assertEqual(overview.data["data"]["order_count"], 0)
         self.assertEqual(overview.data["data"]["pending_review_count"], 0)
         self.assertEqual(overview.data["data"]["customer_service_phone"], "")
-        self.assertIsNone(overview.data["data"]["balance_amount"])
+        self.assertEqual(overview.data["data"]["balance_amount"], 0)
 
     def test_password_and_sms_login(self):
         User.objects.create_user(phone=self.phone, password=self.password)

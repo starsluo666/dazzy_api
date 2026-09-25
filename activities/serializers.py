@@ -48,26 +48,74 @@ class ActivityCategorySerializer(serializers.ModelSerializer):
 
 class ActivityPublishOrderSerializer(serializers.ModelSerializer):
     activity_id = serializers.IntegerField(read_only=True)
+    wallet_amount = serializers.SerializerMethodField()
+    external_amount = serializers.SerializerMethodField()
+
+    def _breakdown(self, obj):
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        cache = getattr(self, "_breakdown_cache", {})
+        if obj.order_no not in cache:
+            cache[obj.order_no] = preview_wallet_payment(
+                user_id=obj.payer_id,
+                payable_amount=obj.payable_amount,
+                business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PUBLISH,
+                business_order_no=obj.order_no,
+                external_only=obj.status != obj.Status.PENDING_PAYMENT or hasattr(obj, "huifu_payment"),
+            )
+            self._breakdown_cache = cache
+        return cache[obj.order_no]
+
+    def get_wallet_amount(self, obj):
+        return self._breakdown(obj).wallet_amount
+
+    def get_external_amount(self, obj):
+        return self._breakdown(obj).external_amount
 
     class Meta:
         model = ActivityPublishOrder
         fields = (
             "order_no", "activity_id", "aa_principal_amount",
             "platform_service_fee_amount", "payable_amount", "status", "expires_at",
-            "paid_at", "closed_at",
+            "paid_at", "closed_at", "wallet_amount", "external_amount",
         )
 
 
 class ActivityParticipationPaymentOrderSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     channel_label = serializers.CharField(source="get_channel_display")
+    wallet_amount = serializers.SerializerMethodField()
+    external_amount = serializers.SerializerMethodField()
+
+    def _breakdown(self, obj):
+        from wallets.models import WalletPaymentAllocation
+        from wallets.services import preview_wallet_payment
+
+        cache = getattr(self, "_breakdown_cache", {})
+        if obj.order_no not in cache:
+            cache[obj.order_no] = preview_wallet_payment(
+                user_id=obj.payer_id,
+                payable_amount=obj.payable_amount,
+                business_type=WalletPaymentAllocation.BusinessType.ACTIVITY_PARTICIPATION,
+                business_order_no=obj.order_no,
+                external_only=obj.status != obj.Status.PENDING_PAYMENT or hasattr(obj, "huifu_payment"),
+            )
+            self._breakdown_cache = cache
+        return cache[obj.order_no]
+
+    def get_wallet_amount(self, obj):
+        return self._breakdown(obj).wallet_amount
+
+    def get_external_amount(self, obj):
+        return self._breakdown(obj).external_amount
 
     class Meta:
         model = ActivityParticipationPaymentOrder
         fields = (
             "order_no", "aa_principal_amount", "platform_service_fee_amount",
             "payable_amount", "channel", "channel_label", "status", "status_label",
-            "expires_at", "paid_at", "closed_at",
+            "expires_at", "paid_at", "closed_at", "wallet_amount", "external_amount",
         )
 
 
@@ -83,6 +131,7 @@ class ActivityParticipationRefundOrderSerializer(serializers.ModelSerializer):
         fields = (
             "refund_no", "refund_type", "refund_type_label", "status", "status_label",
             "principal_refund_amount", "service_fee_refund_amount", "refund_amount",
+            "wallet_refund_amount", "external_refund_amount",
             "retained_principal_amount", "retained_service_fee_amount",
             "retained_principal_destination", "retained_principal_destination_label",
             "reason", "failure_reason", "requested_at", "refunded_at",
