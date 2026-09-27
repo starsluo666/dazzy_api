@@ -162,6 +162,13 @@ class ActivityModelTests(TestCase):
         self.assertEqual(call["amount"], order.payable_amount)
         self.assertEqual(call["attach"], f"activity-participation:{order.order_no}")
         self.assertEqual(call["sub_openid"], "participant-openid")
+        with self.assertRaisesMessage(DRFValidationError, "当前微信与首次发起支付的微信不同"):
+            create_activity_huifu_payment_session(
+                payment_kind="activity_participation", activity_id=activity.pk,
+                user_id=participant.pk, payment_scene="official_account",
+                sub_openid="another-wechat",
+            )
+        gateway.return_value.create_payment.assert_called_once()
 
     @override_settings(DEBUG=True)
     @patch("config.payment_capabilities.ensure_activity_real_payment_available")

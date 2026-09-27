@@ -73,6 +73,7 @@ from .wechat_oauth import (
     build_payment_authorization,
     complete_payment_authorization,
     get_official_account_openid,
+    payment_session_key,
 )
 
 
@@ -360,6 +361,7 @@ class ProviderOrderPaymentSessionView(ProviderOrderDetailView):
                 sub_openid = get_official_account_openid(
                     user_id=request.user.pk,
                     app_id=app_id,
+                    session_key=payment_session_key(request), order_no=order_no, consume=True,
                 )
                 if not sub_openid:
                     raise ValidationError(
@@ -436,6 +438,7 @@ class ProviderOrderPaymentAuthorizationView(ProviderOrderDetailView):
         authorization = build_payment_authorization(
             user_id=request.user.pk,
             order_no=order.order_no,
+            session_key=payment_session_key(request), auth_version=request.user.auth_version,
         )
         return Response(
             {

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
+from rest_framework.exceptions import APIException
 from rest_framework.exceptions import ValidationError
 from rest_framework.throttling import BaseThrottle
 
@@ -14,7 +15,15 @@ SMS_PURPOSES = {
     "reset_password",
     "change_phone_current",
     "change_phone_new",
+    "wechat_bind",
+    "initial_password",
 }
+
+
+class SmsDeliveryUnavailable(APIException):
+    status_code = 503
+    default_detail = "短信服务尚未开通，请稍后重试。"
+    default_code = "sms_delivery_unavailable"
 
 
 def _code_key(phone: str, purpose: str) -> str:
@@ -67,6 +76,10 @@ def _increment_counter(key: str, timeout: int) -> int:
 def send_sms_code(*, phone: str, purpose: str) -> SmsCodeResult:
     if purpose not in SMS_PURPOSES:
         raise ValidationError({"purpose": "不支持的验证码用途。"})
+    # Never report success when production has no SMS gateway. A provider must
+    # be wired here before enabling phone-based registration or Wechat binding.
+    if not settings.DEBUG:
+        raise SmsDeliveryUnavailable()
     if cache.get(_cooldown_key(phone)):
         raise ValidationError({"phone": "验证码发送过于频繁，请稍后再试。"})
 
@@ -81,7 +94,7 @@ def send_sms_code(*, phone: str, purpose: str) -> SmsCodeResult:
     cache.delete(_code_attempt_key(phone, purpose))
     cache.set(_cooldown_key(phone), True, settings.SMS_CODE_RESEND_SECONDS)
 
-    # TODO: 非 DEBUG 环境在此调用短信供应商；验证码绝不能写入日志或响应。
+    # Development-only code. Production must use a real SMS provider.
     return SmsCodeResult(
         expires_in=settings.SMS_CODE_TTL_SECONDS,
         retry_after=settings.SMS_CODE_RESEND_SECONDS,

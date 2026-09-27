@@ -18,6 +18,7 @@ from orders.wechat_oauth import (
     WechatOAuthConfigurationError,
     build_payment_authorization,
     get_official_account_openid,
+    payment_session_key,
 )
 from mediafiles.services import build_media_url
 
@@ -404,6 +405,7 @@ class ActivityParticipationPaymentAuthorizationView(APIView):
             user_id=request.user.pk,
             order_no=str(pk),
             payment_kind="activity_participation",
+            session_key=payment_session_key(request), auth_version=request.user.auth_version,
         )
         return Response({"data": {
             **authorization,
@@ -442,6 +444,8 @@ class ActivityParticipationPaymentSessionView(APIView):
             sub_openid = get_official_account_openid(
                 user_id=request.user.pk,
                 app_id=app_id,
+                session_key=payment_session_key(request), order_no=str(pk),
+                payment_kind="activity_participation", consume=True,
             )
         result, created = create_activity_huifu_payment_session(
             payment_kind="activity_participation",
@@ -582,6 +586,7 @@ class ActivityPublishPaymentAuthorizationView(APIView):
             user_id=request.user.pk,
             order_no=str(pk),
             payment_kind="activity_publish",
+            session_key=payment_session_key(request), auth_version=request.user.auth_version,
         )
         return Response({"data": {
             **authorization,
@@ -620,6 +625,8 @@ class ActivityPublishPaymentSessionView(APIView):
             sub_openid = get_official_account_openid(
                 user_id=request.user.pk,
                 app_id=app_id,
+                session_key=payment_session_key(request), order_no=str(pk),
+                payment_kind="activity_publish", consume=True,
             )
         result, created = create_activity_huifu_payment_session(
             payment_kind="activity_publish",

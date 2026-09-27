@@ -214,6 +214,15 @@ WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL = os.getenv(
     "WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL", ""
 )
 WECHAT_MOBILE_APP_ID = os.getenv("WECHAT_MOBILE_APP_ID", "")
+WECHAT_MOBILE_APP_SECRET = os.getenv("WECHAT_MOBILE_APP_SECRET", "")
+WECHAT_H5_LOGIN_CALLBACK_URL = os.getenv("WECHAT_H5_LOGIN_CALLBACK_URL", "")
+WECHAT_H5_LOGIN_RETURN_URL = os.getenv("WECHAT_H5_LOGIN_RETURN_URL", "")
+WECHAT_LOGIN_TICKET_TTL_SECONDS = int(os.getenv("WECHAT_LOGIN_TICKET_TTL_SECONDS", "300"))
+# Enable only after the official account and mobile app are bound to the same
+# WeChat Open Platform account, so UnionID has the same namespace.
+WECHAT_CROSS_CHANNEL_UNIONID_ENABLED = os.getenv(
+    "WECHAT_CROSS_CHANNEL_UNIONID_ENABLED", "false"
+).lower() in {"1", "true", "yes"}
 WECHAT_CUSTOMER_MINI_PROGRAM_APP_ID = os.getenv(
     "WECHAT_CUSTOMER_MINI_PROGRAM_APP_ID", ""
 )

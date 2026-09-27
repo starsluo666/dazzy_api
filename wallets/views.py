@@ -9,6 +9,7 @@ from orders.wechat_oauth import (
     WechatOAuthConfigurationError,
     build_payment_authorization,
     get_official_account_openid,
+    payment_session_key,
 )
 
 from .models import RechargeCampaign, WalletRechargeOrder
@@ -112,6 +113,7 @@ class RechargeOrderAuthorizationView(APIView):
                     user_id=request.user.pk,
                     order_no=order.order_no,
                     payment_kind="wallet_recharge",
+                    session_key=payment_session_key(request), auth_version=request.user.auth_version,
                 )
             }
         )
@@ -129,7 +131,10 @@ class RechargeOrderPaymentSessionView(APIView):
             app_id = settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()
             if not app_id:
                 raise WechatOAuthConfigurationError()
-            sub_openid = get_official_account_openid(user_id=request.user.pk, app_id=app_id)
+            sub_openid = get_official_account_openid(
+                user_id=request.user.pk, app_id=app_id, session_key=payment_session_key(request),
+                order_no=order_no, payment_kind="wallet_recharge", consume=True,
+            )
             if not sub_openid:
                 raise ValidationError({"authorization": "请先在微信服务号内完成网页授权。"})
         order, created = create_recharge_huifu_payment_session(

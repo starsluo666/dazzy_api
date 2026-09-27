@@ -1,7 +1,11 @@
+import secrets
+
 from django.db import transaction
+from django.http import HttpResponseRedirect
 from django.db.models import Count
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -18,6 +22,7 @@ from .serializers import (
     ChangePhoneCodeSerializer,
     ChangePhoneSerializer,
     ChangePasswordSerializer,
+    InitialPasswordSerializer,
     CloseAccountSerializer,
     LogoutSerializer,
     LogoutOtherSessionsSerializer,
@@ -27,14 +32,28 @@ from .serializers import (
     SmsCodeRequestSerializer,
     SmsLoginSerializer,
     UserSerializer,
+    WechatLoginBindSerializer,
+    WechatLoginBindSmsSerializer,
+    WechatLoginCodeSerializer,
+    WechatLoginTicketSerializer,
     WechatMiniProgramLoginSerializer,
 )
 from .services import send_sms_code
+from .wechat_login import (
+    begin_h5_login,
+    begin_mobile_login,
+    bind_phone,
+    complete_h5_callback,
+    load_ticket,
+    resolve_login,
+)
 
 
 def auth_payload(user) -> dict:
     refresh = RefreshToken.for_user(user)
     refresh["auth_version"] = user.auth_version
+    # Stable across access-token refreshes, unique to each login/device.
+    refresh["session_id"] = secrets.token_urlsafe(24)
     return {
         "access": str(refresh.access_token),
         "refresh": str(refresh),
@@ -120,6 +139,83 @@ class WechatMiniProgramLoginView(APIView):
         return Response({"data": auth_payload(user)})
 
 
+class WechatH5LoginStartView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_wechat_login"
+
+    def get(self, request):
+        authorize_url, state = begin_h5_login()
+        return Response({"data": {"authorize_url": authorize_url, "state": state}})
+
+
+class WechatH5LoginCallbackView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_wechat_login"
+
+    def get(self, request):
+        return HttpResponseRedirect(
+            complete_h5_callback(
+                code=request.query_params.get("code", ""),
+                state=request.query_params.get("state", ""),
+            )
+        )
+
+
+class WechatMobileLoginView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_wechat_login"
+
+    def post(self, request):
+        serializer = WechatLoginCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": {"ticket": begin_mobile_login(serializer.validated_data["code"])}})
+
+
+class WechatLoginResolveView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_wechat_login"
+
+    def post(self, request):
+        serializer = WechatLoginTicketSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = resolve_login(serializer.validated_data["ticket"])
+        if user is None:
+            return Response({"data": {"status": "bind_required"}})
+        return Response({"data": {"status": "authenticated", "session": auth_payload(user)}})
+
+
+class WechatLoginBindSmsView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle, SmsSendIpDailyThrottle]
+    throttle_scope = "auth_sms_send"
+
+    def post(self, request):
+        serializer = WechatLoginBindSmsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        load_ticket(serializer.validated_data["ticket"])
+        result = send_sms_code(phone=serializer.validated_data["phone"], purpose="wechat_bind")
+        data = {"expires_in": result.expires_in, "retry_after": result.retry_after}
+        if result.debug_code:
+            data["debug_code"] = result.debug_code
+        return Response({"data": data})
+
+
+class WechatLoginBindView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_wechat_login"
+
+    def post(self, request):
+        serializer = WechatLoginBindSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user, created = bind_phone(**serializer.validated_data)
+        return Response({"data": {"created": created, "session": auth_payload(user)}})
+
+
 class ResetPasswordView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -151,6 +247,34 @@ class AccountSecurityView(APIView):
                 }
             }
         )
+
+
+class InitialPasswordCodeView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle, SmsSendIpDailyThrottle]
+    throttle_scope = "auth_sms_send"
+
+    def post(self, request):
+        if request.user.has_usable_password():
+            raise ValidationError("已设置登录密码，请使用修改密码功能。")
+        # Destination is derived from the authenticated account, not request data.
+        result = send_sms_code(phone=request.user.phone, purpose="initial_password")
+        data = {"expires_in": result.expires_in, "retry_after": result.retry_after}
+        if result.debug_code:
+            data["debug_code"] = result.debug_code
+        return Response({"data": data})
+
+
+class InitialPasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = InitialPasswordSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": auth_payload(serializer.save())})
 
 
 class ChangePasswordView(APIView):

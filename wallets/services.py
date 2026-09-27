@@ -407,6 +407,7 @@ def recharge_order_payload(order: WalletRechargeOrder) -> dict:
 def create_recharge_huifu_payment_session(
     *, order_no: str, user_id: int, payment_scene: str, sub_openid: str = ""
 ):
+    from orders.wechat_oauth import validate_wechat_payment_payer
     try:
         trade_type = PAYMENT_SCENE_TRADE_TYPES[payment_scene]
     except KeyError as exc:
@@ -428,6 +429,7 @@ def create_recharge_huifu_payment_session(
             # An expired local deadline does not prove the gateway is closed.
             # Keep it reconcilable in case a successful payment arrives late.
             raise ValidationError({"status": "充值单已过期，请重新创建。"})
+        validate_wechat_payment_payer(order, trade_type=trade_type, sub_openid=sub_openid)
         if (
             order.preorder_status == WalletRechargeOrder.PreorderStatus.READY
             and order.payment_scene == payment_scene

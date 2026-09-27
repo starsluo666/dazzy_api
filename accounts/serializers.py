@@ -190,6 +190,23 @@ class SmsLoginSerializer(serializers.Serializer):
         return attrs
 
 
+class WechatLoginCodeSerializer(serializers.Serializer):
+    code = serializers.CharField(min_length=1, max_length=256, trim_whitespace=True)
+
+
+class WechatLoginTicketSerializer(serializers.Serializer):
+    ticket = serializers.CharField(min_length=1, max_length=256, trim_whitespace=True)
+
+
+class WechatLoginBindSmsSerializer(WechatLoginTicketSerializer):
+    phone = serializers.CharField(validators=[validate_phone])
+
+
+class WechatLoginBindSerializer(WechatLoginBindSmsSerializer):
+    code = serializers.CharField(min_length=6, max_length=6)
+    invite_code = serializers.UUIDField(required=False, allow_null=True)
+
+
 class WechatMiniProgramLoginSerializer(serializers.Serializer):
     client_type = serializers.ChoiceField(choices=("customer", "provider"))
     login_code = serializers.CharField(min_length=1, max_length=256, trim_whitespace=True)
@@ -410,6 +427,27 @@ class ChangePhoneSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"new_phone": "该手机号已绑定其他账号。"}
             ) from exc
+        return invalidate_user_sessions(user)
+
+
+class InitialPasswordSerializer(serializers.Serializer):
+    code = serializers.RegexField(r"^\d{6}$", write_only=True)
+    new_password = serializers.CharField(write_only=True, validators=[validate_password])
+
+    @transaction.atomic
+    def save(self, **kwargs):
+        # Serialize with password/phone changes; never allow this endpoint to
+        # overwrite a password that another request has just configured.
+        user = User.objects.select_for_update().get(pk=self.context["request"].user.pk)
+        if user.auth_version != self.context["request"].user.auth_version:
+            raise serializers.ValidationError("登录状态已变更，请重新登录。")
+        if user.has_usable_password():
+            raise serializers.ValidationError("已设置登录密码，请使用修改密码功能。")
+        verify_sms_code(
+            phone=user.phone, purpose="initial_password", code=self.validated_data["code"],
+        )
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=("password",))
         return invalidate_user_sessions(user)
 
 

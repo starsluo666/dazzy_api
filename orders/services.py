@@ -109,6 +109,7 @@ def create_provider_order_huifu_payment_session(
     sub_openid: str = "",
 ):
     """Create or replay one idempotent Huifu aggregate payment session."""
+    from .wechat_oauth import validate_wechat_payment_payer
 
     try:
         trade_type = PAYMENT_SCENE_TRADE_TYPES[payment_scene]
@@ -147,6 +148,7 @@ def create_provider_order_huifu_payment_session(
             gateway.validate_for_payment(trade_type=trade_type)
             if trade_type == "T_JSAPI" and not sub_openid:
                 raise ValidationError({"authorization": "请先完成微信服务号网页授权。"})
+            validate_wechat_payment_payer(payment, trade_type=trade_type, sub_openid=sub_openid)
         if (
             not wallet_only
             and payment.preorder_status
@@ -210,6 +212,7 @@ def create_provider_order_huifu_payment_session(
                     "preorder_attempts",
                     "gateway_response_code",
                     "payment_invoke_payload",
+                    "wechat_payer_digest",
                     "updated_at",
                 )
             )

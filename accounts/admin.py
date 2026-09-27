@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import User, WechatMiniProgramIdentity, WechatOfficialAccountIdentity
+from .models import User, WechatLoginIdentity, WechatMiniProgramIdentity, WechatOfficialAccountIdentity
 
 
 @admin.register(User)
@@ -59,3 +59,13 @@ class WechatOfficialAccountIdentityAdmin(admin.ModelAdmin):
 @admin.register(WechatMiniProgramIdentity)
 class WechatMiniProgramIdentityAdmin(WechatOfficialAccountIdentityAdmin):
     pass
+
+
+@admin.register(WechatLoginIdentity)
+class WechatLoginIdentityAdmin(WechatOfficialAccountIdentityAdmin):
+    list_display = ("user", "channel", "app_id", "masked_openid", "authorized_at", "updated_at")
+    fields = (
+        "user", "channel", "app_id", "masked_openid", "masked_unionid",
+        "authorized_at", "created_at", "updated_at",
+    )
+    readonly_fields = fields

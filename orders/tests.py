@@ -2,6 +2,7 @@ import json
 import uuid
 from datetime import time, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -45,6 +46,10 @@ from .coupons import eligible_coupon, issue_coupon
 from .commission import commission_snapshot, validate_commission_tiers
 from .services import _complete_provider_order_refund, auto_review_provider_order
 from .payment_gateway import PaymentResult
+from .wechat_oauth import (
+    build_payment_authorization, complete_payment_authorization,
+    get_official_account_openid, payment_session_key,
+)
 
 
 @override_settings(DEBUG=True)
@@ -118,6 +123,23 @@ class ProviderOrderApiTests(TestCase):
         )
         self.route_patcher.start()
         self.addCleanup(self.route_patcher.stop)
+
+    @override_settings(
+        WECHAT_OFFICIAL_ACCOUNT_APP_SECRET="test-secret",
+        WECHAT_OFFICIAL_ACCOUNT_OAUTH_CALLBACK_URL="https://api.example.test/callback/",
+        WECHAT_OFFICIAL_ACCOUNT_H5_PAYMENT_URL="https://app.example.test/#/pages/booking/payment",
+    )
+    def authorize_wechat_payment(self, order_no, openid="customer-openid"):
+        session_key = payment_session_key(SimpleNamespace(auth=None, session=self.client.session))
+        result = build_payment_authorization(
+            user_id=self.customer.pk, order_no=order_no, session_key=session_key,
+            auth_version=self.customer.auth_version,
+        )
+        if result["authorized"]:
+            return
+        state = parse_qs(urlsplit(result["authorize_url"]).query)["state"][0]
+        with patch("orders.wechat_oauth._exchange_code", return_value=(openid, "")):
+            complete_payment_authorization(code="test-code", state=state)
 
     def payload(self):
         starts_at = (timezone.localtime() + timedelta(days=1)).replace(
@@ -416,11 +438,13 @@ class ProviderOrderApiTests(TestCase):
         )
 
         payload = {"payment_scene": "official_account"}
+        self.authorize_wechat_payment(order_no)
         first = self.client.post(
             f"/api/v1/provider-orders/{order_no}/payment-session/",
             payload,
             content_type="application/json",
         )
+        self.authorize_wechat_payment(order_no)
         second = self.client.post(
             f"/api/v1/provider-orders/{order_no}/payment-session/",
             payload,
@@ -451,6 +475,14 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(payment.gateway_trade_no, "HF-GLOBAL-001")
         self.assertEqual(payment.payment_scene, "official_account")
         self.assertEqual(payment.preorder_attempts, 1)
+        self.authorize_wechat_payment(order_no, openid="different-wechat")
+        wrong_payer = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/",
+            payload, content_type="application/json",
+        )
+        self.assertEqual(wrong_payer.status_code, 400)
+        self.assertIn("当前微信与首次发起支付的微信不同", wrong_payer.json()["authorization"])
+        gateway.return_value.create_payment.assert_called_once()
 
     def test_huifu_payment_session_rejects_client_amount(self):
         created = self.client.post(
@@ -478,7 +510,7 @@ class ProviderOrderApiTests(TestCase):
         ),
     )
     @patch("orders.views.ensure_provider_order_payment_scene_available")
-    def test_wechat_payment_authorization_binds_openid_and_returns_to_order(
+    def test_wechat_payment_authorization_grants_current_session_and_returns_to_order(
         self, _ensure_payment_scene_available
     ):
         created = self.client.post(
@@ -499,6 +531,7 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(authorize_query["appid"], ["wx-official-app-id"])
         self.assertEqual(authorize_query["scope"], ["snsapi_base"])
 
+        session_key = payment_session_key(SimpleNamespace(auth=None, session=self.client.session))
         self.client.logout()
         with patch(
             "orders.wechat_oauth._exchange_code",
@@ -517,10 +550,11 @@ class ProviderOrderApiTests(TestCase):
                 f"?orderNo={order_no}&wechatAuthorized=1"
             ),
         )
-        identity = WechatOfficialAccountIdentity.objects.get(user=self.customer)
-        self.assertEqual(identity.app_id, "wx-official-app-id")
-        self.assertEqual(identity.openid, "customer-openid")
-        self.assertEqual(identity.unionid, "customer-unionid")
+        self.assertFalse(WechatOfficialAccountIdentity.objects.filter(user=self.customer).exists())
+        self.assertEqual(get_official_account_openid(
+            user_id=self.customer.pk, app_id="wx-official-app-id",
+            session_key=session_key, order_no=order_no,
+        ), "customer-openid")
 
     @override_settings(
         WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id",
@@ -564,6 +598,7 @@ class ProviderOrderApiTests(TestCase):
             authorized_at=timezone.now(),
         )
 
+        self.authorize_wechat_payment(order_no)
         response = self.client.post(
             f"/api/v1/provider-orders/{order_no}/payment-session/",
             {"payment_scene": "official_account"},
@@ -602,6 +637,7 @@ class ProviderOrderApiTests(TestCase):
         )
 
         payload = {"payment_scene": "official_account"}
+        self.authorize_wechat_payment(order_no)
         failed = self.client.post(
             f"/api/v1/provider-orders/{order_no}/payment-session/",
             payload,
@@ -629,6 +665,7 @@ class ProviderOrderApiTests(TestCase):
             response_digest="c" * 64,
         )
 
+        self.authorize_wechat_payment(order_no)
         retried = self.client.post(
             f"/api/v1/provider-orders/{order_no}/payment-session/",
             payload,

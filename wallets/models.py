@@ -206,6 +206,7 @@ class WalletRechargeOrder(models.Model):
     gateway_party_order_id = models.CharField("渠道商户订单号", max_length=64, blank=True)
     gateway_out_trans_id = models.CharField("渠道交易订单号", max_length=64, blank=True)
     payment_invoke_payload = models.JSONField("客户端调起参数", default=dict, blank=True)
+    wechat_payer_digest = models.CharField("付款微信摘要", max_length=64, blank=True)
     gateway_response_code = models.CharField("汇付响应码", max_length=32, blank=True)
     gateway_response_digest = models.CharField("汇付响应摘要", max_length=64, blank=True)
     gateway_last_query_status = models.CharField("最近查单状态", max_length=8, blank=True)

@@ -159,6 +159,7 @@ def create_activity_huifu_payment_session(
     sub_openid: str,
 ):
     from config.payment_capabilities import ensure_activity_real_payment_available
+    from orders.wechat_oauth import validate_wechat_payment_payer
     from wallets.models import WalletPaymentAllocation
     from wallets.services import prepare_wallet_payment, preview_wallet_payment
 
@@ -223,6 +224,8 @@ def create_activity_huifu_payment_session(
         )
         if payment is None and not wallet_only:
             payment = _create_gateway_payment(order, payment_kind=payment_kind)
+        if not wallet_only:
+            validate_wechat_payment_payer(payment, trade_type=trade_type, sub_openid=sub_openid)
         if (
             not wallet_only
             and payment is not None

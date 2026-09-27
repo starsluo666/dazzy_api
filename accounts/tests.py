@@ -1,13 +1,57 @@
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
+from rest_framework.exceptions import APIException
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
-from .models import User, WechatMiniProgramIdentity
+from .models import User, WechatLoginIdentity, WechatMiniProgramIdentity, WechatOfficialAccountIdentity
 from .services import send_sms_code, verify_sms_code
+from .wechat_login import begin_h5_login, complete_h5_callback
+
+
+@override_settings(
+    WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-test",
+    WECHAT_OFFICIAL_ACCOUNT_APP_SECRET="test-official-secret",
+    WECHAT_H5_LOGIN_CALLBACK_URL="https://api.example.test/api/v1/auth/login/wechat/h5/callback/",
+    WECHAT_H5_LOGIN_RETURN_URL="https://app.example.test/#/pages/auth/login",
+)
+class WechatLoginFlowUnitTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_h5_state_is_one_use_and_return_is_fixed(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        authorize_url, state = begin_h5_login()
+        self.assertEqual(parse_qs(urlsplit(authorize_url).query)["state"], [state])
+        response = MagicMock()
+        response.read.return_value = b'{"openid":"official-user","unionid":""}'
+        context = MagicMock()
+        context.__enter__.return_value = response
+        with patch("accounts.wechat_login.urlopen", return_value=context):
+            return_url = complete_h5_callback(code="oauth-code", state=state)
+        self.assertTrue(return_url.startswith("https://app.example.test/#/pages/auth/login?"))
+        returned = parse_qs(urlsplit(return_url).fragment.split("?", 1)[1])
+        self.assertEqual(returned["wechatState"], [state])
+        self.assertTrue(returned["wechatTicket"][0])
+        with self.assertRaises(ValidationError):
+            complete_h5_callback(code="oauth-code", state=state)
+
+    def test_h5_cancel_returns_to_login(self):
+        _url, state = begin_h5_login()
+        self.assertIn("wechatError=cancelled", complete_h5_callback(code="", state=state))
+
+
+class SmsDeliverySafetyTests(SimpleTestCase):
+    @override_settings(DEBUG=False)
+    def test_production_does_not_pretend_to_send_sms_without_gateway(self):
+        with self.assertRaises(APIException) as result:
+            send_sms_code(phone="13800000001", purpose="wechat_bind")
+        self.assertEqual(result.exception.status_code, 503)
 
 
 class UserModelTests(TestCase):
@@ -16,6 +60,156 @@ class UserModelTests(TestCase):
         self.assertEqual(user.phone, "13800000000")
         self.assertTrue(user.check_password("test-password"))
         self.assertEqual(user.verification_status, User.VerificationStatus.UNVERIFIED)
+
+
+@override_settings(
+    DEBUG=True,
+    SMS_DEVELOPMENT_CODE="123456",
+    WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-test",
+    WECHAT_OFFICIAL_ACCOUNT_APP_SECRET="test-official-secret",
+    WECHAT_MOBILE_APP_ID="wx-mobile-test",
+    WECHAT_MOBILE_APP_SECRET="test-mobile-secret",
+    WECHAT_H5_LOGIN_CALLBACK_URL="https://api.example.test/api/v1/auth/login/wechat/h5/callback/",
+    WECHAT_H5_LOGIN_RETURN_URL="https://app.example.test/#/pages/auth/login",
+    WECHAT_CROSS_CHANNEL_UNIONID_ENABLED=True,
+)
+class WechatWebAndMobileLoginTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+
+    def mock_exchange(self, *, openid="wx-openid", unionid="wx-unionid"):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"openid": openid, "unionid": unionid}).encode()
+        context = MagicMock()
+        context.__enter__.return_value = response
+        return patch("accounts.wechat_login.urlopen", return_value=context)
+
+    def mobile_ticket(self, *, openid="wx-openid", unionid="wx-unionid"):
+        with self.mock_exchange(openid=openid, unionid=unionid):
+            response = self.client.post(
+                "/api/v1/auth/login/wechat/mobile/", {"code": "one-use-code"}, format="json"
+            )
+        self.assertEqual(response.status_code, 200)
+        return response.data["data"]["ticket"]
+
+    def test_mobile_first_login_binds_existing_phone_and_replay_fails(self):
+        user = User.objects.create_user(phone="13800000081", password="existing-password")
+        ticket = self.mobile_ticket()
+        unresolved = self.client.post(
+            "/api/v1/auth/login/wechat/resolve/", {"ticket": ticket}, format="json"
+        )
+        self.assertEqual(unresolved.data["data"]["status"], "bind_required")
+        sent = self.client.post(
+            "/api/v1/auth/login/wechat/bind/sms/",
+            {"ticket": ticket, "phone": user.phone},
+            format="json",
+        )
+        self.assertEqual(sent.status_code, 200)
+        bound = self.client.post(
+            "/api/v1/auth/login/wechat/bind/",
+            {"ticket": ticket, "phone": user.phone, "code": "123456"},
+            format="json",
+        )
+        self.assertEqual(bound.status_code, 200)
+        self.assertFalse(bound.data["data"]["created"])
+        self.assertEqual(bound.data["data"]["session"]["user"]["phone"], user.phone)
+        self.assertEqual(WechatLoginIdentity.objects.get(openid="wx-openid").user_id, user.pk)
+        self.assertEqual(
+            self.client.post("/api/v1/auth/login/wechat/resolve/", {"ticket": ticket}, format="json").status_code,
+            400,
+        )
+        another_ticket = self.mobile_ticket()
+        logged_in = self.client.post(
+            "/api/v1/auth/login/wechat/resolve/", {"ticket": another_ticket}, format="json"
+        )
+        self.assertEqual(logged_in.data["data"]["status"], "authenticated")
+        self.assertEqual(logged_in.data["data"]["session"]["user"]["phone"], user.phone)
+
+    def test_mobile_first_login_creates_account_only_after_verified_phone(self):
+        ticket = self.mobile_ticket(openid="fresh", unionid="")
+        self.assertEqual(User.objects.count(), 0)
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/auth/login/wechat/bind/",
+                {"ticket": ticket, "phone": "13800000082", "code": "123456"}, format="json",
+            ).status_code,
+            400,
+        )
+        self.client.post(
+            "/api/v1/auth/login/wechat/bind/sms/",
+            {"ticket": ticket, "phone": "13800000082"}, format="json",
+        )
+        response = self.client.post(
+            "/api/v1/auth/login/wechat/bind/",
+            {"ticket": ticket, "phone": "13800000082", "code": "123456"}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["data"]["created"])
+        self.assertFalse(User.objects.get(phone="13800000082").has_usable_password())
+
+    def test_h5_uses_separate_login_identity_and_matches_mobile_unionid(self):
+        user = User.objects.create_user(phone="13800000083", password="existing-password")
+        WechatLoginIdentity.objects.create(
+            user=user, channel="mobile_app", app_id="wx-mobile-test",
+            openid="app-openid", unionid="shared-unionid", authorized_at=timezone.now(),
+        )
+        WechatOfficialAccountIdentity.objects.create(
+            user=user, app_id="wx-official-test", openid="payment-openid",
+            authorized_at=timezone.now(),
+        )
+        start = self.client.get("/api/v1/auth/login/wechat/h5/start/")
+        self.assertEqual(start.status_code, 200)
+        from urllib.parse import parse_qs, urlsplit
+
+        state = parse_qs(urlsplit(start.data["data"]["authorize_url"]).query)["state"][0]
+        with self.mock_exchange(openid="h5-openid", unionid="shared-unionid"):
+            callback = self.client.get(
+                "/api/v1/auth/login/wechat/h5/callback/", {"code": "h5-code", "state": state}
+            )
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(
+            self.client.get(
+                "/api/v1/auth/login/wechat/h5/callback/", {"code": "h5-code", "state": state}
+            ).status_code,
+            400,
+        )
+        ticket = parse_qs(urlsplit(callback["Location"]).fragment.split("?", 1)[1])["wechatTicket"][0]
+        resolved = self.client.post(
+            "/api/v1/auth/login/wechat/resolve/", {"ticket": ticket}, format="json"
+        )
+        self.assertEqual(resolved.data["data"]["status"], "authenticated")
+        self.assertEqual(WechatLoginIdentity.objects.get(app_id="wx-official-test").user_id, user.pk)
+        self.assertEqual(
+            WechatOfficialAccountIdentity.objects.get(user=user).openid, "payment-openid"
+        )
+
+    def test_blocked_account_cannot_use_wechat_login(self):
+        user = User.objects.create_user(phone="13800000084", password="existing-password")
+        user.account_status = User.AccountStatus.SUSPENDED
+        user.save(update_fields=("account_status",))
+        WechatLoginIdentity.objects.create(
+            user=user, channel="mobile_app", app_id="wx-mobile-test",
+            openid="blocked-openid", authorized_at=timezone.now(),
+        )
+        ticket = self.mobile_ticket(openid="blocked-openid", unionid="")
+        response = self.client.post(
+            "/api/v1/auth/login/wechat/resolve/", {"ticket": ticket}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_h5_login_binding_does_not_supply_current_payment_openid(self):
+        from orders.wechat_oauth import get_official_account_openid
+
+        user = User.objects.create_user(phone="13800000085", password="existing-password")
+        WechatLoginIdentity.objects.create(
+            user=user, channel="official_account", app_id="wx-official-test",
+            openid="login-openid", authorized_at=timezone.now(),
+        )
+        self.assertEqual(
+            get_official_account_openid(user_id=user.pk, app_id="wx-official-test"),
+            "",
+        )
+        self.assertFalse(WechatOfficialAccountIdentity.objects.filter(user=user).exists())
 
 
 @override_settings(DEBUG=True, SMS_DEVELOPMENT_CODE="123456")

@@ -304,6 +304,7 @@ class ProviderOrderPaymentOrder(models.Model):
     payment_scene = models.CharField("支付场景", max_length=32, blank=True)
     trade_type = models.CharField("汇付交易类型", max_length=16, blank=True)
     payment_invoke_payload = models.JSONField("客户端调起参数", default=dict, blank=True)
+    wechat_payer_digest = models.CharField("付款微信摘要", max_length=64, blank=True)
     gateway_party_order_id = models.CharField("渠道商户订单号", max_length=64, blank=True)
     gateway_out_trans_id = models.CharField("渠道交易订单号", max_length=64, blank=True)
     gateway_response_code = models.CharField("汇付响应码", max_length=32, blank=True)

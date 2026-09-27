@@ -1,21 +1,23 @@
 import json
+import hashlib
+import secrets
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from django.conf import settings
-from django.core import signing
-from django.db import IntegrityError, transaction
+from django.core.cache import cache
 from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
 
-from accounts.models import User, WechatOfficialAccountIdentity
+from accounts.models import User
 
 from .models import ProviderOrder
 
 
-WECHAT_OAUTH_STATE_SALT = "dazzy.payments.wechat-official-oauth"
+WECHAT_PAYMENT_STATE_PREFIX = "wechat:payment:state:"
+WECHAT_PAYMENT_GRANT_PREFIX = "wechat:payment:grant:"
 WECHAT_OAUTH_AUTHORIZE_URL = "https://open.weixin.qq.com/connect/oauth2/authorize"
 WECHAT_OAUTH_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
 PAYMENT_RETURN_TARGETS = {
@@ -77,34 +79,116 @@ class WechatOAuthConfig:
             raise WechatOAuthConfigurationError("微信授权请求超时配置无效。")
 
 
-def get_official_account_openid(*, user_id: int, app_id: str) -> str:
-    return (
-        WechatOfficialAccountIdentity.objects.filter(user_id=user_id, app_id=app_id)
-        .values_list("openid", flat=True)
-        .first()
-        or ""
+def payment_session_key(request) -> str:
+    """Only a server-authenticated login session may reuse a payment grant."""
+    token = request.auth
+    session_id = (token.get("session_id") or token.get("jti")) if token is not None else None
+    if session_id:
+        session_id = "jwt:" + str(session_id)
+    else:
+        browser_session = getattr(request, "session", None)
+        session_id = getattr(browser_session, "session_key", None)
+        if session_id:
+            session_id = "session:" + session_id
+    if not session_id:
+        raise ValidationError({"authorization": "请先登录账号，再发起微信支付。"})
+    return hashlib.sha256(str(session_id).encode()).hexdigest()
+
+
+def _grant_key(*, user_id, app_id, session_key, order_no, payment_kind):
+    context = json.dumps([user_id, app_id, session_key, str(order_no), payment_kind])
+    return WECHAT_PAYMENT_GRANT_PREFIX + hashlib.sha256(context.encode()).hexdigest()
+
+
+def validate_wechat_payment_payer(payment, *, trade_type: str, sub_openid: str) -> None:
+    """Keep the original gateway request id tied to its original payer."""
+    if trade_type != "T_JSAPI":
+        return
+    if not sub_openid:
+        raise ValidationError({"authorization": "请先完成微信服务号网页授权。"})
+    digest = hashlib.sha256(
+        f"{settings.WECHAT_OFFICIAL_ACCOUNT_APP_ID.strip()}:{sub_openid}".encode()
+    ).hexdigest()
+    if payment.req_seq_id:
+        if not payment.wechat_payer_digest:
+            raise ValidationError({
+                "authorization": "旧支付单缺少付款微信信息，请取消旧单或等待其失效后重新下单。",
+            })
+        if payment.wechat_payer_digest != digest:
+            raise ValidationError(
+                {
+                    "authorization": "当前微信与首次发起支付的微信不同，请切换原微信；如需更换，请取消旧单或等待其失效后重新下单。",
+                }
+            )
+    payment.wechat_payer_digest = digest
+
+
+def get_official_account_openid(
+    *,
+    user_id: int,
+    app_id: str,
+    session_key: str = "",
+    order_no: str = "",
+    payment_kind: str = "provider_order",
+    consume: bool = False,
+) -> str:
+    # Neither historical payment identities nor login bindings prove which
+    # WeChat account is currently paying. Require an order/session-scoped grant.
+    if not session_key or not order_no:
+        return ""
+    key = _grant_key(
+        user_id=user_id,
+        app_id=app_id,
+        session_key=session_key,
+        order_no=order_no,
+        payment_kind=payment_kind,
     )
+    grant = cache.get(key)
+    if not isinstance(grant, dict) or not grant.get("openid") or not grant.get("nonce"):
+        return ""
+    used_key = WECHAT_PAYMENT_GRANT_PREFIX + grant["nonce"] + ":used"
+    if cache.get(used_key):
+        return ""
+    if consume and not cache.add(used_key, True, settings.WECHAT_OAUTH_STATE_MAX_AGE_SECONDS):
+        return ""
+    return grant["openid"]
 
 
 def build_payment_authorization(
-    *, user_id: int, order_no: str, payment_kind: str = "provider_order"
+    *,
+    user_id: int,
+    order_no: str,
+    session_key: str,
+    auth_version: int,
+    payment_kind: str = "provider_order",
 ) -> dict:
     config = WechatOAuthConfig.from_settings()
     config.validate(require_secret=False)
     if payment_kind not in PAYMENT_RETURN_TARGETS:
         raise ValidationError({"authorization": "微信授权支付类型无效。"})
-    openid = get_official_account_openid(user_id=user_id, app_id=config.app_id)
+    if not session_key:
+        raise ValidationError({"authorization": "请重新登录后发起微信支付。"})
+    openid = get_official_account_openid(
+        user_id=user_id,
+        app_id=config.app_id,
+        session_key=session_key,
+        order_no=order_no,
+        payment_kind=payment_kind,
+    )
     if openid:
         return {"authorized": True, "authorize_url": ""}
-    state = signing.dumps(
+    state = secrets.token_urlsafe(24)
+    cache.set(
+        WECHAT_PAYMENT_STATE_PREFIX + state,
         {
             "user_id": user_id,
-            "order_no": order_no,
+            "order_no": str(order_no),
             "payment_kind": payment_kind,
+            "session_key": session_key,
+            "auth_version": auth_version,
+            "app_id": config.app_id,
         },
-        key=settings.SECRET_KEY,
-        salt=WECHAT_OAUTH_STATE_SALT,
-        compress=True,
+        config.state_max_age_seconds,
     )
     query = urlencode(
         {
@@ -217,21 +301,22 @@ def complete_payment_authorization(*, code: str, state: str) -> str:
     config.validate(require_secret=True)
     if not code or not state:
         raise ValidationError({"authorization": "微信授权缺少 code 或 state。"})
-    try:
-        context = signing.loads(
-            state,
-            key=settings.SECRET_KEY,
-            salt=WECHAT_OAUTH_STATE_SALT,
-            max_age=config.state_max_age_seconds,
-        )
-    except signing.BadSignature as exc:
-        raise ValidationError({"authorization": "微信授权状态无效或已过期。"}) from exc
-    if not isinstance(context, dict):
-        raise ValidationError({"authorization": "微信授权状态格式无效。"})
+    state_key = WECHAT_PAYMENT_STATE_PREFIX + state
+    context = cache.get(state_key)
+    if not isinstance(context, dict) or context.get("app_id") != config.app_id:
+        raise ValidationError({"authorization": "微信授权状态无效或已过期。"})
+    if not cache.add(state_key + ":used", True, config.state_max_age_seconds):
+        raise ValidationError({"authorization": "微信授权已使用，请重新授权。"})
+    cache.delete(state_key)
     user_id = context.get("user_id")
     order_no = str(context.get("order_no", ""))
     payment_kind = str(context.get("payment_kind", "provider_order"))
-    user = User.objects.filter(pk=user_id, is_active=True).first()
+    user = User.objects.filter(
+        pk=user_id,
+        is_active=True,
+        account_status=User.AccountStatus.ACTIVE,
+        auth_version=context.get("auth_version"),
+    ).first()
     if user is None or not _payment_authorization_business_exists(
         payment_kind=payment_kind,
         order_no=order_no,
@@ -239,20 +324,17 @@ def complete_payment_authorization(*, code: str, state: str) -> str:
     ):
         raise ValidationError({"authorization": "待支付订单不存在或已失效。"})
 
-    openid, unionid = _exchange_code(config=config, code=code)
-    try:
-        with transaction.atomic():
-            WechatOfficialAccountIdentity.objects.update_or_create(
-                user=user,
-                app_id=config.app_id,
-                defaults={
-                    "openid": openid,
-                    "unionid": unionid,
-                    "authorized_at": timezone.now(),
-                },
-            )
-    except IntegrityError as exc:
-        raise ValidationError({"authorization": "该微信身份已绑定其他账号。"}) from exc
+    openid, _unionid = _exchange_code(config=config, code=code)
+    key = _grant_key(
+        user_id=user_id,
+        app_id=config.app_id,
+        session_key=context["session_key"],
+        order_no=order_no,
+        payment_kind=payment_kind,
+    )
+    cache.set(
+        key, {"openid": openid, "nonce": secrets.token_urlsafe(24)}, config.state_max_age_seconds
+    )
     return _h5_payment_return_url(
         base_url=config.h5_payment_url,
         order_no=order_no,

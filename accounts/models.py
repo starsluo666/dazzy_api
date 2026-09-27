@@ -120,3 +120,55 @@ class WechatMiniProgramIdentity(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id} / {self.app_id}"
+
+
+class WechatLoginIdentity(models.Model):
+    class Channel(models.TextChoices):
+        OFFICIAL_ACCOUNT = "official_account", "微信内网页"
+        MOBILE_APP = "mobile_app", "原生 App"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="wechat_login_identities",
+        verbose_name="用户",
+    )
+    channel = models.CharField("登录渠道", max_length=24, choices=Channel)
+    app_id = models.CharField("微信 AppID", max_length=32)
+    openid = models.CharField("微信 OpenID", max_length=128)
+    unionid = models.CharField("微信 UnionID", max_length=128, blank=True)
+    authorized_at = models.DateTimeField("最近授权时间")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "accounts_wechat_login_identity"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("app_id", "openid"), name="uniq_wechat_login_app_openid"
+            ),
+            models.UniqueConstraint(
+                fields=("user", "app_id"), name="uniq_wechat_login_user_app"
+            ),
+        ]
+        verbose_name = "微信登录身份"
+        verbose_name_plural = verbose_name
+
+    def __str__(self) -> str:
+        return f"{self.user_id} / {self.channel} / {self.app_id}"
+
+
+class WechatUnionIdentity(models.Model):
+    """Single owner across apps in the configured WeChat Open Platform namespace."""
+
+    unionid = models.CharField("微信 UnionID", max_length=128, unique=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="wechat_union_identities", verbose_name="用户",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "accounts_wechat_union_identity"
+        verbose_name = "微信跨端身份归属"
+        verbose_name_plural = verbose_name
