@@ -20,11 +20,13 @@ from mediafiles.models import MediaAsset
 from notifications.models import UserNotification
 from orders.huifu import (
     HuifuCloseResult,
+    HuifuGatewayError,
     HuifuPaymentQueryResult,
     HuifuPaymentSessionResult,
     HuifuRefundQueryResult,
     HuifuRefundResult,
 )
+from orders.payment_recovery import PaymentRecoveryNotice
 from taskcenter.models import ScheduledTask
 from taskcenter.services import process_due_tasks
 from wallets.models import UserWallet, WalletPaymentAllocation
@@ -48,6 +50,7 @@ from .services import (
     create_activity_participation_refund,
     expire_activity_participation_payment,
     get_or_create_participation_order,
+    get_or_create_publish_order,
     process_activity_timeouts,
 )
 from .huifu import (
@@ -105,6 +108,111 @@ class ActivityModelTests(TestCase):
 
     def test_publish_service_fee_uses_half_up_rounding(self):
         self.assertEqual(calculate_publish_service_fee(6805), 681)
+
+    def prepare_recovery_order(self, payment_kind):
+        if payment_kind == "activity_publish":
+            activity = self.build_activity()
+            activity.save()
+            return activity, get_or_create_publish_order(
+                activity_id=activity.pk, user=self.organizer,
+            ), self.organizer
+        activity = self.build_activity(status=Activity.Status.RECRUITING)
+        activity.save()
+        participant = User.objects.create_user(
+            phone="13800007901", password=None,
+            verification_status=User.VerificationStatus.VERIFIED,
+        )
+        _, order, _ = get_or_create_participation_order(
+            activity_id=activity.pk, user=participant,
+            channel=ActivityParticipationPaymentOrder.Channel.WECHAT,
+        )
+        return activity, order, participant
+
+    @override_settings(DEBUG=True)
+    @patch("config.payment_capabilities.ensure_activity_real_payment_available")
+    @patch("activities.huifu.get_huifu_payment_gateway")
+    def test_duplicate_activity_payment_recovers_without_repeating_create(self, gateway, _ensure):
+        from dataclasses import replace
+
+        for payment_kind in ("activity_publish", "activity_participation"):
+            with self.subTest(payment_kind=payment_kind):
+                activity, order, payer = self.prepare_recovery_order(payment_kind)
+                gateway.reset_mock()
+                gateway.return_value.merchant_id = "test-merchant"
+                gateway.return_value.create_payment.side_effect = HuifuGatewayError(
+                    response_code="20000000", response_description="重复交易",
+                )
+                query = HuifuPaymentQueryResult(
+                    req_date=timezone.localdate().strftime("%Y%m%d"), req_seq_id=order.order_no,
+                    huifu_id="test-merchant", trade_type="T_JSAPI", trans_stat="P",
+                    gateway_trade_no=f"HF-{order.order_no}", party_order_id="", out_trans_id="",
+                    trans_amt=f"{order.payable_amount / 100:.2f}",
+                    end_time=timezone.localtime().strftime("%Y%m%d%H%M%S"),
+                    response_code="00000000", response_digest="a" * 64,
+                )
+                gateway.return_value.query_payment.return_value = query
+                arguments = dict(
+                    payment_kind=payment_kind, activity_id=activity.pk, user_id=payer.pk,
+                    payment_scene="official_account", sub_openid="test-payer",
+                )
+                for _ in range(2):
+                    with self.assertRaises(PaymentRecoveryNotice) as caught:
+                        create_activity_huifu_payment_session(**arguments)
+                    self.assertEqual(str(caught.exception.detail["code"]), "huifu_payment_pending_confirmation")
+                gateway.return_value.create_payment.assert_called_once()
+                payment = ActivityHuifuPaymentOrder.objects.get(req_seq_id=order.order_no)
+                self.assertEqual(payment.preorder_attempts, 1)
+                order.refresh_from_db()
+                self.assertEqual(order.status, order.Status.PENDING_PAYMENT)
+
+                gateway.return_value.query_payment.return_value = replace(query, trans_stat="S")
+                with self.assertRaises(PaymentRecoveryNotice) as caught:
+                    create_activity_huifu_payment_session(**arguments)
+                self.assertEqual(str(caught.exception.detail["code"]), "huifu_payment_status_updated")
+                confirm_activity_huifu_payment_status(
+                    payment_kind=payment_kind, activity_id=activity.pk, user_id=payer.pk,
+                )
+                order.refresh_from_db()
+                activity.refresh_from_db()
+                self.assertEqual(order.status, order.Status.PAID)
+                if payment_kind == "activity_publish":
+                    self.assertEqual(activity.status, Activity.Status.PENDING_REVIEW)
+                else:
+                    self.assertEqual(order.participation.status, ActivityParticipation.Status.ACTIVE)
+                gateway.return_value.create_payment.assert_called_once()
+
+    @override_settings(DEBUG=True)
+    @patch("config.payment_capabilities.ensure_activity_real_payment_available")
+    @patch("activities.huifu.get_huifu_payment_gateway")
+    def test_activity_late_failure_keeps_existing_ready_payload(self, gateway, _ensure):
+        for payment_kind in ("activity_publish", "activity_participation"):
+            with self.subTest(payment_kind=payment_kind):
+                activity, order, payer = self.prepare_recovery_order(payment_kind)
+                gateway.return_value.merchant_id = "test-merchant"
+
+                def late_failure(**kwargs):
+                    ActivityHuifuPaymentOrder.objects.filter(req_seq_id=order.order_no).update(
+                        preorder_status=ActivityHuifuPaymentOrder.PreorderStatus.READY,
+                        payment_invoke_payload={"package": "prepay_id=ORIGINAL"},
+                    )
+                    raise HuifuGatewayError(response_code="20000000")
+
+                gateway.return_value.create_payment.side_effect = late_failure
+                gateway.return_value.query_payment.return_value = HuifuPaymentQueryResult(
+                    req_date=timezone.localdate().strftime("%Y%m%d"), req_seq_id=order.order_no,
+                    huifu_id="test-merchant", trade_type="T_JSAPI", trans_stat="P",
+                    gateway_trade_no=f"HF-{order.order_no}", party_order_id="", out_trans_id="",
+                    trans_amt=f"{order.payable_amount / 100:.2f}", end_time="",
+                    response_code="00000000", response_digest="a" * 64,
+                )
+                result, created = create_activity_huifu_payment_session(
+                    payment_kind=payment_kind, activity_id=activity.pk, user_id=payer.pk,
+                    payment_scene="official_account", sub_openid="test-payer",
+                )
+                self.assertFalse(created)
+                self.assertEqual(result.pay_info, {"package": "prepay_id=ORIGINAL"})
+                payment = ActivityHuifuPaymentOrder.objects.get(req_seq_id=order.order_no)
+                self.assertEqual(payment.preorder_status, ActivityHuifuPaymentOrder.PreorderStatus.READY)
 
     @override_settings(DEBUG=True)
     @patch("config.payment_capabilities.ensure_activity_real_payment_available")

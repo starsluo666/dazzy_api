@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 from dataclasses import dataclass
 from decimal import Decimal
@@ -25,10 +26,28 @@ class HuifuGatewayError(APIException):
     default_detail = "支付通道暂时不可用，请稍后重试。"
     default_code = "huifu_gateway_error"
 
-    def __init__(self, detail=None, *, response_code="", response_digest=""):
+    def __init__(self, detail=None, *, response_code="", response_digest="", response_description=""):
         super().__init__(detail or self.default_detail, code=self.default_code)
         self.response_code = response_code
         self.response_digest = response_digest
+        self.response_description = safe_gateway_description(response_description)
+
+
+def safe_gateway_description(value):
+    """Keep diagnostic wording, never arbitrary identifiers, URLs, or secrets."""
+    if not isinstance(value, str):
+        return ""
+    if "PRIVATE KEY" in value or "PUBLIC KEY" in value:
+        return "[密钥内容已隐藏]"
+    value = re.sub(r"https?://\S+|[\w.+-]+@[\w.-]+", "[已隐藏]", value[:2048])
+    value = re.sub(r"[\"'\[【].*?[\"'\]】]", "[已隐藏]", value)
+    allowed = {"fee_flag", "sub_appid", "sub_openid", "req_date", "req_seq_id",
+               "huifu_id", "sys_id", "product_id", "trans_amt", "sign"}
+    value = re.sub(
+        r"[A-Za-z0-9_+/=.-]+",
+        lambda match: match[0] if match[0] in allowed else "[已隐藏]", value,
+    )
+    return " ".join(value.split())[:256]
 
 
 class HuifuPaymentSessionInProgress(APIException):
@@ -317,7 +336,10 @@ class HuifuAggregatePaymentGateway:
             raise HuifuGatewayError(response_digest=digest)
         response_code = str(data.get("resp_code", ""))
         if response_code not in HUIFU_ACCEPTED_CODES:
-            raise HuifuGatewayError(response_code=response_code, response_digest=digest)
+            raise HuifuGatewayError(
+                response_code=response_code, response_digest=digest,
+                response_description=data.get("resp_desc", ""),
+            )
         expected = {
             "req_date": req_date,
             "req_seq_id": req_seq_id,
@@ -387,7 +409,10 @@ class HuifuAggregatePaymentGateway:
             raise HuifuGatewayError(response_digest=digest)
         response_code = str(data.get("resp_code", ""))
         if response_code not in HUIFU_ACCEPTED_CODES:
-            raise HuifuGatewayError(response_code=response_code, response_digest=digest)
+            raise HuifuGatewayError(
+                response_code=response_code, response_digest=digest,
+                response_description=data.get("resp_desc", ""),
+            )
         if str(data.get("huifu_id", "")) != self.config.merchant_id:
             raise HuifuGatewayError(
                 "支付查询返回的商户号不一致。",

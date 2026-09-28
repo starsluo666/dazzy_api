@@ -614,7 +614,7 @@ class ProviderOrderApiTests(TestCase):
 
     @override_settings(WECHAT_OFFICIAL_ACCOUNT_APP_ID="wx-official-app-id")
     @patch("orders.services.ensure_provider_order_payment_scene_available")
-    def test_huifu_gateway_failure_is_retryable_with_same_request_identity(
+    def test_huifu_gateway_failure_recovers_by_query_without_repeating_create(
         self, _ensure_payment_scene_available
     ):
         created = self.client.post(
@@ -650,17 +650,17 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(payment.preorder_status, ProviderOrderPaymentOrder.PreorderStatus.FAILED)
         self.assertEqual(payment.gateway_response_code, "40000001")
 
-        gateway.return_value.create_payment.side_effect = None
-        gateway.return_value.create_payment.return_value = HuifuPaymentSessionResult(
+        gateway.return_value.query_payment.return_value = HuifuPaymentQueryResult(
             req_seq_id=payment.req_seq_id,
             req_date=payment.req_date,
             huifu_id="6666000000000000",
             trade_type="T_JSAPI",
             trans_stat="P",
-            hf_seq_id="HF-GLOBAL-RETRY",
+            gateway_trade_no="HF-GLOBAL-RETRY",
             party_order_id="PARTY-RETRY",
             out_trans_id="",
-            pay_info={"package": "prepay_id=RETRY"},
+            trans_amt=f"{payment.payable_amount / 100:.2f}",
+            end_time=timezone.localtime().strftime("%Y%m%d%H%M%S"),
             response_code="00000000",
             response_digest="c" * 64,
         )
@@ -672,10 +672,27 @@ class ProviderOrderApiTests(TestCase):
             content_type="application/json",
         )
 
-        self.assertEqual(retried.status_code, 201)
+        self.assertEqual(retried.status_code, 409)
+        self.assertEqual(retried.json()["code"], "huifu_payment_pending_confirmation")
         payment.refresh_from_db()
         self.assertEqual((payment.req_date, payment.req_seq_id), original_identity)
-        self.assertEqual(payment.preorder_attempts, 2)
+        self.assertEqual(payment.preorder_attempts, 1)
+        gateway.return_value.create_payment.assert_called_once()
+
+        from dataclasses import replace
+        gateway.return_value.query_payment.return_value = replace(
+            gateway.return_value.query_payment.return_value, trans_stat="S",
+        )
+        self.authorize_wechat_payment(order_no)
+        recovered = self.client.post(
+            f"/api/v1/provider-orders/{order_no}/payment-session/", payload,
+            content_type="application/json",
+        )
+        self.assertEqual(recovered.status_code, 409)
+        self.assertEqual(recovered.json()["code"], "huifu_payment_status_updated")
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, ProviderOrderPaymentOrder.Status.PAID)
+        gateway.return_value.create_payment.assert_called_once()
 
     def test_payment_status_actively_queries_and_applies_success(self):
         created = self.client.post(

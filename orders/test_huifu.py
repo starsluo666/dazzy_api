@@ -8,7 +8,7 @@ from dg_sdk import Payment
 from dg_sdk.core.rsa_utils import rsa_sign
 from django.test import SimpleTestCase
 
-from .huifu import HuifuAggregatePaymentGateway, HuifuPaymentConfig
+from .huifu import HuifuAggregatePaymentGateway, HuifuGatewayError, HuifuPaymentConfig
 
 
 class HuifuAggregatePaymentGatewayTests(SimpleTestCase):
@@ -105,6 +105,26 @@ class HuifuAggregatePaymentGatewayTests(SimpleTestCase):
         self.assertEqual(result.trans_stat, "S")
         self.assertEqual(result.gateway_trade_no, "HF-GLOBAL-001")
         self.assertEqual(result.trade_type, "T_JSAPI")
+
+    def test_duplicate_response_keeps_safe_diagnostic_but_not_raw_details(self):
+        response = {
+            "resp_code": "20000000",
+            "resp_desc": "重复交易 req_seq_id=SECRET_ORDER_123 手机号13800138000",
+        }
+        with patch.object(Payment, "create", return_value=response):
+            with self.assertRaises(HuifuGatewayError) as caught:
+                HuifuAggregatePaymentGateway(self.config()).create_payment(
+                    req_date="20260928", req_seq_id="POP123", amount=100,
+                    goods_desc="test", trade_type="T_JSAPI", attach="test",
+                    time_expire="20260928235959", sub_openid="test-openid",
+                )
+        error = caught.exception
+        self.assertEqual(error.response_code, "20000000")
+        self.assertIn("重复交易", error.response_description)
+        self.assertNotIn("SECRET_ORDER_123", error.response_description)
+        self.assertNotIn("13800138000", error.response_description)
+        self.assertEqual(len(error.response_digest), 64)
+        self.assertNotIn("req_seq_id", str(error.detail))
 
     def test_notification_signature_verifies_the_original_resp_data_string(self):
         key = RSA.generate(1024)

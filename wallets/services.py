@@ -12,6 +12,9 @@ from orders.huifu import (
     HuifuPaymentSessionInProgress,
     get_huifu_payment_gateway,
 )
+from orders.payment_recovery import (
+    PaymentRecoveryRequired, record_payment_error, recoverable_payment_session,
+)
 
 from .models import (
     RechargeCampaign,
@@ -404,6 +407,12 @@ def recharge_order_payload(order: WalletRechargeOrder) -> dict:
     }
 
 
+@recoverable_payment_session(
+    query_payment=lambda order: _query_recharge_payment(order),
+    apply_success=lambda order, query: _apply_recharge_query(order, query),
+    apply_failure=lambda order, query: _apply_recharge_query(order, query),
+    replay=lambda order, context: order,
+)
 def create_recharge_huifu_payment_session(
     *, order_no: str, user_id: int, payment_scene: str, sub_openid: str = ""
 ):
@@ -444,6 +453,8 @@ def create_recharge_huifu_payment_session(
             raise HuifuPaymentSessionInProgress()
         if order.payment_scene and order.payment_scene != payment_scene:
             raise ValidationError({"payment_scene": "当前充值单已绑定其他支付场景。"})
+        if order.req_seq_id:
+            raise PaymentRecoveryRequired(order)
         order.req_date = order.req_date or timezone.localtime(now).strftime("%Y%m%d")
         order.req_seq_id = order.req_seq_id or order.order_no
         order.gateway_merchant_id = gateway.merchant_id
@@ -456,6 +467,7 @@ def create_recharge_huifu_payment_session(
         order.save()
         req_date = order.req_date
         req_seq_id = order.req_seq_id
+        attempt = order.preorder_attempts
         amount = order.payable_amount
         time_expire = timezone.localtime(order.expires_at).strftime("%Y%m%d%H%M%S")
     try:
@@ -470,20 +482,33 @@ def create_recharge_huifu_payment_session(
             sub_openid=sub_openid,
         )
     except HuifuGatewayError as exc:
+        record_payment_error(order, exc)
         WalletRechargeOrder.objects.filter(
-            order_no=order_no, req_date=req_date, req_seq_id=req_seq_id
+            order_no=order_no, req_date=req_date, req_seq_id=req_seq_id,
+            preorder_attempts=attempt, preorder_status=WalletRechargeOrder.PreorderStatus.SUBMITTING,
         ).update(
             preorder_status=WalletRechargeOrder.PreorderStatus.FAILED,
             gateway_response_code=exc.response_code[:32],
             gateway_response_digest=exc.response_digest[:64],
             updated_at=timezone.now(),
         )
+        if exc.response_code == "20000000" or not exc.response_code:
+            raise PaymentRecoveryRequired(order) from exc
         raise
     with transaction.atomic():
         order = WalletRechargeOrder.objects.select_for_update().get(order_no=order_no)
         if order.req_date != req_date or order.req_seq_id != req_seq_id:
             raise HuifuGatewayError("充值支付请求流水已变更，请重新进入充值页。")
-        order.preorder_status = WalletRechargeOrder.PreorderStatus.READY
+        if (
+            order.preorder_attempts != attempt
+            or order.preorder_status != WalletRechargeOrder.PreorderStatus.SUBMITTING
+        ):
+            raise PaymentRecoveryRequired(order)
+        can_invoke = result.trans_stat == "P" and bool(result.pay_info)
+        order.preorder_status = (
+            WalletRechargeOrder.PreorderStatus.READY if can_invoke
+            else WalletRechargeOrder.PreorderStatus.FAILED
+        )
         order.gateway_merchant_id = result.huifu_id
         order.gateway_trade_no = result.hf_seq_id
         order.gateway_party_order_id = result.party_order_id
@@ -493,7 +518,9 @@ def create_recharge_huifu_payment_session(
         order.gateway_response_digest = result.response_digest
         order.preorder_ready_at = timezone.now()
         order.save()
-        return order, True
+        if can_invoke:
+            return order, True
+    raise PaymentRecoveryRequired(order)
 
 
 def _amount_to_cents(value: str) -> int:
@@ -566,6 +593,11 @@ def confirm_recharge_payment(*, order_no: str, user_id: int | None = None):
             ).update(status=WalletRechargeOrder.Status.CLOSED, closed_at=timezone.now()))
         order.refresh_from_db()
         return order, changed
+    query = _query_recharge_payment(order)
+    return _apply_recharge_query(order, query)
+
+
+def _query_recharge_payment(order):
     query = get_huifu_payment_gateway().query_payment(
         req_date=order.req_date,
         req_seq_id=order.req_seq_id,
@@ -587,6 +619,10 @@ def confirm_recharge_payment(*, order_no: str, user_id: int | None = None):
         gateway_last_queried_at=timezone.now(),
         updated_at=timezone.now(),
     )
+    return query
+
+
+def _apply_recharge_query(order, query):
     if query.trans_stat != "S":
         if query.trans_stat == "F":
             WalletRechargeOrder.objects.filter(

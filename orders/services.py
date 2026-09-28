@@ -39,6 +39,9 @@ from .huifu import (
     HuifuRefundTerminalError,
     get_huifu_payment_gateway,
 )
+from .payment_recovery import (
+    PaymentRecoveryRequired, record_payment_error, recoverable_payment_session,
+)
 
 MINIMUM_ADVANCE = timedelta(hours=1)
 MAXIMUM_ADVANCE = timedelta(days=3)
@@ -101,6 +104,14 @@ def _stored_huifu_payment_session(
     )
 
 
+@recoverable_payment_session(
+    query_payment=lambda payment: _query_provider_order_huifu_payment(payment),
+    apply_success=lambda payment, query: _apply_huifu_payment_query_success(payment, query),
+    replay=lambda payment, context: ProviderPaymentSessionResult(
+        trade_type=payment.trade_type, pay_info=payment.payment_invoke_payload,
+        wallet_amount=context["wallet_amount"], external_amount=context["external_amount"],
+    ),
+)
 def create_provider_order_huifu_payment_session(
     *,
     order_id: int,
@@ -175,6 +186,14 @@ def create_provider_order_huifu_payment_session(
         if not wallet_only and payment.payment_scene and payment.payment_scene != payment_scene:
             raise ValidationError({"payment_scene": "当前支付单已绑定其他支付场景。"})
 
+        recovery_context = {
+            "wallet_amount": allocation.wallet_amount,
+            "external_amount": allocation.external_amount,
+            "expires_at": order.payment_expires_at,
+        }
+        if not wallet_only and payment.req_seq_id:
+            raise PaymentRecoveryRequired(payment, **recovery_context)
+
         if wallet_only:
             apply_provider_order_payment_success(
                 order_no=order.order_no,
@@ -218,6 +237,7 @@ def create_provider_order_huifu_payment_session(
             )
             req_date = payment.req_date
             req_seq_id = payment.req_seq_id
+            attempt = payment.preorder_attempts
             amount = allocation.external_amount
             goods_desc = order.service_name_snapshot
             attach = order.order_no
@@ -235,9 +255,14 @@ def create_provider_order_huifu_payment_session(
             sub_openid=sub_openid,
         )
     except HuifuGatewayError as exc:
+        record_payment_error(payment, exc)
         with transaction.atomic():
             payment = ProviderOrderPaymentOrder.objects.select_for_update().get(order_id=order_id)
-            if payment.req_date == req_date and payment.req_seq_id == req_seq_id:
+            if (
+                payment.req_date == req_date and payment.req_seq_id == req_seq_id
+                and payment.preorder_attempts == attempt
+                and payment.preorder_status == ProviderOrderPaymentOrder.PreorderStatus.SUBMITTING
+            ):
                 payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.FAILED
                 payment.gateway_response_code = exc.response_code[:32]
                 payment.gateway_response_digest = exc.response_digest[:64]
@@ -249,13 +274,24 @@ def create_provider_order_huifu_payment_session(
                         "updated_at",
                     )
                 )
+        if exc.response_code == "20000000" or not exc.response_code:
+            raise PaymentRecoveryRequired(payment, **recovery_context) from exc
         raise
 
     with transaction.atomic():
         payment = ProviderOrderPaymentOrder.objects.select_for_update().get(order_id=order_id)
         if payment.req_date != req_date or payment.req_seq_id != req_seq_id:
             raise HuifuGatewayError("支付请求流水已变更，请重新进入支付页。")
-        payment.preorder_status = ProviderOrderPaymentOrder.PreorderStatus.READY
+        if (
+            payment.preorder_attempts != attempt
+            or payment.preorder_status != ProviderOrderPaymentOrder.PreorderStatus.SUBMITTING
+        ):
+            raise PaymentRecoveryRequired(payment, **recovery_context)
+        can_invoke = result.trans_stat == "P" and bool(result.pay_info)
+        payment.preorder_status = (
+            ProviderOrderPaymentOrder.PreorderStatus.READY if can_invoke
+            else ProviderOrderPaymentOrder.PreorderStatus.FAILED
+        )
         payment.gateway_merchant_id = result.huifu_id
         payment.gateway_trade_no = result.hf_seq_id
         payment.gateway_party_order_id = result.party_order_id
@@ -279,12 +315,14 @@ def create_provider_order_huifu_payment_session(
             )
         )
         stored = _stored_huifu_payment_session(payment)
-        return ProviderPaymentSessionResult(
-            trade_type=stored.trade_type,
-            pay_info=stored.pay_info,
-            wallet_amount=allocation.wallet_amount,
-            external_amount=allocation.external_amount,
-        ), True
+        if can_invoke:
+            return ProviderPaymentSessionResult(
+                trade_type=stored.trade_type,
+                pay_info=stored.pay_info,
+                wallet_amount=allocation.wallet_amount,
+                external_amount=allocation.external_amount,
+            ), True
+    raise PaymentRecoveryRequired(payment, **recovery_context)
 
 
 def _huifu_amount_to_cents(value: str) -> int:

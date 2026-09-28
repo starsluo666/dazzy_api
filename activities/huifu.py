@@ -18,6 +18,9 @@ from orders.huifu import (
     HuifuRefundTerminalError,
     get_huifu_payment_gateway,
 )
+from orders.payment_recovery import (
+    PaymentRecoveryRequired, record_payment_error, recoverable_payment_session,
+)
 
 from .models import (
     Activity,
@@ -150,6 +153,14 @@ def _business_values(order, *, payment_kind: str) -> dict:
     }
 
 
+@recoverable_payment_session(
+    query_payment=lambda payment: _query_payment(payment),
+    apply_success=lambda payment, query: _apply_payment_success(payment, query),
+    replay=lambda payment, context: ActivityPaymentSessionResult(
+        trade_type=payment.trade_type, pay_info=payment.payment_invoke_payload,
+        wallet_amount=context["wallet_amount"], external_amount=context["external_amount"],
+    ),
+)
 def create_activity_huifu_payment_session(
     *,
     payment_kind: str,
@@ -258,6 +269,14 @@ def create_activity_huifu_payment_session(
         ):
             raise ValidationError({"payment_scene": "当前支付单已绑定其他支付场景。"})
 
+        recovery_context = {
+            "wallet_amount": allocation.wallet_amount,
+            "external_amount": allocation.external_amount,
+            "expires_at": order.expires_at,
+        }
+        if not wallet_only and payment.req_seq_id:
+            raise PaymentRecoveryRequired(payment, **recovery_context)
+
         if wallet_only:
             if payment_kind == "activity_publish":
                 _apply_publish_payment_success(
@@ -297,16 +316,24 @@ def create_activity_huifu_payment_session(
                 "sub_openid": sub_openid,
             }
             payment_id = payment.pk
+            attempt = payment.preorder_attempts
 
     try:
         result = gateway.create_payment(**request_values)
     except HuifuGatewayError as exc:
-        ActivityHuifuPaymentOrder.objects.filter(pk=payment_id).update(
+        record_payment_error(payment, exc)
+        ActivityHuifuPaymentOrder.objects.filter(
+            pk=payment_id, preorder_attempts=attempt,
+            preorder_status=ActivityHuifuPaymentOrder.PreorderStatus.SUBMITTING,
+            req_date=payment.req_date, req_seq_id=payment.req_seq_id,
+        ).update(
             preorder_status=ActivityHuifuPaymentOrder.PreorderStatus.FAILED,
             gateway_response_code=exc.response_code[:32],
             gateway_response_digest=exc.response_digest[:64],
             updated_at=timezone.now(),
         )
+        if exc.response_code == "20000000" or not exc.response_code:
+            raise PaymentRecoveryRequired(payment, **recovery_context) from exc
         raise
 
     with transaction.atomic():
@@ -316,7 +343,16 @@ def create_activity_huifu_payment_session(
             or payment.req_seq_id != result.req_seq_id
         ):
             raise HuifuGatewayError("支付请求流水已变更，请重新进入支付页。")
-        payment.preorder_status = ActivityHuifuPaymentOrder.PreorderStatus.READY
+        if (
+            payment.preorder_attempts != attempt
+            or payment.preorder_status != ActivityHuifuPaymentOrder.PreorderStatus.SUBMITTING
+        ):
+            raise PaymentRecoveryRequired(payment, **recovery_context)
+        can_invoke = result.trans_stat == "P" and bool(result.pay_info)
+        payment.preorder_status = (
+            ActivityHuifuPaymentOrder.PreorderStatus.READY if can_invoke
+            else ActivityHuifuPaymentOrder.PreorderStatus.FAILED
+        )
         payment.gateway_merchant_id = result.huifu_id
         payment.gateway_trade_no = result.hf_seq_id
         payment.gateway_party_order_id = result.party_order_id
@@ -331,12 +367,15 @@ def create_activity_huifu_payment_session(
                 pk=payment.participation_order_id
             ).update(channel=ActivityParticipationPaymentOrder.Channel.WECHAT)
         stored = _stored_session(payment)
-        return ActivityPaymentSessionResult(
-            trade_type=stored.trade_type,
-            pay_info=stored.pay_info,
-            wallet_amount=allocation.wallet_amount,
-            external_amount=allocation.external_amount,
-        ), True
+        if can_invoke:
+            return ActivityPaymentSessionResult(
+                trade_type=stored.trade_type,
+                pay_info=stored.pay_info,
+                wallet_amount=allocation.wallet_amount,
+                external_amount=allocation.external_amount,
+            ), True
+    # Persist the response before querying; never return an empty/terminal session.
+    raise PaymentRecoveryRequired(payment, **recovery_context)
 
 
 def _payment_business_order(payment: ActivityHuifuPaymentOrder):
