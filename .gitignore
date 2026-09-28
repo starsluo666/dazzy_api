@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
+!.env.docker.example
+.deploy/
+staticfiles/
 db.sqlite3
 .pytest_cache/
 .run/

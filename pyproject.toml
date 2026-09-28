@@ -16,6 +16,7 @@ dependencies = [
   "pillow>=11,<12",
   "psycopg[binary]>=3.2,<3.3",
   "redis>=6,<7",
+  "whitenoise>=6.12,<7",
 ]
 
 [dependency-groups]

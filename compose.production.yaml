@@ -1,0 +1,75 @@
+name: dazzy-prod
+
+x-app: &app
+  image: ${DAZZY_IMAGE:-dazzy-api:local}
+  env_file:
+    - ${DAZZY_ENV_FILE:-.env.online}
+  environment:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    DAZZY_DEMO_USER_PUBLIC_ID: ""
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 120s
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  # Clear transient PID files on restart; persistent Beat state lives in its volume.
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+  networks: [backend]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  api:
+    <<: *app
+    build:
+      context: .
+      target: runtime
+    command: [api]
+    networks:
+      backend:
+        aliases: [dazzy-api-prod]
+    ports:
+      - "127.0.0.1:${DAZZY_API_PORT:-8000}:8000"
+    healthcheck:
+      test: [CMD, python, -m, deploy.healthcheck, api]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  worker:
+    <<: *app
+    command: [worker]
+    healthcheck:
+      test: [CMD, python, -m, deploy.healthcheck, worker]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  beat:
+    <<: *app
+    # A fixed name prevents accidentally scaling this scheduler within the project.
+    container_name: dazzy-prod-beat
+    command: [beat]
+    volumes:
+      - beat-state:/app/run
+    healthcheck:
+      test: [CMD, python, -m, deploy.healthcheck, beat]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+networks:
+  backend:
+    external: true
+    name: ${DAZZY_DOCKER_NETWORK:-dazzy-backend}
+
+volumes:
+  beat-state:

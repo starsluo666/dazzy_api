@@ -2,6 +2,9 @@
 
 DAZZY Django 5.2 API。
 
+生产环境使用 Docker Compose：参见 [Docker 生产部署说明](docs/docker-production.md)。
+项目根目录的 `start-dazzy-api.sh` 仍用于本地开发；生产服务由 `deploy-docker.sh` 管理。
+
 ```bash
 uv sync
 cp .env.example .env
