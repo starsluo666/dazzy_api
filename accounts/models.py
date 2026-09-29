@@ -3,6 +3,7 @@ import uuid
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 from .managers import UserManager
 
@@ -23,6 +24,7 @@ class User(AbstractUser):
         ACTIVE = "active", "正常"
         RESTRICTED = "restricted", "受限"
         SUSPENDED = "suspended", "停用"
+        CLOSURE_PENDING = "closure_pending", "注销申请处理中"
         CLOSED = "closed", "已注销"
 
     username = None
@@ -54,6 +56,36 @@ class User(AbstractUser):
 
     def __str__(self) -> str:
         return self.nickname or self.phone
+
+
+class AccountClosureRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "等待注销"
+        BLOCKED = "blocked", "未结业务暂停处理"
+        CANCELLED = "cancelled", "登录撤销"
+        COMPLETED = "completed", "已完成注销"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="closure_requests",
+    )
+    requested_at = models.DateTimeField("申请时间", default=timezone.now)
+    execute_after = models.DateTimeField("最早注销时间")
+    status = models.CharField(max_length=16, choices=Status, default=Status.PENDING)
+    finished_at = models.DateTimeField("完成或撤销时间", null=True, blank=True)
+    checked_at = models.DateTimeField("最近检查时间", null=True, blank=True)
+    blocking_items = models.JSONField("待处理业务", default=list, blank=True)
+
+    class Meta:
+        db_table = "accounts_closure_request"
+        verbose_name = "账号注销申请"
+        verbose_name_plural = verbose_name
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user",), condition=models.Q(status__in=("pending", "blocked")),
+                name="uniq_open_account_closure",
+            ),
+        ]
+        indexes = [models.Index(fields=("status", "execute_after"))]
 
 
 class WechatOfficialAccountIdentity(models.Model):

@@ -39,6 +39,8 @@ from .serializers import (
     WechatMiniProgramLoginSerializer,
 )
 from .services import send_sms_code
+from .account_closure import lock_active_user_for_business, withdraw_closure_on_verified_login
+from .models import User
 from .wechat_login import (
     begin_h5_login,
     begin_mobile_login,
@@ -49,7 +51,13 @@ from .wechat_login import (
 )
 
 
-def auth_payload(user) -> dict:
+@transaction.atomic
+def auth_payload(user, *, interactive_login=False) -> dict:
+    # Token issuance and closure use the same user-row lock.
+    user = User.objects.select_for_update().get(pk=user.pk)
+    closure_cancelled = interactive_login and withdraw_closure_on_verified_login(user)
+    if not user.is_active or user.account_status != User.AccountStatus.ACTIVE:
+        raise ValidationError("账号当前不可用，请联系客服。")
     refresh = RefreshToken.for_user(user)
     refresh["auth_version"] = user.auth_version
     # Stable across access-token refreshes, unique to each login/device.
@@ -58,6 +66,7 @@ def auth_payload(user) -> dict:
         "access": str(refresh.access_token),
         "refresh": str(refresh),
         "user": UserSerializer(user).data,
+        "closure_cancelled": bool(closure_cancelled),
     }
 
 
@@ -101,9 +110,11 @@ class PasswordLoginView(APIView):
     throttle_scope = "auth_login"
 
     def post(self, request):
-        serializer = PasswordLoginSerializer(data=request.data, context={"request": request})
+        serializer = PasswordLoginSerializer(
+            data=request.data, context={"request": request, "allow_closure_withdrawal": True},
+        )
         serializer.is_valid(raise_exception=True)
-        return Response({"data": auth_payload(serializer.validated_data["user"])})
+        return Response({"data": auth_payload(serializer.validated_data["user"], interactive_login=True)})
 
 
 class SmsLoginView(APIView):
@@ -114,7 +125,7 @@ class SmsLoginView(APIView):
     def post(self, request):
         serializer = SmsLoginSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        return Response({"data": auth_payload(serializer.validated_data["user"])})
+        return Response({"data": auth_payload(serializer.validated_data["user"], interactive_login=True)})
 
 
 class WechatMiniProgramLoginView(APIView):
@@ -136,7 +147,7 @@ class WechatMiniProgramLoginView(APIView):
                 user=user,
                 invite_code=serializer.validated_data.get("invite_code"),
             )
-        return Response({"data": auth_payload(user)})
+        return Response({"data": auth_payload(user, interactive_login=True)})
 
 
 class WechatH5LoginStartView(APIView):
@@ -179,13 +190,14 @@ class WechatLoginResolveView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_wechat_login"
 
+    @transaction.atomic
     def post(self, request):
         serializer = WechatLoginTicketSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = resolve_login(serializer.validated_data["ticket"])
         if user is None:
             return Response({"data": {"status": "bind_required"}})
-        return Response({"data": {"status": "authenticated", "session": auth_payload(user)}})
+        return Response({"data": {"status": "authenticated", "session": auth_payload(user, interactive_login=True)}})
 
 
 class WechatLoginBindSmsView(APIView):
@@ -209,11 +221,12 @@ class WechatLoginBindView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_wechat_login"
 
+    @transaction.atomic
     def post(self, request):
         serializer = WechatLoginBindSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user, created = bind_phone(**serializer.validated_data)
-        return Response({"data": {"created": created, "session": auth_payload(user)}})
+        return Response({"data": {"created": created, "session": auth_payload(user, interactive_login=True)}})
 
 
 class ResetPasswordView(APIView):
@@ -350,8 +363,14 @@ class CloseAccountView(APIView):
     def post(self, request):
         serializer = CloseAccountSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response({"data": {"closed": True}})
+        closure = serializer.save()
+        return Response({"data": {
+            "closed": False,
+            "status": closure.status,
+            "requested_at": closure.requested_at.isoformat(),
+            "execute_after": closure.execute_after.isoformat(),
+            "working_days": 5,
+        }})
 
 
 class LogoutView(APIView):
@@ -373,8 +392,12 @@ class CurrentUserView(APIView):
     def get(self, request):
         return Response({"data": UserSerializer(request.user).data})
 
+    @transaction.atomic
     def patch(self, request):
-        serializer = UserSerializer(request.user, data=request.data, partial=True)
+        # Authentication may have occurred just before another request submitted
+        # closure. Never save a stale User instance and overwrite security state.
+        user = lock_active_user_for_business(request.user)
+        serializer = UserSerializer(user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response({"data": serializer.data})

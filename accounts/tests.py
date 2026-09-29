@@ -685,7 +685,9 @@ class AccountClosureApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.user.refresh_from_db()
         self.assertFalse(self.user.is_active)
-        self.assertEqual(self.user.account_status, User.AccountStatus.CLOSED)
+        self.assertEqual(self.user.account_status, User.AccountStatus.CLOSURE_PENDING)
+        self.assertFalse(response.data["data"]["closed"])
+        self.assertEqual(response.data["data"]["working_days"], 5)
 
     def test_open_support_case_blocks_account_closure_with_actionable_reason(self):
         from supportcases.models import SupportCase

@@ -60,7 +60,7 @@ class InitialPasswordTests(APITestCase):
         )
         self.assertEqual(logged_out.status_code, 200, logged_out.data)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {logged_out.data['data']['access']}")
-        with patch("accounts.serializers.account_closure_blockers", return_value=[]):
+        with patch("accounts.account_closure.account_closure_blockers", return_value=[]):
             closed = self.client.post(
                 "/api/v1/auth/account/close/",
                 {

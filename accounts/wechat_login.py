@@ -13,6 +13,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
 
+from .account_closure import can_attempt_interactive_login
 from .models import User, WechatLoginIdentity, WechatUnionIdentity
 
 
@@ -194,7 +195,7 @@ def _consume_ticket(ticket: str) -> None:
 
 
 def _ensure_active(user: User) -> None:
-    if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+    if not can_attempt_interactive_login(user):
         raise ValidationError("账号当前不可用，请联系客服。")
 
 

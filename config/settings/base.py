@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -107,6 +108,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ("json",)
 CELERY_TIMEZONE = "Asia/Shanghai"
 CELERY_BEAT_SCHEDULE = {
+    "process-due-account-closures": {
+        "task": "accounts.process_due_account_closures",
+        "schedule": 60.0,
+    },
     "reconcile-pending-recharges": {
         "task": "wallets.reconcile_pending_recharges",
         "schedule": 60.0,
@@ -122,6 +127,10 @@ CELERY_BEAT_SCHEDULE = {
 }
 
 AUTH_USER_MODEL = "accounts.User"
+# Overrides are complete per-year calendars, not partial holiday additions.
+ACCOUNT_CLOSURE_CALENDARS = json.loads(os.getenv("ACCOUNT_CLOSURE_CALENDAR_JSON", "{}"))
+if not isinstance(ACCOUNT_CLOSURE_CALENDARS, dict):
+    raise ValueError("ACCOUNT_CLOSURE_CALENDAR_JSON 必须为年份到工作日历的 JSON 对象。")
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",

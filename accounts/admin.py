@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import User, WechatLoginIdentity, WechatMiniProgramIdentity, WechatOfficialAccountIdentity
+from .models import AccountClosureRequest, User, WechatLoginIdentity, WechatMiniProgramIdentity, WechatOfficialAccountIdentity
 
 
 @admin.register(User)
@@ -21,6 +21,25 @@ class DazzyUserAdmin(UserAdmin):
     )
     readonly_fields = ("public_id", "last_login", "date_joined")
     add_fieldsets = ((None, {"fields": ("phone", "password1", "password2", "is_staff")}),)
+
+
+@admin.register(AccountClosureRequest)
+class AccountClosureRequestAdmin(admin.ModelAdmin):
+    list_display = ("user", "status", "requested_at", "execute_after", "finished_at")
+    list_filter = ("status",)
+    search_fields = ("user__phone", "user__public_id")
+    readonly_fields = (
+        "user", "status", "requested_at", "execute_after", "finished_at", "checked_at", "blocking_items",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WechatOfficialAccountIdentity)

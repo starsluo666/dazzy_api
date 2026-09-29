@@ -9,7 +9,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 
 from mediafiles.services import build_media_url
 
-from .account_closure import account_closure_blockers
+from .account_closure import can_attempt_interactive_login, request_account_closure
 from .models import User, WechatMiniProgramIdentity
 from .services import (
     auth_client_identifier,
@@ -137,6 +137,15 @@ class PasswordLoginSerializer(serializers.Serializer):
             phone=attrs["phone"],
             password=attrs["password"],
         )
+        if user is None:
+            # ModelBackend rejects inactive users. Only an explicit, verified
+            # login can withdraw a pending closure; ordinary sessions stay blocked.
+            pending = User.objects.filter(
+                phone=attrs["phone"], account_status=User.AccountStatus.CLOSURE_PENDING,
+                is_active=False,
+            ).first()
+            if pending and pending.check_password(attrs["password"]):
+                user = pending
         if not user:
             record_auth_failure(
                 phone=attrs["phone"],
@@ -144,7 +153,10 @@ class PasswordLoginSerializer(serializers.Serializer):
                 client_identifier=client_identifier,
             )
             raise serializers.ValidationError("手机号或密码错误。")
-        if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+        if not can_attempt_interactive_login(user) or (
+            user.account_status == User.AccountStatus.CLOSURE_PENDING
+            and not self.context.get("allow_closure_withdrawal", False)
+        ):
             raise serializers.ValidationError("账号当前不可用，请联系客服。")
         attrs["user"] = user
         clear_auth_failures(
@@ -164,7 +176,7 @@ class SmsLoginSerializer(serializers.Serializer):
             user = User.objects.get(phone=attrs["phone"])
         except User.DoesNotExist as exc:
             raise serializers.ValidationError({"phone": "该手机号尚未注册。"}) from exc
-        if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+        if not can_attempt_interactive_login(user):
             raise serializers.ValidationError("账号当前不可用，请联系客服。")
         client_identifier = auth_client_identifier(self.context.get("request"))
         ensure_auth_attempt_allowed(
@@ -225,7 +237,7 @@ class WechatMiniProgramLoginSerializer(serializers.Serializer):
         )
         if identity:
             user = identity.user
-            if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+            if not can_attempt_interactive_login(user):
                 raise serializers.ValidationError("账号当前不可用，请联系客服。")
             identity.unionid = unionid
             identity.authorized_at = timezone.now()
@@ -312,7 +324,7 @@ class WechatMiniProgramLoginSerializer(serializers.Serializer):
                             "微信账号绑定冲突，请重新登录或联系客服。"
                         ) from exc
 
-            if user.account_status != User.AccountStatus.ACTIVE or not user.is_active:
+            if not can_attempt_interactive_login(user):
                 raise serializers.ValidationError("账号当前不可用，请联系客服。")
             return user
 
@@ -489,31 +501,9 @@ class CloseAccountSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True)
 
     def save(self, **kwargs):
-        user = User.objects.select_for_update().get(
-            pk=self.context["request"].user.pk
+        return request_account_closure(
+            self.context["request"].user, self.validated_data["current_password"],
         )
-        if not user.check_password(self.validated_data["current_password"]):
-            raise serializers.ValidationError({"current_password": "当前密码不正确。"})
-        blockers = account_closure_blockers(user)
-        if blockers:
-            summary = "、".join(
-                f"{item['label']} {item['count']} 项" for item in blockers[:4]
-            )
-            if len(blockers) > 4:
-                summary += f"等 {len(blockers)} 类"
-            raise serializers.ValidationError(
-                {
-                    "business": f"账号还有未结业务：{summary}。请处理完成后再注销。",
-                    "blocking_items": blockers,
-                }
-            )
-        user.account_status = User.AccountStatus.CLOSED
-        user.is_active = False
-        user.auth_version = F("auth_version") + 1
-        user.save(update_fields=("account_status", "is_active", "auth_version"))
-        for token in OutstandingToken.objects.filter(user=user):
-            BlacklistedToken.objects.get_or_create(token=token)
-        return user
 
 
 class LogoutSerializer(serializers.Serializer):

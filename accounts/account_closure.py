@@ -1,7 +1,106 @@
+from django.db import transaction
 from django.db.models import Q
-from rest_framework.exceptions import PermissionDenied
+from django.utils import timezone
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
-from .models import User
+from .business_days import closure_deadline
+from .models import AccountClosureRequest, User
+
+
+def can_attempt_interactive_login(user: User) -> bool:
+    # Pending users are deliberately inactive: JWT, refresh and Django sessions
+    # cannot bypass the waiting period. Only verified login endpoints may restore them.
+    return (
+        user.account_status == User.AccountStatus.ACTIVE and user.is_active
+    ) or (
+        user.account_status == User.AccountStatus.CLOSURE_PENDING and not user.is_active
+    )
+
+
+def revoke_sessions(user: User) -> None:
+    user.auth_version += 1
+    user.save(update_fields=("auth_version",))
+    for token in OutstandingToken.objects.filter(user=user):
+        BlacklistedToken.objects.get_or_create(token=token)
+
+
+def withdraw_closure_on_verified_login(user: User) -> bool:
+    """Caller holds the user lock and has already verified password/SMS/WeChat ownership."""
+    if user.account_status != User.AccountStatus.CLOSURE_PENDING:
+        return False
+    closure = AccountClosureRequest.objects.select_for_update().filter(
+        user=user, status__in=(AccountClosureRequest.Status.PENDING, AccountClosureRequest.Status.BLOCKED),
+    ).first()
+    now = timezone.now()
+    if closure is None or now >= closure.execute_after:
+        raise ValidationError("账号注销等待期已结束，无法通过登录撤销，请联系客服。")
+    closure.status = AccountClosureRequest.Status.CANCELLED
+    closure.finished_at = now
+    closure.save(update_fields=("status", "finished_at"))
+    user.account_status = User.AccountStatus.ACTIVE
+    user.is_active = True
+    user.save(update_fields=("account_status", "is_active"))
+    revoke_sessions(user)
+    return True
+
+
+@transaction.atomic
+def request_account_closure(user: User, current_password: str) -> AccountClosureRequest:
+    user = User.objects.select_for_update().get(pk=user.pk)
+    if not user.is_active or user.account_status != User.AccountStatus.ACTIVE:
+        raise ValidationError("当前账号不可申请注销，请联系客服。")
+    if not user.check_password(current_password):
+        raise ValidationError({"current_password": "当前密码不正确。"})
+    blockers = account_closure_blockers(user)
+    if blockers:
+        summary = "、".join(f"{item['label']} {item['count']} 项" for item in blockers[:4])
+        if len(blockers) > 4:
+            summary += f"等 {len(blockers)} 类"
+        raise ValidationError({
+            "business": f"账号还有未结业务：{summary}。请处理完成后再注销。",
+            "blocking_items": blockers,
+        })
+    if user.closure_requests.filter(status__in=("pending", "blocked")).exists():
+        raise ValidationError("已有待处理注销申请，请联系客服。")
+    now = timezone.now()
+    closure = AccountClosureRequest.objects.create(
+        user=user, requested_at=now, execute_after=closure_deadline(now),
+    )
+    user.account_status = User.AccountStatus.CLOSURE_PENDING
+    user.is_active = False
+    user.save(update_fields=("account_status", "is_active"))
+    revoke_sessions(user)
+    return closure
+
+
+@transaction.atomic
+def process_account_closure(user_id: int, *, now=None) -> str:
+    """User -> request lock order matches login/submission. Safe for concurrent workers."""
+    now = now or timezone.now()
+    user = User.objects.select_for_update(skip_locked=True).filter(pk=user_id).first()
+    if user is None:
+        return "skipped"
+    closure = AccountClosureRequest.objects.select_for_update().filter(
+        user=user, status__in=("pending", "blocked"), execute_after__lte=now,
+    ).first()
+    if closure is None or user.account_status != User.AccountStatus.CLOSURE_PENDING:
+        return "skipped"
+    blockers = account_closure_blockers(user)
+    closure.checked_at = now
+    closure.blocking_items = blockers
+    if blockers:
+        closure.status = AccountClosureRequest.Status.BLOCKED
+        closure.save(update_fields=("checked_at", "blocking_items", "status"))
+        return "blocked"
+    user.account_status = User.AccountStatus.CLOSED
+    user.is_active = False
+    user.save(update_fields=("account_status", "is_active"))
+    revoke_sessions(user)
+    closure.status = AccountClosureRequest.Status.COMPLETED
+    closure.finished_at = now
+    closure.save(update_fields=("checked_at", "blocking_items", "status", "finished_at"))
+    return "completed"
 
 
 def lock_active_user_for_business(user) -> User:
