@@ -5,6 +5,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from locations.discovery import default_discovery_cities
 
 
 def generate_after_sales_case_no():
@@ -157,6 +158,7 @@ class ProviderOrderingSetting(models.Model):
 
 
 class PlatformOperationSetting(models.Model):
+    discovery_cities = models.JSONField("发现页开通城市", default=default_discovery_cities)
     singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
     customer_service_phone = models.CharField(max_length=32, blank=True, default="")
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)

@@ -45,3 +45,10 @@ def gcj02_to_wgs84(longitude: Decimal | float, latitude: Decimal | float) -> Poi
     delta_lat = delta_lat * 180.0 / ((_A * (1 - _EE)) / (magic * sqrt_magic) * math.pi)
     delta_lng = delta_lng * 180.0 / (_A / sqrt_magic * math.cos(rad_lat) * math.pi)
     return Point(gcj_lng - delta_lng, gcj_lat - delta_lat, srid=4326)
+
+
+def wgs84_to_gcj02(longitude: Decimal | float, latitude: Decimal | float) -> tuple[float, float]:
+    """Apply the GCJ offset to a device GPS coordinate before Tencent reverse geocoding."""
+    lng, lat = float(longitude), float(latitude)
+    inverse = gcj02_to_wgs84(lng, lat)
+    return 2 * lng - inverse.x, 2 * lat - inverse.y

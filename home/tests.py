@@ -222,6 +222,37 @@ class HomeDiscoveryTests(TestCase):
         )
         self.assertTrue(all(provider["earliest_available_at"] is None for provider in providers))
 
+    @patch("home.views.build_home_card_assets", return_value={})
+    def test_city_only_browsing_does_not_invent_distances(self, _build_assets):
+        response = self.client.get("/api/v1/home/", {"city_code": "130400"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertTrue(data["recommended_providers"])
+        for item in data["recommended_providers"] + data["recommended_activities"]:
+            self.assertIsNone(item["distance_km"])
+
+    def test_city_keyword_search_is_paginated_for_both_result_types(self):
+        for endpoint, keyword, total, id_field in (
+            ("providers", "达人", 5, "public_id"),
+            ("activities", "活动", 4, "id"),
+        ):
+            pages = []
+            for page in (1, 2):
+                response = self.client.get(f"/api/v1/{endpoint}/", {
+                    "city_code": "130400", "keyword": keyword, "page": page, "page_size": 2,
+                })
+                self.assertEqual(response.status_code, 200, response.content)
+                data = response.json()["data"]
+                self.assertEqual(data["pagination"]["total"], total)
+                self.assertEqual(data["pagination"]["page"], page)
+                self.assertEqual(len(data["items"]), 2)
+                pages.append({item[id_field] for item in data["items"]})
+            self.assertFalse(pages[0] & pages[1])
+            other_city = self.client.get(f"/api/v1/{endpoint}/", {
+                "city_code": "110100", "keyword": keyword,
+            })
+            self.assertEqual(other_city.json()["data"]["items"], [])
+
     @patch("home.views.build_home_card_assets", side_effect=RuntimeError("COS unavailable"))
     def test_home_keeps_other_sections_when_assets_fail(self, _build_assets):
         response = self.client.get("/api/v1/home/", {"city_code": "130400"})

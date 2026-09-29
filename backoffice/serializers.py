@@ -1781,7 +1781,23 @@ class ProviderOrderingSettingSerializer(serializers.ModelSerializer):
         return value
 
 
+class DiscoveryCitySerializer(serializers.Serializer):
+    city_code = serializers.RegexField(r"^[0-9]{6}$")
+    city_name = serializers.CharField(max_length=50)
+
+
 class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    discovery_cities = DiscoveryCitySerializer(many=True, required=False, allow_empty=False)
+
+    def validate_discovery_cities(self, value):
+        if len(value) > 400:
+            raise serializers.ValidationError("最多配置 400 个城市。")
+        codes = [city["city_code"] for city in value]
+        names = [city["city_name"] for city in value]
+        if len(set(codes)) != len(codes) or len(set(names)) != len(names):
+            raise serializers.ValidationError("城市编码和名称不能重复。")
+        return value
+
     activity_service_fee_rate = serializers.DecimalField(
         max_digits=5, decimal_places=4, min_value=0, max_value=1,
         coerce_to_string=False,
@@ -1803,6 +1819,7 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
         fields = (
             *DEFAULT_PLATFORM_OPERATION_RULES.keys(),
             "default_activity_cover_id", "default_activity_cover_url", "updated_at",
+            "discovery_cities",
         )
         read_only_fields = ("default_activity_cover_url", "updated_at",)
 

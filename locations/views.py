@@ -2,11 +2,14 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from config.throttles import MapProxyBurstThrottle, MapProxyDailyThrottle
+from config.geospatial import wgs84_to_gcj02
+
+from .discovery import discovery_cities
 
 from .models import UserAddress
 from .serializers import CoordinatesQuerySerializer, UserAddressSerializer
@@ -16,6 +19,36 @@ from .tencent import tencent_map
 def lock_user_addresses(user):
     """Serialize address mutations for one user, including creation of their first row."""
     get_user_model().objects.select_for_update().only("pk").get(pk=user.pk)
+
+
+class DiscoveryCityListView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"data": {"items": discovery_cities()}})
+
+
+class DiscoveryLocateView(APIView):
+    """Public, IP-throttled city lookup. Do not expose addresses or persist device locations."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [MapProxyBurstThrottle, MapProxyDailyThrottle]
+
+    def post(self, request):
+        query = CoordinatesQuerySerializer(data=request.data)
+        query.is_valid(raise_exception=True)
+        lng, lat = wgs84_to_gcj02(**query.validated_data)
+        location = tencent_map.reverse_geocode(f"{lng:.7f}", f"{lat:.7f}")
+        city = next((city for city in discovery_cities()
+                     if city["city_code"] == location["city_code"]), None)
+        return Response({"data": {
+            "city_code": location["city_code"],
+            "city_name": city["city_name"] if city else location["city_name"],
+            "is_open": city is not None,
+            "longitude": f"{lng:.7f}",
+            "latitude": f"{lat:.7f}",
+        }}, headers={"Cache-Control": "no-store"})
 
 
 class PlaceSearchView(APIView):
