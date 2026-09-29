@@ -16,8 +16,17 @@ class DiscoveryCityTests(APITestCase):
     def test_guest_reads_only_open_cities_without_creating_settings(self):
         response = self.client.get('/api/v1/locations/cities/')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['data']['items'], default_discovery_cities())
+        self.assertEqual(response.json()['data']['items'], [
+            {'city_code': '130400', 'city_name': '邯郸市'},
+        ])
         self.assertFalse(PlatformOperationSetting.objects.exists())
+
+    def test_new_settings_default_to_handan_only(self):
+        settings = PlatformOperationSetting.objects.create()
+        settings.refresh_from_db()
+        expected = [{'city_code': '130400', 'city_name': '邯郸市'}]
+        self.assertEqual(settings.discovery_cities, expected)
+        self.assertEqual(self.client.get('/api/v1/locations/cities/').data['data']['items'], expected)
 
     def test_admin_configures_cities_with_audit_and_public_api_follows(self):
         admin = User.objects.create_superuser(phone='19900009871', password='test')

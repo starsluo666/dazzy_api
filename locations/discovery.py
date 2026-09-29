@@ -1,9 +1,7 @@
 def default_discovery_cities():
-    """Initial open cities; ordering determines the default browsing city."""
+    """Launch with Handan only; additional cities must be configured explicitly."""
     return [
         {"city_code": "130400", "city_name": "邯郸市"},
-        {"city_code": "110100", "city_name": "北京市"},
-        {"city_code": "310100", "city_name": "上海市"},
     ]
 
 
