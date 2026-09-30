@@ -1,6 +1,7 @@
 import uuid
-from datetime import date, time, timedelta
+from datetime import time, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
 from django.test import TestCase
@@ -66,6 +67,41 @@ def make_provider_eligible(provider):
 
 
 class ProviderModelTests(TestCase):
+    @patch("providers.serializers.build_media_url", side_effect=lambda key: f"https://media.test/{key}")
+    def test_public_service_categories_follow_visibility_city_and_icon(self, _build_url):
+        empty = self.client.get("/api/v1/service-categories/?city_code=130400")
+        self.assertEqual(empty.json()["data"]["items"], [])
+
+        ServiceCategory.objects.create(name="全城通用", slug="all-cities", sort_order=2)
+        ServiceCategory.objects.create(
+            name="邯郸桌球", slug="handan-billiards", city_codes=["130400"],
+            icon_object_key="public/category-icons/billiards.webp", sort_order=1,
+        )
+        ServiceCategory.objects.create(
+            name="北京桌游", slug="beijing-board-games", city_codes=["110100"], sort_order=3,
+        )
+        ServiceCategory.objects.create(name="已停用", slug="inactive", is_active=False)
+
+        handan = self.client.get("/api/v1/service-categories/?city_code=130400")
+        self.assertEqual(handan.status_code, 200)
+        self.assertEqual(
+            [item["slug"] for item in handan.json()["data"]["items"]],
+            ["handan-billiards", "all-cities"],
+        )
+        self.assertEqual(
+            handan.json()["data"]["items"][0]["icon_url"],
+            "https://media.test/public/category-icons/billiards.webp",
+        )
+        self.assertIsNone(handan.json()["data"]["items"][1]["icon_url"])
+
+        beijing = self.client.get("/api/v1/service-categories/?city_code=110100")
+        self.assertEqual(
+            [item["slug"] for item in beijing.json()["data"]["items"]],
+            ["all-cities", "beijing-board-games"],
+        )
+        all_cities = self.client.get("/api/v1/service-categories/")
+        self.assertEqual(len(all_cities.json()["data"]["items"]), 3)
+
     def test_provider_service_uses_integer_minor_units_and_live_wgs84_point(self):
         user = User.objects.create_user(phone="13800000001", password="test-password")
         provider = ProviderProfile.objects.create(user=user)

@@ -12,7 +12,6 @@ from .models import (
     ProviderProfile,
     ProviderProfileRevision,
     ProviderService,
-    ProviderServiceRevision,
     ServiceCategory,
 )
 from .presence import MAX_LOCATION_ACCURACY_M, provider_is_online
@@ -45,6 +44,10 @@ class ProviderListQuerySerializer(serializers.Serializer):
         if attrs.get("ordering") == "distance" and "longitude" not in attrs:
             raise serializers.ValidationError("按距离排序时必须提供经纬度。")
         return attrs
+
+
+class ServiceCategoryQuerySerializer(serializers.Serializer):
+    city_code = serializers.CharField(required=False, max_length=20)
 
 
 class ProviderAvailabilityQuerySerializer(serializers.Serializer):
@@ -80,12 +83,17 @@ class PublicProviderReviewSerializer(serializers.ModelSerializer):
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
+    icon_url = serializers.SerializerMethodField()
+
     class Meta:
         model = ServiceCategory
         fields = (
-            "id", "name", "slug", "hourly_min_price_amount", "hourly_max_price_amount",
+            "id", "name", "slug", "icon_url", "hourly_min_price_amount", "hourly_max_price_amount",
             "per_session_min_price_amount", "per_session_max_price_amount",
         )
+
+    def get_icon_url(self, obj):
+        return build_media_url(obj.icon_object_key) if obj.icon_object_key else None
 
 
 class ProviderApplicationSerializer(serializers.ModelSerializer):

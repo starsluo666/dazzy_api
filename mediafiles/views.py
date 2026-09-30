@@ -38,7 +38,7 @@ class PublicImageUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     allowed_types = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
     max_pixels = 25_000_000
-    image_formats = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
+    image_formats = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
     max_size = 10 * 1024 * 1024
     folder = "images"
     category = MediaAsset.Category.OTHER
@@ -56,11 +56,15 @@ class PublicImageUploadView(APIView):
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
                 image = Image.open(uploaded)
                 width, height = image.size
-                if image.format != self.image_formats[uploaded.content_type]:
-                    raise ValidationError({"file": "图片内容与文件类型不一致。"})
+                content_type = self.image_formats.get(image.format)
+                if not content_type:
+                    raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
                 if width <= 0 or height <= 0 or width * height > self.max_pixels:
                     raise ValidationError({"file": "图片像素尺寸过大。"})
                 image.verify()
+                # Mobile browsers may report a different MIME type for a valid image.
+                # Use the verified format for both the COS object and database record.
+                uploaded.content_type = content_type
         except ValidationError:
             raise
         except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
@@ -72,14 +76,13 @@ class PublicImageUploadView(APIView):
         uploaded = request.FILES.get("file")
         if not uploaded:
             raise ValidationError({"file": f"请选择{self.field_label}。"})
-        extension = self.allowed_types.get(uploaded.content_type)
-        if not extension:
-            raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
         if uploaded.size > self.max_size:
             size_mb = self.max_size // (1024 * 1024)
             raise ValidationError({"file": f"{self.field_label}大小不能超过{size_mb}MB。"})
         self.validate_image_content(uploaded)
-        extension = self.allowed_types[uploaded.content_type]
+        extension = self.allowed_types.get(uploaded.content_type)
+        if not extension:
+            raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
         object_key = str(
             PurePosixPath(getattr(settings, self.prefix_setting))
             / self.folder
@@ -150,6 +153,9 @@ class ProviderVideoUploadView(ProviderLifestylePhotoUploadView):
 
     def validate_image_content(self, uploaded):
         from .video import validate_provider_video
+
+        if uploaded.content_type not in self.allowed_types:
+            raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
         validate_provider_video(uploaded)
 
     def post(self, request):

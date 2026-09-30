@@ -34,6 +34,7 @@ from .serializers import (
     ProviderDetailSerializer,
     ProviderListItemSerializer,
     ProviderListQuerySerializer,
+    ServiceCategoryQuerySerializer,
     ProviderReviewQuerySerializer,
     PublicProviderReviewSerializer,
     ProviderApplicationSerializer,
@@ -253,7 +254,11 @@ class ServiceCategoryListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        query = ServiceCategoryQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
         categories = ServiceCategory.objects.filter(is_active=True).order_by("sort_order", "id")
+        if city_code := query.validated_data.get("city_code"):
+            categories = categories.filter(Q(city_codes=[]) | Q(city_codes__contains=[city_code]))
         if request.user.is_authenticated:
             profile = ProviderProfile.objects.filter(
                 user=request.user, status=ProviderProfile.Status.APPROVED

@@ -13,6 +13,12 @@ from .services import upload_private_stream
 
 class MediaAssetTests(TestCase):
     @staticmethod
+    def valid_image(image_format: str) -> bytes:
+        output = BytesIO()
+        Image.new("RGB", (32, 32), "#18c7c6").save(output, format=image_format)
+        return output.getvalue()
+
+    @staticmethod
     def valid_webp() -> bytes:
         output = BytesIO()
         Image.new("RGB", (1280, 720), "#18c7c6").save(output, format="WEBP")
@@ -110,6 +116,52 @@ class MediaAssetTests(TestCase):
         self.assertEqual(asset.category, MediaAsset.Category.PROVIDER_PHOTO)
         self.assertEqual(asset.status, MediaAsset.Status.UPLOADED)
         upload_stream.assert_called_once()
+
+    @patch("mediafiles.views.upload_public_stream", return_value="lifestyle-etag")
+    def test_lifestyle_photo_uses_verified_format_when_mobile_mime_differs(self, upload_stream):
+        user = User.objects.create_user(phone="13900000009")
+        self.client.force_login(user)
+        upload_positions = []
+
+        def record_upload(*, body, object_key, content_type):
+            upload_positions.append(body.tell())
+            return "lifestyle-etag"
+
+        upload_stream.side_effect = record_upload
+
+        for actual_format, claimed_type, expected_type, extension in (
+            ("PNG", "image/jpeg", "image/png", ".png"),
+            ("JPEG", "image/png", "image/jpeg", ".jpg"),
+            ("PNG", "application/octet-stream", "image/png", ".png"),
+        ):
+            with self.subTest(actual_format=actual_format, claimed_type=claimed_type):
+                image = SimpleUploadedFile(
+                    "mobile-photo.jpg", self.valid_image(actual_format), content_type=claimed_type
+                )
+                response = self.client.post(
+                    "/api/v1/media/provider-lifestyle-photos/", {"file": image}
+                )
+
+                self.assertEqual(response.status_code, 201, response.content)
+                asset = MediaAsset.objects.get(pk=response.json()["data"]["id"])
+                self.assertEqual(asset.content_type, expected_type)
+                self.assertTrue(asset.object_key.endswith(extension))
+                self.assertEqual(upload_stream.call_args.kwargs["content_type"], expected_type)
+                self.assertEqual(upload_positions[-1], 0)
+
+    @patch("mediafiles.views.upload_public_stream")
+    def test_lifestyle_photo_rejects_unsupported_image_content(self, upload_stream):
+        user = User.objects.create_user(phone="13900000010")
+        self.client.force_login(user)
+        image = SimpleUploadedFile(
+            "photo.png", self.valid_image("GIF"), content_type="image/png"
+        )
+
+        response = self.client.post("/api/v1/media/provider-lifestyle-photos/", {"file": image})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(MediaAsset.objects.exists())
+        upload_stream.assert_not_called()
 
     @patch("mediafiles.views.build_media_url", return_value="https://media.test/evidence.webp")
     @patch("mediafiles.views.upload_private_stream", return_value="evidence-etag")
