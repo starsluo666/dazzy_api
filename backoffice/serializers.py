@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
@@ -68,8 +69,37 @@ class AdminServiceCategoryQuerySerializer(serializers.Serializer):
     page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
-class AdminServiceCategorySerializer(serializers.ModelSerializer):
+class OperationsIconCategorySerializer(serializers.ModelSerializer):
+    @transaction.atomic
+    def save(self, **kwargs):
+        asset = kwargs.get("icon_asset", self.validated_data.get("icon_asset"))
+        if asset is not None:
+            # Share the deletion lock and recheck after validation: another
+            # operator may have moved the selected image into the trash.
+            asset = MediaAsset.objects.select_for_update().filter(
+                pk=asset.pk,
+                scope=MediaAsset.Scope.PUBLIC,
+                category=MediaAsset.Category.OPERATIONS_ICON,
+                status=MediaAsset.Status.UPLOADED,
+            ).first()
+            if asset is None:
+                raise serializers.ValidationError({"icon_asset_id": "所选图标已不可用，请重新选择。"})
+            kwargs.update(icon_asset=asset, icon_object_key=asset.object_key)
+        return super().save(**kwargs)
+
+
+class AdminServiceCategorySerializer(OperationsIconCategorySerializer):
     icon_url = serializers.SerializerMethodField()
+    icon_asset_id = serializers.PrimaryKeyRelatedField(
+        source="icon_asset",
+        queryset=MediaAsset.objects.filter(
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.OPERATIONS_ICON,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        required=False,
+        allow_null=True,
+    )
     service_count = serializers.IntegerField(read_only=True, default=0)
     active_service_count = serializers.IntegerField(read_only=True, default=0)
     provider_count = serializers.IntegerField(read_only=True, default=0)
@@ -82,13 +112,13 @@ class AdminServiceCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ServiceCategory
         fields = (
-            "id", "name", "slug", "icon_object_key", "icon_url", "city_codes",
+            "id", "name", "slug", "icon_object_key", "icon_asset_id", "icon_url", "city_codes",
             "sort_order", "is_active", "platform_commission_rate", "service_count", "active_service_count",
             "provider_count", "hourly_min_price_amount", "hourly_max_price_amount",
             "per_session_min_price_amount", "per_session_max_price_amount",
             "created_at", "updated_at",
         )
-        read_only_fields = ("id", "icon_url", "created_at", "updated_at")
+        read_only_fields = ("id", "icon_object_key", "icon_url", "created_at", "updated_at")
 
     def get_icon_url(self, obj):
         return build_media_url(obj.icon_object_key) if obj.icon_object_key else None
@@ -111,6 +141,8 @@ class AdminServiceCategorySerializer(serializers.ModelSerializer):
         return normalized
 
     def validate(self, attrs):
+        if "icon_asset" in attrs:
+            attrs["icon_object_key"] = attrs["icon_asset"].object_key if attrs["icon_asset"] else ""
         instance = self.instance
         next_slug = attrs.get("slug")
         if (
@@ -190,8 +222,18 @@ class AdminActivityCategoryQuerySerializer(serializers.Serializer):
     page_size = serializers.IntegerField(required=False, default=20, min_value=1, max_value=50)
 
 
-class AdminActivityCategorySerializer(serializers.ModelSerializer):
+class AdminActivityCategorySerializer(OperationsIconCategorySerializer):
     icon_url = serializers.SerializerMethodField()
+    icon_asset_id = serializers.PrimaryKeyRelatedField(
+        source="icon_asset",
+        queryset=MediaAsset.objects.filter(
+            scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.OPERATIONS_ICON,
+            status=MediaAsset.Status.UPLOADED,
+        ),
+        required=False,
+        allow_null=True,
+    )
     activity_count = serializers.IntegerField(read_only=True, default=0)
     active_activity_count = serializers.IntegerField(read_only=True, default=0)
     city_codes = serializers.ListField(
@@ -203,12 +245,12 @@ class AdminActivityCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ActivityCategory
         fields = (
-            "id", "name", "slug", "icon_object_key", "icon_url", "city_codes",
+            "id", "name", "slug", "icon_object_key", "icon_asset_id", "icon_url", "city_codes",
             "min_capacity", "max_capacity", "min_aa_principal_amount",
             "max_aa_principal_amount", "content_guidance", "sort_order", "is_active",
             "activity_count", "active_activity_count", "created_at", "updated_at",
         )
-        read_only_fields = ("id", "icon_url", "created_at", "updated_at")
+        read_only_fields = ("id", "icon_object_key", "icon_url", "created_at", "updated_at")
 
     def get_icon_url(self, obj):
         return build_media_url(obj.icon_object_key) if obj.icon_object_key else None
@@ -231,6 +273,8 @@ class AdminActivityCategorySerializer(serializers.ModelSerializer):
         return normalized
 
     def validate(self, attrs):
+        if "icon_asset" in attrs:
+            attrs["icon_object_key"] = attrs["icon_asset"].object_key if attrs["icon_asset"] else ""
         min_capacity = attrs.get("min_capacity", getattr(self.instance, "min_capacity", 2))
         max_capacity = attrs.get("max_capacity", getattr(self.instance, "max_capacity", 100))
         min_amount = attrs.get(

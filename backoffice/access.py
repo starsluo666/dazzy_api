@@ -40,6 +40,8 @@ def resolve_admin_access(user) -> AdminAccess:
     permissions = set(role.permissions)
     if not is_platform_member:
         permissions.discard("operations.manage")
+        permissions.discard("asset.view")
+        permissions.discard("asset.manage")
     if not all_data:
         # Wallets and referral relationships are platform-wide, not owned by
         # a city. A city permission must not expose global balances or rules.

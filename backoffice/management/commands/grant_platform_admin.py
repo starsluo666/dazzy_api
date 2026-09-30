@@ -40,6 +40,8 @@ class Command(BaseCommand):
                     "provider.credit.adjust",
                     "service_category.view",
                     "service_category.manage",
+                    "asset.view",
+                    "asset.manage",
                     "activity.view",
                     "activity.review",
                     "activity.manage",

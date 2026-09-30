@@ -12,6 +12,10 @@ class ActivityCategory(models.Model):
     name = models.CharField("名称", max_length=30)
     slug = models.SlugField("标识", max_length=40, unique=True)
     icon_object_key = models.CharField("图标对象键", max_length=512, blank=True)
+    icon_asset = models.ForeignKey(
+        "mediafiles.MediaAsset", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="activity_category_icons", verbose_name="图标素材",
+    )
     city_codes = models.JSONField("展示城市编码", default=list, blank=True)
     min_capacity = models.PositiveSmallIntegerField("最少人数下限", default=2)
     max_capacity = models.PositiveSmallIntegerField("人数上限", default=100)

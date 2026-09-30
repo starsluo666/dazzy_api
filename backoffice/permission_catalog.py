@@ -31,6 +31,8 @@ PERMISSION_GROUPS = (
         "permissions": (
             ("service_category.view", "查看服务分类"),
             ("service_category.manage", "管理服务分类"),
+            ("asset.view", "查看运营素材库"),
+            ("asset.manage", "上传与管理运营素材"),
             ("operations.manage", "管理平台参数与接单规则"),
         ),
     },

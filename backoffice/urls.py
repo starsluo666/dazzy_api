@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .asset_views import AdminAssetBatchDeleteView, AdminAssetListUploadView, AdminAssetRestoreView
 from .auth_views import AdminLogoutView, AdminPasswordLoginView, AdminTokenRefreshView
 from .views import (
     AdminActivityDetailView,
@@ -63,6 +64,9 @@ from .views import (
 )
 
 urlpatterns = [
+    path("assets/", AdminAssetListUploadView.as_view(), name="backoffice-assets"),
+    path("assets/batch-delete/", AdminAssetBatchDeleteView.as_view(), name="backoffice-assets-batch-delete"),
+    path("assets/<uuid:asset_id>/restore/", AdminAssetRestoreView.as_view(), name="backoffice-assets-restore"),
     path("coupon-templates/", AdminCouponTemplateListCreateView.as_view(), name="backoffice-coupon-templates"),
     path("coupon-templates/<uuid:template_id>/", AdminCouponTemplateDetailView.as_view(), name="backoffice-coupon-template-detail"),
     path("coupons/", AdminCouponListIssueView.as_view(), name="backoffice-coupons"),

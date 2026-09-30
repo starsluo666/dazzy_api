@@ -19,6 +19,8 @@ class MediaAsset(models.Model):
         REVIEW_IMAGE = "review_image", "评价图片"
         ORDER_EVIDENCE = "order_evidence", "履约证据"
         SUPPORT_ATTACHMENT = "support_attachment", "客服附件"
+        OPERATIONS_ICON = "operations_icon", "运营图标"
+        OPERATIONS_IMAGE = "operations_image", "运营图片"
         OTHER = "other", "其他"
 
     class Status(models.TextChoices):
