@@ -25,6 +25,10 @@ from .views import (
     WechatLoginBindSmsView,
     WechatLoginBindView,
     WechatMiniProgramLoginView,
+    WechatBindingView,
+    WechatH5BindingStartView,
+    WechatH5BindingCompleteView,
+    WechatMobileBindingView,
 )
 
 urlpatterns = [
@@ -43,6 +47,10 @@ urlpatterns = [
     path("auth/login/wechat/resolve/", WechatLoginResolveView.as_view(), name="auth-wechat-resolve"),
     path("auth/login/wechat/bind/sms/", WechatLoginBindSmsView.as_view(), name="auth-wechat-bind-sms"),
     path("auth/login/wechat/bind/", WechatLoginBindView.as_view(), name="auth-wechat-bind"),
+    path("auth/wechat/binding/", WechatBindingView.as_view(), name="auth-wechat-binding"),
+    path("auth/wechat/binding/h5/start/", WechatH5BindingStartView.as_view(), name="auth-wechat-binding-h5-start"),
+    path("auth/wechat/binding/h5/complete/", WechatH5BindingCompleteView.as_view(), name="auth-wechat-binding-h5-complete"),
+    path("auth/wechat/binding/mobile/", WechatMobileBindingView.as_view(), name="auth-wechat-binding-mobile"),
     path("auth/token/refresh/", TokenRefreshView.as_view(), name="auth-token-refresh"),
     path("auth/logout/", LogoutView.as_view(), name="auth-logout"),
     path("auth/security/", AccountSecurityView.as_view(), name="auth-security"),

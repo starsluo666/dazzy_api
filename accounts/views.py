@@ -41,6 +41,13 @@ from .serializers import (
 from .services import send_sms_code
 from .account_closure import lock_active_user_for_business, withdraw_closure_on_verified_login
 from .models import User
+from .wechat_binding import (
+    begin_h5_binding,
+    bind_mobile,
+    binding_status,
+    complete_h5_binding,
+    complete_h5_binding_callback,
+)
 from .wechat_login import (
     begin_h5_login,
     begin_mobile_login,
@@ -166,12 +173,53 @@ class WechatH5LoginCallbackView(APIView):
     throttle_scope = "auth_wechat_login"
 
     def get(self, request):
+        state = request.query_params.get("state", "")
+        callback = complete_h5_binding_callback if state.startswith("bind_") else complete_h5_callback
         return HttpResponseRedirect(
-            complete_h5_callback(
+            callback(
                 code=request.query_params.get("code", ""),
-                state=request.query_params.get("state", ""),
+                state=state,
             )
         )
+
+
+class WechatBindingView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"data": binding_status(request.user)})
+
+
+class WechatH5BindingStartView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    def post(self, request):
+        authorize_url, state = begin_h5_binding(request)
+        return Response({"data": {"authorize_url": authorize_url, "state": state}})
+
+
+class WechatH5BindingCompleteView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    def post(self, request):
+        serializer = WechatLoginTicketSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": complete_h5_binding(request, serializer.validated_data["ticket"])})
+
+
+class WechatMobileBindingView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_security"
+
+    def post(self, request):
+        serializer = WechatLoginCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response({"data": bind_mobile(request, serializer.validated_data["code"])})
 
 
 class WechatMobileLoginView(APIView):
