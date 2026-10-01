@@ -675,7 +675,7 @@ class AdminOverviewView(APIView):
             orders = orders.filter(provider__service_city_code__in=access.city_codes)
             activities = activities.filter(city_code__in=access.city_codes)
         trend = build_order_trend(orders, days=days)
-        pending_provider_reviews = provider_review_summary(access)["total"]
+        provider_reviews = provider_review_summary(access)
         week_transaction_amount = sum(
             point["transaction_amount"] for point in trend["points"][-7:]
         )
@@ -685,7 +685,7 @@ class AdminOverviewView(APIView):
                     "metrics": {
                         "today_new_users": User.objects.filter(date_joined__date=today).count()
                         if access.all_data else None,
-                        "pending_providers": pending_provider_reviews,
+                        "pending_providers": provider_reviews["total"],
                         "active_orders": orders.filter(
                             status__in=(
                                 ProviderOrder.Status.PENDING_ACCEPTANCE,
@@ -700,9 +700,27 @@ class AdminOverviewView(APIView):
                     "trend": trend,
                     "todos": [
                         {
-                            "key": "provider_review",
-                            "label": "达人入驻审核",
-                            "count": pending_provider_reviews,
+                            "key": "provider_application_review",
+                            "label": "达人入驻初审",
+                            "count": provider_reviews["applications"],
+                            "priority": "high",
+                        },
+                        {
+                            "key": "provider_onboarding_review",
+                            "label": "达人开通审核",
+                            "count": provider_reviews["onboarding"],
+                            "priority": "high",
+                        },
+                        {
+                            "key": "provider_profile_review",
+                            "label": "达人资料变更审核",
+                            "count": provider_reviews["profile_changes"],
+                            "priority": "high",
+                        },
+                        {
+                            "key": "provider_service_review",
+                            "label": "达人服务变更审核",
+                            "count": provider_reviews["service_changes"],
                             "priority": "high",
                         },
                         {

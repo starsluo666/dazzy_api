@@ -165,6 +165,31 @@ class BackofficeProviderReviewTests(APITestCase):
     def setUp(self):
         self.client.force_authenticate(self.admin_user)
 
+    def assert_provider_review_todos(self, *, applications=0, onboarding=0, profile=0, service=0):
+        response = self.client.get(reverse("backoffice-overview"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data["data"]
+        todos = {item["key"]: item for item in data["todos"]}
+        expected = {
+            "provider_application_review": ("达人入驻初审", applications),
+            "provider_onboarding_review": ("达人开通审核", onboarding),
+            "provider_profile_review": ("达人资料变更审核", profile),
+            "provider_service_review": ("达人服务变更审核", service),
+        }
+        self.assertNotIn("provider_review", todos)
+        for key, (label, count) in expected.items():
+            self.assertEqual(todos[key]["label"], label)
+            self.assertEqual(todos[key]["count"], count)
+        self.assertEqual(
+            data["metrics"]["pending_providers"], applications + onboarding + profile + service
+        )
+
+    def test_overview_separates_initial_applications_and_respects_city_scope(self):
+        # The other city's pending application must not enter this reviewer's dashboard.
+        self.assert_provider_review_todos(applications=1)
+        self.client.force_authenticate(self.platform_admin)
+        self.assert_provider_review_todos(applications=2)
+
     def create_live_location(self, provider, *, accuracy_m="16.00"):
         now = timezone.now()
         return ProviderLiveLocation.objects.create(
@@ -527,6 +552,8 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertNotEqual(self.handan.display_name, "审核后的达人名")
         self.assertEqual(service.price_amount, 12000)
 
+        self.assert_provider_review_todos(profile=1, service=1)
+
         profile_revision = ProviderProfileRevision.objects.get(
             provider=self.handan, status=ProviderProfileRevision.Status.PENDING
         )
@@ -556,6 +583,7 @@ class BackofficeProviderReviewTests(APITestCase):
         service.refresh_from_db()
         self.assertEqual(self.handan.display_name, "审核后的达人名")
         self.assertEqual(service.price_amount, 18000)
+        self.assert_provider_review_todos()
 
     def test_initial_components_only_enter_combined_queue_and_keep_verified_identity(self):
         self.handan.status = ProviderProfile.Status.APPROVED
@@ -593,6 +621,7 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(service_queue.status_code, status.HTTP_200_OK)
         self.assertEqual(profile_queue.data["data"]["pagination"]["total"], 0)
         self.assertEqual(service_queue.data["data"]["pagination"]["total"], 0)
+        self.assert_provider_review_todos()
 
         self.handan.onboarding_status = ProviderProfile.OnboardingStatus.PENDING_REVIEW
         self.handan.onboarding_submitted_at = timezone.now()
@@ -604,6 +633,7 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(summary.data["data"]["onboarding"], 1)
         self.assertEqual(summary.data["data"]["profile_changes"], 0)
         self.assertEqual(summary.data["data"]["service_changes"], 0)
+        self.assert_provider_review_todos(onboarding=1)
 
         rejected = self.client.post(
             reverse(
@@ -628,6 +658,7 @@ class BackofficeProviderReviewTests(APITestCase):
         )
         self.assertEqual(profile_revision.status, ProviderProfileRevision.Status.REJECTED)
         self.assertEqual(service_revision.status, ProviderServiceRevision.Status.REJECTED)
+        self.assert_provider_review_todos()
 
     def test_invalid_provider_list_query_returns_validation_error(self):
         response = self.client.get(
@@ -2039,6 +2070,7 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_provider_lifecycle_reaches_public_bookable_availability(self):
+        self.assert_provider_review_todos(applications=1)
         category = ServiceCategory.objects.create(name="城市陪伴", slug="lifecycle-service")
         response = self.client.post(
             reverse("backoffice-provider-application-review", args=(self.handan.id,)),
@@ -2048,6 +2080,8 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.handan.refresh_from_db()
         self.assertFalse(self.handan.is_accepting_orders)
+
+        self.assert_provider_review_todos()
 
         provider_client = self.client_class()
         provider_client.force_authenticate(self.handan_user)
@@ -2103,6 +2137,8 @@ class BackofficeProviderReviewTests(APITestCase):
             format="json",
         )
         self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        # Incomplete setup must not become another initial application or a profile change.
+        self.assert_provider_review_todos()
         service_response = provider_client.post(
             "/api/v1/providers/me/services/",
             {
@@ -2120,6 +2156,8 @@ class BackofficeProviderReviewTests(APITestCase):
             self.handan.onboarding_status,
             ProviderProfile.OnboardingStatus.PENDING_REVIEW,
         )
+        self.assertEqual(self.handan.status, ProviderProfile.Status.APPROVED)
+        self.assert_provider_review_todos(onboarding=1)
         onboarding_review = self.client.post(
             reverse(
                 "backoffice-provider-change-review-action",
@@ -2129,6 +2167,7 @@ class BackofficeProviderReviewTests(APITestCase):
             format="json",
         )
         self.assertEqual(onboarding_review.status_code, status.HTTP_200_OK)
+        self.assert_provider_review_todos()
         service_id = ProviderService.objects.get(
             provider=self.handan, category=category
         ).id
