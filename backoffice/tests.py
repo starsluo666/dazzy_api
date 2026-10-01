@@ -344,6 +344,65 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(profile.status, ProviderProfile.Status.APPROVED)
         self.assertFalse(profile.is_profile_complete)
 
+    def test_application_name_correction_requires_review_permission_and_is_audited(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.identity_status = ProviderProfile.IdentityStatus.UNVERIFIED
+        self.handan.save(update_fields=("status", "identity_status", "updated_at"))
+        url = reverse("backoffice-provider-application-name", args=(self.handan.id,))
+
+        detail = self.client.get(reverse("backoffice-provider-detail", args=(self.handan.id,)))
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["data"]["application_real_name"], "张三")
+
+        response = self.client.post(
+            url,
+            {"application_real_name": "张小三", "reason": "客服核对身份证后确认入驻申请姓名录入错误"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.handan.refresh_from_db()
+        self.assertEqual(self.handan.application_real_name, "张小三")
+        audit = AdminAuditLog.objects.get(
+            target_id=str(self.handan.id), action="provider.application_name.correct"
+        )
+        self.assertEqual(audit.before["application_real_name"], "张三")
+        self.assertEqual(audit.after["application_real_name"], "张小三")
+        self.assertEqual(audit.actor, self.admin_user)
+
+        self.role.permissions = ["provider.view"]
+        self.role.save(update_fields=("permissions",))
+        denied = self.client.post(
+            url,
+            {"application_real_name": "张三", "reason": "客服核对证件信息后申请更正"},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_application_name_correction_rejects_wrong_state_scope_and_reason(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.identity_status = ProviderProfile.IdentityStatus.PENDING
+        self.handan.save(update_fields=("status", "identity_status", "updated_at"))
+        url = reverse("backoffice-provider-application-name", args=(self.handan.id,))
+        payload = {"application_real_name": "张小三", "reason": "客服核对身份证后确认入驻申请姓名错误"}
+        self.assertEqual(self.client.post(url, payload, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.handan.identity_status = ProviderProfile.IdentityStatus.VERIFIED
+        self.handan.save(update_fields=("identity_status", "updated_at"))
+        self.assertEqual(self.client.post(url, payload, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.handan.identity_status = ProviderProfile.IdentityStatus.UNVERIFIED
+        self.handan.save(update_fields=("identity_status", "updated_at"))
+        self.assertEqual(self.client.post(url, {**payload, "reason": "短"}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.client.post(url, {**payload, "application_real_name": "张三"}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.beijing.status = ProviderProfile.Status.APPROVED
+        self.beijing.identity_status = ProviderProfile.IdentityStatus.UNVERIFIED
+        self.beijing.save(update_fields=("status", "identity_status", "updated_at"))
+        other_city_url = reverse("backoffice-provider-application-name", args=(self.beijing.id,))
+        self.assertEqual(self.client.post(other_city_url, payload, format="json").status_code, status.HTTP_404_NOT_FOUND)
+        self.beijing.refresh_from_db()
+        self.assertEqual(self.beijing.application_real_name, "李四")
+
     def test_pending_provider_identity_can_be_approved(self):
         photos = [
             MediaAsset.objects.create(

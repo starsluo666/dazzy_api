@@ -301,7 +301,9 @@ def submit_provider_identity(*, provider: ProviderProfile) -> ProviderProfile:
         locked.application_real_name
         and locked.identity_real_name.strip() != locked.application_real_name.strip()
     ):
-        raise ValidationError({"identity_real_name": "实名认证姓名必须与入驻申请姓名一致。"})
+        raise ValidationError({
+            "identity_real_name": "实名认证姓名与入驻申请姓名不一致，请联系客服核实并更正申请姓名后重试。"
+        })
     locked.identity_status = ProviderProfile.IdentityStatus.PENDING
     locked.identity_submitted_at = timezone.now()
     locked.identity_reviewed_at = None

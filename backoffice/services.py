@@ -864,6 +864,42 @@ def review_provider_service_revision(*, revision_id, decision, reason, actor, ac
 
 
 @transaction.atomic
+def correct_provider_application_name(
+    *, profile_id, application_real_name, reason, actor, access, request
+):
+    queryset = ProviderProfile.objects.select_for_update().select_related("user")
+    if not access.all_data:
+        queryset = queryset.filter(service_city_code__in=access.city_codes)
+    profile = get_object_or_404(queryset, id=profile_id)
+    if profile.status != ProviderProfile.Status.APPROVED:
+        raise ValidationError("仅已通过入驻审核的达人可更正申请姓名。")
+    if profile.identity_status not in (
+        ProviderProfile.IdentityStatus.UNVERIFIED,
+        ProviderProfile.IdentityStatus.REJECTED,
+    ):
+        raise ValidationError("实名认证审核中或已通过，不能更正申请姓名。")
+    new_name = application_real_name.strip()
+    old_name = profile.application_real_name
+    if new_name == old_name:
+        raise ValidationError({"application_real_name": "新姓名与原申请姓名相同。"})
+
+    profile.application_real_name = new_name
+    profile.save(update_fields=("application_real_name", "updated_at"))
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action="provider.application_name.correct",
+        target_type="provider_profile",
+        target_id=str(profile.id),
+        before={"application_real_name": old_name},
+        after={"application_real_name": new_name, "reason": reason.strip()},
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+    return profile
+
+
+@transaction.atomic
 def review_provider_identity(*, profile_id, decision, reason, actor, access, request):
     queryset = ProviderProfile.objects.select_for_update().select_related("user")
     if not access.all_data:

@@ -123,6 +123,7 @@ from .serializers import (
     ProviderOrderingSettingSerializer,
     PlatformOperationSettingSerializer,
     ProviderApplicationQuerySerializer,
+    ProviderApplicationNameCorrectionSerializer,
     ProviderApplicationReviewDecisionSerializer,
     ProviderChangeReviewQuerySerializer,
     ProviderReviewDecisionSerializer,
@@ -132,6 +133,7 @@ from .permission_catalog import permission_catalog_data
 from .services import (
     adjust_provider_credit,
     change_provider_operational_status,
+    correct_provider_application_name,
     change_user_account_status,
     change_user_risk_flag,
     create_provider_order_after_sales_case,
@@ -2036,6 +2038,25 @@ class ProviderAdminDetailView(APIView):
             for order in profile.orders.select_related("customer").order_by("-created_at")[:5]
         ]
         return Response({"data": data})
+
+
+class ProviderApplicationNameCorrectionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, profile_id):
+        access = resolve_admin_access(request.user)
+        access.require("provider.review")
+        serializer = ProviderApplicationNameCorrectionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        profile = correct_provider_application_name(
+            profile_id=profile_id,
+            actor=request.user,
+            access=access,
+            request=request,
+            **serializer.validated_data,
+        )
+        context = {"can_review": True, "include_detail": True}
+        return Response({"data": ProviderAdminSerializer(profile, context=context).data})
 
 
 class ProviderIdentityReviewView(APIView):

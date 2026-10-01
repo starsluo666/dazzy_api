@@ -31,6 +31,7 @@ from .views import (
     OrganizationMemberListView,
     OrganizationMemberDetailView,
     ProviderAdminActionView,
+    ProviderApplicationNameCorrectionView,
     ProviderAdminDetailView,
     ProviderAdminListView,
     ProviderCreditAdjustmentView,
@@ -216,6 +217,11 @@ urlpatterns = [
         "provider-change-reviews/<str:kind>/<int:review_id>/review/",
         ProviderChangeReviewActionView.as_view(),
         name="backoffice-provider-change-review-action",
+    ),
+    path(
+        "providers/<int:profile_id>/application-name/",
+        ProviderApplicationNameCorrectionView.as_view(),
+        name="backoffice-provider-application-name",
     ),
     path(
         "providers/<int:profile_id>/identity-review/",

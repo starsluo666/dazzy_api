@@ -763,6 +763,11 @@ class ProviderApplicationReviewDecisionSerializer(ProviderReviewDecisionSerializ
         return attrs
 
 
+class ProviderApplicationNameCorrectionSerializer(serializers.Serializer):
+    application_real_name = serializers.CharField(min_length=2, max_length=50, trim_whitespace=True)
+    reason = serializers.CharField(min_length=5, max_length=500, trim_whitespace=True)
+
+
 class ProviderChangeReviewQuerySerializer(serializers.Serializer):
     kind = serializers.ChoiceField(
         required=False, default="onboarding", choices=("onboarding", "profile", "service")
@@ -1060,7 +1065,8 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "commission_reset_period_override", "commission_tiers_override",
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
             "credit_adjustments", "submitted_at", "reviewed_at", "rejection_reason",
-            "identity_real_name", "identity_number_masked", "identity_front_photo_url",
+            "application_real_name", "identity_real_name", "identity_number_masked",
+            "identity_front_photo_url",
             "identity_back_photo_url", "identity_face_photo_url", "identity_submitted_at",
             "identity_reviewed_at", "identity_rejection_reason", "is_profile_complete",
             "created_at", "updated_at",
