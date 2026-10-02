@@ -1,8 +1,4 @@
-"""Collect private receiving-account materials, without any channel or fund mutation.
-
-Huifu onboarding needs a confirmed product contract. No saved record here may be
-used as proof of channel readiness, a bound bank card, or successful settlement.
-"""
+"""Private receiving materials. Saving is never authorization for channel submission."""
 
 import base64
 import binascii
@@ -23,6 +19,7 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 
 from accounts.account_closure import lock_active_user_for_business
 from .models import ProviderProfile, ProviderReceivingAccount
+from .receiving_regions import validate_bank_region
 
 
 CONSENT_VERSION = "receiving-materials-v1"
@@ -103,6 +100,8 @@ class ReceivingDetailsSerializer(serializers.Serializer):
     bank_name = serializers.CharField(max_length=60)
     bank_province = serializers.CharField(max_length=40)
     bank_city = serializers.CharField(max_length=40)
+    bank_province_code = serializers.CharField(max_length=6, required=False, allow_blank=True)
+    bank_city_code = serializers.CharField(max_length=6, required=False, allow_blank=True)
 
     def validate_id_number(self, value):
         # Catch obvious input errors before collecting a mismatched identity.
@@ -117,6 +116,10 @@ class ReceivingDetailsSerializer(serializers.Serializer):
         return value
 
     def validate(self, attrs):
+        if attrs.get("bank_province_code") or attrs.get("bank_city_code"):
+            attrs["bank_province"], attrs["bank_city"] = validate_bank_region(
+                attrs.get("bank_province_code"), attrs.get("bank_city_code"),
+            )
         today = timezone.localdate()
         if attrs["cert_begin_date"] > today:
             raise serializers.ValidationError({"cert_begin_date": "证件生效日期不能晚于今天。"})
@@ -140,6 +143,8 @@ class ReceivingAccountInputSerializer(serializers.Serializer):
     bank_name = serializers.CharField(max_length=60)
     bank_province = serializers.CharField(max_length=40)
     bank_city = serializers.CharField(max_length=40)
+    bank_province_code = serializers.CharField(max_length=6, required=False, allow_blank=True)
+    bank_city_code = serializers.CharField(max_length=6, required=False, allow_blank=True)
     consent_accepted = serializers.BooleanField()
     consent_version = serializers.CharField(max_length=32)
 
@@ -152,11 +157,16 @@ class ReceivingAccountInputSerializer(serializers.Serializer):
 def receiving_account_summary(provider):
     """Safe for staff detail views; never decrypt material or expose channel identifiers."""
     account = ProviderReceivingAccount.objects.filter(provider=provider).first()
+    from .receiving_onboarding import LABELS
     return {
         "materials_saved": bool(account),
-        "status_label": "资料已保存，待渠道开通" if account else "未填写收款资料",
-        "channel_status": "not_connected",
-        "channel_notice": CHANNEL_NOTICE,
+        "status_label": LABELS.get(account.channel_status, "渠道结果待核实") if account else "未填写收款资料",
+        "channel_status": account.channel_status if account else "not_connected",
+        "channel_notice": account.channel_message or CHANNEL_NOTICE if account else CHANNEL_NOTICE,
+        "audit_status": account.audit_status if account else "",
+        "card_status": account.card_status if account else "",
+        "settlement_status": account.settlement_status if account else "",
+        "channel_checked_at": account.channel_checked_at if account else None,
         "bank_card_masked": account.bank_card_masked if account else "",
         "bank_name": account.bank_name if account else "",
         "bank_province": account.bank_province if account else "",
@@ -168,7 +178,10 @@ def receiving_account_summary(provider):
 
 @sensitive_variables()
 def receiving_account_data(provider):
+    from .huifu_user import channel_available
+    from .receiving_onboarding import ONBOARDING_CONSENT_VERSION, ONBOARDING_NOTICE
     account = ProviderReceivingAccount.objects.filter(provider=provider).first()
+    locked = bool(account and (account.user_huifu_id or account.channel_status not in {"not_connected", "rejected"}))
     readable = True
     try:
         details = decrypt_details(account) if account else {}
@@ -180,8 +193,15 @@ def receiving_account_data(provider):
     return {
         **receiving_account_summary(provider),
         "collection_enabled": collection_available() and readable,
+        "can_edit": collection_available() and readable and not locked,
+        "can_clear": bool(account and not account.attempts.exists()),
+        "onboarding_enabled": channel_available(),
+        "can_submit": bool(account and account.channel_status in {"not_connected", "rejected", "registered"} and readable and provider.has_verified_identity and channel_available()),
+        "can_refresh": bool(account and account.onboarding_consented_at and readable),
+        "onboarding_consent_version": ONBOARDING_CONSENT_VERSION,
+        "onboarding_notice": ONBOARDING_NOTICE,
         "collection_unavailable_reason": (
-            "已保存资料暂时无法读取，请联系客服核实，或清除后重新填写。"
+            "已保存资料暂时无法读取，请联系客服核实。"
             if not readable else "平台准备完成后，你可以在这里填写资料。当前不影响查看订单和账务收入。"
         ),
         "identity_verified": provider.has_verified_identity,
@@ -190,6 +210,8 @@ def receiving_account_data(provider):
         "cert_begin_date": details.get("cert_begin_date"),
         "cert_end_date": details.get("cert_end_date"),
         "cert_long_term": details.get("cert_long_term", False),
+        "bank_province_code": details.get("bank_province_code", ""),
+        "bank_city_code": details.get("bank_city_code", ""),
         "consent_version": CONSENT_VERSION,
         "collection_notice": COLLECTION_NOTICE,
     }
@@ -212,6 +234,8 @@ def save_receiving_account(*, provider, data):
     if not provider.identity_number_digest or not provider.identity_real_name:
         raise PermissionDenied("实名信息不完整，请联系客服核实后再填写。")
     account = ProviderReceivingAccount.objects.filter(provider=provider).first()
+    if account and (account.user_huifu_id or account.channel_status not in {"not_connected", "rejected"}):
+        raise ValidationError("资料已提交渠道，不能直接覆盖；如需更正请联系客服。")
     existing = decrypt_details(account) if account else {}
     payload = {key: value for key, value in data.items() if key in ReceivingDetailsSerializer().fields}
     for key in ("id_number", "bank_card_number", "mobile"):
@@ -248,4 +272,7 @@ def save_receiving_account(*, provider, data):
 @transaction.atomic
 def clear_receiving_account(provider):
     ProviderProfile.objects.select_for_update().get(pk=provider.pk)
+    account = ProviderReceivingAccount.objects.select_for_update().filter(provider=provider).first()
+    if account and account.attempts.exists():
+        raise ValidationError("资料已用于渠道申请，不能直接清除，请联系客服处理。")
     ProviderReceivingAccount.objects.filter(provider=provider).delete()

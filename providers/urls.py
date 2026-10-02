@@ -1,6 +1,9 @@
 from django.urls import path
 
-from .receiving_account_views import CurrentProviderReceivingAccountView
+from .receiving_account_views import (
+    CurrentProviderReceivingAccountView, ProviderReceivingRegionsView,
+    ProviderReceivingSubmitView, ProviderReceivingRefreshView, HuifuReceivingNotifyView,
+)
 
 from .views import (
     CurrentProviderApplicationSubmitView,
@@ -26,6 +29,10 @@ from .views import (
 )
 
 urlpatterns = [
+    path("providers/me/receiving-account/regions/", ProviderReceivingRegionsView.as_view()),
+    path("providers/me/receiving-account/submit/", ProviderReceivingSubmitView.as_view()),
+    path("providers/me/receiving-account/refresh/", ProviderReceivingRefreshView.as_view()),
+    path("providers/receiving-account/huifu-notify/", HuifuReceivingNotifyView.as_view()),
     path(
         "providers/me/receiving-account/", CurrentProviderReceivingAccountView.as_view(),
         name="provider-receiving-account",

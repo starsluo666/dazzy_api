@@ -218,6 +218,13 @@ HUIFU_SKILL_SOURCE = os.getenv("HUIFU_SKILL_SOURCE", "hfps/1.3.5")
 HUIFU_NOTIFY_URL = os.getenv("HUIFU_NOTIFY_URL", "")
 HUIFU_FEE_FLAG = os.getenv("HUIFU_FEE_FLAG", "1")
 HUIFU_CONNECT_TIMEOUT_SECONDS = int(os.getenv("HUIFU_CONNECT_TIMEOUT_SECONDS", "15"))
+
+# Individual split/settlement users, not acquiring merchants. No automatic fund transfer.
+HUIFU_USER_ONBOARDING_ENABLED = os.getenv("HUIFU_USER_ONBOARDING_ENABLED", "false").lower() in {"1", "true", "yes"}
+HUIFU_USER_UPPER_ID = os.getenv("HUIFU_USER_UPPER_ID", "")
+HUIFU_USER_NOTIFY_URL = os.getenv("HUIFU_USER_NOTIFY_URL", "")
+HUIFU_USER_SETTLEMENT_CONFIG = os.getenv("HUIFU_USER_SETTLEMENT_CONFIG", "")
+HUIFU_USER_SKILL_SOURCE = os.getenv("HUIFU_USER_SKILL_SOURCE", "hfps/1.3.5;hfms/1.0.4")
 # Collection is separate from channel onboarding and order splitting; default closed.
 PROVIDER_RECEIVING_ACCOUNT_COLLECTION_ENABLED = os.getenv(
     "PROVIDER_RECEIVING_ACCOUNT_COLLECTION_ENABLED", "false"

@@ -227,7 +227,7 @@ class ProviderProfile(models.Model):
 
 
 class ProviderReceivingAccount(models.Model):
-    """Private collection only. Saved materials are NOT a Huifu account or a bank binding."""
+    """Encrypted materials and independently verified channel state; never a payout ledger."""
 
     provider = models.OneToOneField(
         ProviderProfile, on_delete=models.CASCADE, related_name="receiving_account",
@@ -242,13 +242,55 @@ class ProviderReceivingAccount(models.Model):
     bank_city = models.CharField("开户城市", max_length=40)
     consent_version = models.CharField("资料收集告知版本", max_length=32)
     consented_at = models.DateTimeField("同意收集时间")
+    channel_status = models.CharField(max_length=24, default="not_connected")
+    user_huifu_id = models.CharField(max_length=18, null=True, blank=True, unique=True, editable=False)
+    channel_scope = models.CharField(max_length=64, blank=True, editable=False)
+    onboarding_consent_version = models.CharField(max_length=32, blank=True)
+    onboarding_consented_at = models.DateTimeField(null=True, blank=True)
+    audit_status = models.CharField(max_length=1, blank=True)
+    card_status = models.CharField(max_length=1, blank=True)
+    settlement_status = models.CharField(max_length=1, blank=True)
+    channel_checked_at = models.DateTimeField(null=True, blank=True)
+    channel_message = models.CharField(max_length=200, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "provider_receiving_account"
-        verbose_name = "达人收款资料（非渠道开户）"
+        verbose_name = "达人收款账户"
         verbose_name_plural = verbose_name
+
+
+class ProviderReceivingAttempt(models.Model):
+    """Durable request identity BEFORE I/O. No raw material or response is stored here."""
+
+    account = models.ForeignKey(ProviderReceivingAccount, on_delete=models.PROTECT, related_name="attempts")
+    kind = models.CharField(max_length=16)  # register / configure / query / recover
+    req_seq_id = models.CharField(max_length=32, unique=True)
+    req_date = models.CharField(max_length=8)
+    status = models.CharField(max_length=16, default="sent")
+    # Configuration frozen at consent; excludes card/identity material and keys.
+    settlement_config = models.JSONField(default=dict)
+    apply_no = models.CharField(max_length=18, blank=True, editable=False)
+    response_code = models.CharField(max_length=8, blank=True)
+    response_digest = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "provider_receiving_attempt"
+        ordering = ("-pk",)
+
+
+class ProviderReceivingNotification(models.Model):
+    attempt = models.ForeignKey(ProviderReceivingAttempt, on_delete=models.PROTECT, related_name="notifications")
+    digest = models.CharField(max_length=64, unique=True)
+    notify_type = models.CharField(max_length=1)
+    audit_status = models.CharField(max_length=1, blank=True)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "provider_receiving_notification"
 
 
 class ProviderCategoryGrant(models.Model):

@@ -288,6 +288,9 @@ def account_closure_blockers(user) -> list[dict[str, object]]:
         ),
     )
     blockers = []
+    from providers.models import ProviderReceivingAccount
+    if ProviderReceivingAccount.objects.filter(provider__user=user, attempts__isnull=False).exists():
+        blockers.append({"code": "receiving_channel", "label": "需客服核对的渠道收款账户", "count": 1})
     for code, label, queryset in checks:
         count = queryset.count()
         if count:

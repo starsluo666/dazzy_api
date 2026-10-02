@@ -1,6 +1,7 @@
 from django.utils.decorators import method_decorator
+from django.http import HttpResponse
 from django.views.decorators.debug import sensitive_post_parameters
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -11,6 +12,8 @@ from .receiving_accounts import (
     save_receiving_account,
 )
 from .views import current_approved_provider
+from .receiving_onboarding import submit_onboarding, refresh_onboarding, receive_notification
+from .receiving_regions import bank_regions
 
 
 @method_decorator(sensitive_post_parameters(), name="dispatch")
@@ -33,6 +36,43 @@ class CurrentProviderReceivingAccountView(APIView):
         return Response({"data": receiving_account_data(provider)})
 
     def delete(self, request):
-        # Always allow withdrawing locally saved materials, even with collection closed.
+        # Only unsubmitted local drafts may be cleared, even with collection closed.
         clear_receiving_account(current_approved_provider(request))
         return Response(status=204)
+
+
+class ProviderReceivingRegionsView(CurrentProviderReceivingAccountView):
+    http_method_names = ["get", "head", "options"]
+
+    def get(self, request):
+        current_approved_provider(request)
+        return Response({"data": bank_regions()})
+
+
+class ProviderReceivingSubmitView(CurrentProviderReceivingAccountView):
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        provider = current_approved_provider(request)
+        submit_onboarding(provider, request.data)
+        return Response({"data": receiving_account_data(provider)})
+
+
+class ProviderReceivingRefreshView(CurrentProviderReceivingAccountView):
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        provider = current_approved_provider(request)
+        refresh_onboarding(provider)
+        return Response({"data": receiving_account_data(provider)})
+
+
+@method_decorator(sensitive_post_parameters(), name="dispatch")
+class HuifuReceivingNotifyView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = []
+
+    def post(self, request):
+        ack = receive_notification(request.data.get("data"), request.data.get("sign"))
+        return HttpResponse(ack, content_type="text/plain; charset=utf-8")
