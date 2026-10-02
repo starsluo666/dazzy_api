@@ -236,6 +236,7 @@ dependencies = [
     { name = "gunicorn" },
     { name = "pillow" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "pycryptodome" },
     { name = "redis" },
     { name = "whitenoise" },
 ]
@@ -259,6 +260,7 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=26.2.0" },
     { name = "pillow", specifier = ">=11,<12" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<3.3" },
+    { name = "pycryptodome", specifier = ">=3.20,<4" },
     { name = "redis", specifier = ">=6,<7" },
     { name = "whitenoise", specifier = ">=6.12,<7" },
 ]

@@ -19,7 +19,7 @@ DEFAULT_LABELS = [
     "orders.tests.ProviderOrderApiTests.test_wechat_payment_authorization_grants_current_session_and_returns_to_order",
     "orders.tests.ProviderOrderApiTests.test_wechat_payment_authorization_rejects_non_payable_order",
     "orders.tests.ProviderOrderApiTests.test_huifu_payment_session_fails_closed_when_not_configured",
-    "orders.tests.ProviderOrderApiTests.test_huifu_gateway_failure_is_retryable_with_same_request_identity",
+    "orders.tests.ProviderOrderApiTests.test_huifu_gateway_failure_recovers_by_query_without_repeating_create",
     "activities.tests.ActivityModelTests.test_activity_publish_wechat_authorization_returns_to_activity_cashier",
     "activities.tests.ActivityModelTests.test_activity_huifu_session_is_server_priced_and_idempotent",
     "activities.tests.ActivityModelTests.test_activity_full_balance_payment_bypasses_huifu_and_consumes_wallet",

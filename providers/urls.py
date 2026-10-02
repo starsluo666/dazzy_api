@@ -1,5 +1,7 @@
 from django.urls import path
 
+from .receiving_account_views import CurrentProviderReceivingAccountView
+
 from .views import (
     CurrentProviderApplicationSubmitView,
     CurrentProviderApplicationView,
@@ -24,6 +26,10 @@ from .views import (
 )
 
 urlpatterns = [
+    path(
+        "providers/me/receiving-account/", CurrentProviderReceivingAccountView.as_view(),
+        name="provider-receiving-account",
+    ),
     path("providers/", ProviderListView.as_view(), name="provider-list"),
     path("service-categories/", ServiceCategoryListView.as_view(), name="service-category-list"),
     path(

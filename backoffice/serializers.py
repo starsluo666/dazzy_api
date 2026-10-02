@@ -1047,6 +1047,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     identity_back_photo_url = serializers.SerializerMethodField()
     identity_face_photo_url = serializers.SerializerMethodField()
     is_profile_complete = serializers.BooleanField(read_only=True)
+    receiving_account = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderProfile
@@ -1069,8 +1070,15 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "identity_front_photo_url",
             "identity_back_photo_url", "identity_face_photo_url", "identity_submitted_at",
             "identity_reviewed_at", "identity_rejection_reason", "is_profile_complete",
+            "receiving_account",
             "created_at", "updated_at",
         )
+
+    def get_receiving_account(self, obj):
+        if not (self.context.get("can_review", False) and self.context.get("include_detail", False)):
+            return None
+        from providers.receiving_accounts import receiving_account_summary
+        return receiving_account_summary(obj)
 
     def get_phone_masked(self, obj):
         return mask_phone(obj.user.phone)

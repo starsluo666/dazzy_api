@@ -226,6 +226,31 @@ class ProviderProfile(models.Model):
         return self.display_name.strip() or self.user.nickname
 
 
+class ProviderReceivingAccount(models.Model):
+    """Private collection only. Saved materials are NOT a Huifu account or a bank binding."""
+
+    provider = models.OneToOneField(
+        ProviderProfile, on_delete=models.CASCADE, related_name="receiving_account",
+        verbose_name="达人",
+    )
+    details_ciphertext = models.TextField("加密收款资料", editable=False)
+    id_number_masked = models.CharField("脱敏身份证号", max_length=32)
+    bank_card_masked = models.CharField("脱敏银行卡号", max_length=32)
+    mobile_masked = models.CharField("脱敏联系电话", max_length=20)
+    bank_name = models.CharField("开户银行", max_length=60)
+    bank_province = models.CharField("开户省份", max_length=40)
+    bank_city = models.CharField("开户城市", max_length=40)
+    consent_version = models.CharField("资料收集告知版本", max_length=32)
+    consented_at = models.DateTimeField("同意收集时间")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_receiving_account"
+        verbose_name = "达人收款资料（非渠道开户）"
+        verbose_name_plural = verbose_name
+
+
 class ProviderCategoryGrant(models.Model):
     provider = models.ForeignKey(
         ProviderProfile,

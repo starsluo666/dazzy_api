@@ -5,12 +5,32 @@ from .models import (
     ProviderDateAvailability,
     ProviderDateClosure,
     ProviderProfile,
+    ProviderReceivingAccount,
     ProviderProfileRevision,
     ProviderService,
     ProviderServiceRevision,
     ProviderWeeklyAvailability,
     ServiceCategory,
 )
+
+
+@admin.register(ProviderReceivingAccount)
+class ProviderReceivingAccountAdmin(admin.ModelAdmin):
+    list_display = ("provider", "bank_name", "bank_card_masked", "updated_at")
+    fields = (
+        "provider", "bank_name", "bank_province", "bank_city", "bank_card_masked",
+        "id_number_masked", "mobile_masked", "consent_version", "consented_at", "updated_at",
+    )
+    readonly_fields = fields
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(ServiceCategory)

@@ -97,6 +97,9 @@ def process_account_closure(user_id: int, *, now=None) -> str:
     user.is_active = False
     user.save(update_fields=("account_status", "is_active"))
     revoke_sessions(user)
+    # These are optional, unsubmitted receiving materials, not financial records.
+    from providers.models import ProviderReceivingAccount
+    ProviderReceivingAccount.objects.filter(provider__user=user).delete()
     closure.status = AccountClosureRequest.Status.COMPLETED
     closure.finished_at = now
     closure.save(update_fields=("checked_at", "blocking_items", "status", "finished_at"))

@@ -218,6 +218,14 @@ HUIFU_SKILL_SOURCE = os.getenv("HUIFU_SKILL_SOURCE", "hfps/1.3.5")
 HUIFU_NOTIFY_URL = os.getenv("HUIFU_NOTIFY_URL", "")
 HUIFU_FEE_FLAG = os.getenv("HUIFU_FEE_FLAG", "1")
 HUIFU_CONNECT_TIMEOUT_SECONDS = int(os.getenv("HUIFU_CONNECT_TIMEOUT_SECONDS", "15"))
+# Collection is separate from channel onboarding and order splitting; default closed.
+PROVIDER_RECEIVING_ACCOUNT_COLLECTION_ENABLED = os.getenv(
+    "PROVIDER_RECEIVING_ACCOUNT_COLLECTION_ENABLED", "false"
+).lower() in {"true", "1", "yes"}
+# Independent base64-encoded 32-byte AES key. Never derive this from DJANGO_SECRET_KEY.
+PROVIDER_RECEIVING_ACCOUNT_ENCRYPTION_KEY = os.getenv(
+    "PROVIDER_RECEIVING_ACCOUNT_ENCRYPTION_KEY", ""
+)
 WECHAT_OFFICIAL_ACCOUNT_APP_ID = os.getenv("WECHAT_OFFICIAL_ACCOUNT_APP_ID", "")
 WECHAT_OFFICIAL_ACCOUNT_APP_SECRET = os.getenv("WECHAT_OFFICIAL_ACCOUNT_APP_SECRET", "")
 WECHAT_OFFICIAL_ACCOUNT_OAUTH_CALLBACK_URL = os.getenv(
@@ -256,6 +264,7 @@ WECHAT_OAUTH_STATE_MAX_AGE_SECONDS = int(
 )
 WECHAT_OAUTH_TIMEOUT_SECONDS = int(os.getenv("WECHAT_OAUTH_TIMEOUT_SECONDS", "10"))
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "provider_receiving_account": "10/min",
     "auth_sms_send": os.getenv("AUTH_SMS_SEND_RATE", "10/min"),
     "auth_sms_send_ip_daily": os.getenv("AUTH_SMS_SEND_IP_DAILY_RATE", "50/day"),
     "auth_register": os.getenv("AUTH_REGISTER_RATE", "5/min"),
