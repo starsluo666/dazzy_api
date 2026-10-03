@@ -883,13 +883,16 @@ class IncomeJobTests(TransactionTestCase):
         if url.endswith("scanpay/query"):
             snap = {
                 **distribution.snapshot(),
+                "fee_flag": self.payment.distribution_cohort["fee_flag"],
                 "payment": {
                     "req_date": self.payment.req_date,
                     "req_seq_id": self.payment.req_seq_id,
                     "gateway_trade_no": self.payment.gateway_trade_no,
                 },
             }
-            return signed_http_response(distribution.payment_receipt(snap))
+            return signed_http_response(distribution.payment_receipt(
+                snap, fee_amount="0.35" if snap["fee_flag"] == "2" else "0.60"
+            ))
         self.assertIn(url.rsplit("/", 1)[-1], ("confirm", "confirmquery"))
         record = ProviderOrderDistribution.objects.get(settlement=self.settlement)
         return signed_http_response(
@@ -910,6 +913,15 @@ class IncomeJobTests(TransactionTestCase):
         self.assertEqual(wallet.available_amount, 7000)
         self.assertEqual(wallet.entries.filter(kind="credit").count(), 1)
         self.assertFalse(ProviderWithdrawal.objects.exists())
+
+    def test_internal_payment_job_preserves_provider_income_and_waits_for_cash_application(self):
+        distribution.DistributionStateTests.use_internal_payment(self)
+        self.test_eligible_order_credits_income_once_and_never_automatically_withdraws()
+        record = ProviderOrderDistribution.objects.get(settlement=self.settlement)
+        self.assertEqual(record.snapshot["fee_flag"], "2")
+        self.assertEqual(record.payment_fee_amount, 35)
+        self.assertEqual(record.snapshot["platform_split_amount"], 2965)
+        self.assertEqual(record.snapshot["split_amount"], 9965)
 
     def test_freeze_unexpired_and_nonpilot_orders_do_not_send_distribution(self):
         from .tasks import process_income_transfers

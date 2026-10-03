@@ -69,7 +69,10 @@ class DistributionConcurrencyTests(TransactionTestCase):
         def verify(snapshot):
             self.assertFalse(connection.in_atomic_block)
             preflight.wait(timeout=15)
-            return {"payment_fee_amount": 60, "payment_query_digest": "synthetic"}
+            return {
+                "payment_fee_amount": 60, "payment_query_digest": "synthetic",
+                "platform_split_amount": 3000, "split_amount": 10000,
+            }
 
         def confirm(record):
             self.assertFalse(connection.in_atomic_block)
@@ -110,7 +113,10 @@ class DistributionConcurrencyTests(TransactionTestCase):
         def verify(snapshot):
             in_preflight.set()
             self.assertTrue(refunded.wait(timeout=15))
-            return {"payment_fee_amount": 60, "payment_query_digest": "synthetic"}
+            return {
+                "payment_fee_amount": 60, "payment_query_digest": "synthetic",
+                "platform_split_amount": 3000, "split_amount": 10000,
+            }
 
         def split():
             with self.assertRaises(ValidationError):
@@ -158,7 +164,10 @@ class DistributionConcurrencyTests(TransactionTestCase):
         def verify(snapshot):
             in_preflight.set()
             self.assertTrue(refund_checked.wait(timeout=15))
-            return {"payment_fee_amount": 60, "payment_query_digest": "synthetic"}
+            return {
+                "payment_fee_amount": 60, "payment_query_digest": "synthetic",
+                "platform_split_amount": 3000, "split_amount": 10000,
+            }
 
         def refund():
             self.assertTrue(in_preflight.wait(timeout=15))
@@ -197,7 +206,11 @@ class DistributionConcurrencyTests(TransactionTestCase):
 
         with (
             patch.object(
-                HuifuDistributionGateway, "verify_payment", return_value={"payment_fee_amount": 60}
+                HuifuDistributionGateway, "verify_payment",
+                return_value={
+                    "payment_fee_amount": 60, "platform_split_amount": 3000,
+                    "split_amount": 10000, "payment_query_digest": "synthetic",
+                },
             ),
             patch.object(HuifuDistributionGateway, "confirm", side_effect=confirm) as send,
         ):

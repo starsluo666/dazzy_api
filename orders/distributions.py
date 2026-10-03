@@ -36,7 +36,7 @@ def _scope(config):
 def _policy(config, *, provider_id, amount):
     if str(provider_id) not in settings.HUIFU_PROVIDER_DISTRIBUTION_IDS:
         raise ValidationError("达人不在分账测试白名单中。")
-    if not settings.HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED or config.fee_flag != "1":
+    if not settings.HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED:
         raise ValidationError("尚未确认渠道支付、分账及提现手续费由平台承担。")
     if (
         settings.HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS <= 0
@@ -69,7 +69,7 @@ def payment_cohort(order, allocation, config, *, now):
         "provider_id": order.provider_id,
         "receiver_id": account.user_huifu_id,
         "merchant_id": config.merchant_id,
-        "fee_flag": "1",
+        "fee_flag": config.fee_flag,
         "platform_fee_policy_confirmed": True,
     }
 
@@ -89,17 +89,20 @@ def _snapshot(order, config, *, now):
     )
     account = _receiver(order.provider_id, config, now)
     cohort = payment.distribution_cohort
+    # Fee mode belongs to the original payment, not today's environment setting.
+    fee_flag = cohort.get("fee_flag") if isinstance(cohort, dict) else None
     expected_cohort = {
         "version": "provider-delayed-v1",
         "scope": _scope(config),
         "provider_id": order.provider_id,
         "receiver_id": account.user_huifu_id,
         "merchant_id": config.merchant_id,
-        "fee_flag": "1",
+        "fee_flag": fee_flag,
         "platform_fee_policy_confirmed": True,
     }
     if (
         payment.delay_acct_flag != "Y"
+        or fee_flag not in {"1", "2"}
         or cohort != expected_cohort
         or payment.gateway_merchant_id != config.merchant_id
         or payment.channel not in {"wechat", "alipay"}
@@ -128,9 +131,7 @@ def _snapshot(order, config, *, now):
         "receiver_id": account.user_huifu_id,
         "receiver_scope": account.channel_scope,
         "platform_amount": plan.platform_amount,
-        "receivers": receivers(
-            account.user_huifu_id, config.merchant_id, plan.provider_amount, plan.platform_amount
-        ),
+        "fee_flag": fee_flag,
     }
 
 
@@ -162,7 +163,14 @@ def execute_distribution(order_no):
             settlement_id=snapshot["settlement_id"],
             req_date=timezone.localdate().strftime("%Y%m%d"),
             req_seq_id="PD" + uuid.uuid4().hex[:30],
-            snapshot={**snapshot, **evidence},
+            snapshot={
+                **snapshot,
+                **evidence,
+                "receivers": receivers(
+                    snapshot["receiver_id"], snapshot["merchant_id"],
+                    snapshot["provider_amount"], evidence["platform_split_amount"],
+                ),
+            },
             payment_fee_amount=evidence["payment_fee_amount"],
         )
     try:

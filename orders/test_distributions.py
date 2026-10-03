@@ -13,14 +13,14 @@ from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from providers.models import ProviderReceivingAccount, ProviderReceivingAttempt
+from providers.models import ProviderIncomeWallet, ProviderReceivingAccount, ProviderReceivingAttempt
 from providers.test_huifu_user_transport import CHANNEL_KEY, signed_http_response, http_response
 from providers.test_receiving_onboarding import CHANNEL_SETTINGS, USER_ID, CASH
 from providers.receiving_onboarding import ONBOARDING_CONSENT_VERSION
 from .distribution_gateway import HuifuDistributionGateway, money, receivers
 from .distribution_transport import DistributionUncertain
 from .distributions import execute_distribution, query_distribution, payment_cohort, _save_result
-from .huifu import HuifuPaymentConfig, HuifuAggregatePaymentGateway, _canonical_digest
+from .huifu import HuifuPaymentConfig, HuifuAggregatePaymentGateway, _canonical_digest, cents_to_yuan
 from .models import ProviderOrderDistribution, ProviderOrderPaymentOrder, ProviderOrderRefundOrder
 from .services import process_provider_order_refund, create_provider_order_refund
 from . import test_settlement_plans as fixtures
@@ -49,12 +49,17 @@ def snapshot():
         "paid_amount": 10000,
         "provider_amount": 7000,
         "platform_amount": 3000,
+        "fee_flag": "1",
         "payment": {"req_date": "20261003", "req_seq_id": "PAY1", "gateway_trade_no": "PAY-HF1"},
         "receivers": receivers(USER_ID, MERCHANT, 7000, 3000),
     }
 
 
-def payment_receipt(snap):
+def payment_receipt(snap, *, fee_amount="0.60"):
+    fee_flag = snap["fee_flag"]
+    split_amount = snap["provider_amount"] + snap["platform_amount"]
+    if fee_flag == "2":
+        split_amount -= money(fee_amount)
     return {
         "resp_code": "00000000",
         "req_date": snap["payment"]["req_date"],
@@ -63,15 +68,15 @@ def payment_receipt(snap):
         "hf_seq_id": snap["payment"]["gateway_trade_no"],
         "trans_stat": "S",
         "delay_acct_flag": "Y",
-        "trans_amt": "100.00",
-        "unconfirm_amt": "100.00",
+        "trans_amt": cents_to_yuan(snap["paid_amount"]),
+        "unconfirm_amt": cents_to_yuan(split_amount),
         "payment_fee": json.dumps(
-            {"fee_huifu_id": MERCHANT, "fee_flag": "1", "fee_amount": "0.60"}
+            {"fee_huifu_id": MERCHANT, "fee_flag": fee_flag, "fee_amount": fee_amount}
         ),
     }
 
 
-def confirm_receipt(record, *, query=False):
+def confirm_receipt(record, *, query=False, split_fee_amount="0.10"):
     common = {
         "resp_code": "00000000",
         "huifu_id": MERCHANT,
@@ -80,7 +85,7 @@ def confirm_receipt(record, *, query=False):
         "acct_split_bunch": json.dumps(
             {
                 "acct_infos": [
-                    {**row, "split_fee_amt": "0.10", "split_fee_huifu_id": MERCHANT}
+                    {**row, "split_fee_amt": split_fee_amount, "split_fee_huifu_id": MERCHANT}
                     for row in record.snapshot["receivers"]
                 ]
             }
@@ -165,6 +170,52 @@ class DistributionContractTests(SimpleTestCase):
             self.assertRaises(DistributionUncertain),
         ):
             self.gateway.query(self.record)
+
+    def test_internal_fee_uses_actual_receipt_and_only_reduces_platform_split(self):
+        snap = {**snapshot(), "fee_flag": "2"}
+        for fee_amount, expected_platform in (("0.35", 2965), ("0.38", 2962), ("0.00", 3000), ("30.00", 0)):
+            with (
+                self.subTest(fee_amount=fee_amount),
+                patch("requests.sessions.Session.post", return_value=signed_http_response(
+                    payment_receipt(snap, fee_amount=fee_amount)
+                )),
+            ):
+                result = self.gateway.verify_payment(snap)
+            self.assertEqual(result["payment_fee_amount"], money(fee_amount))
+            self.assertEqual(result["platform_split_amount"], expected_platform)
+            self.assertEqual(result["split_amount"], 7000 + expected_platform)
+            self.assertEqual(snap["provider_amount"], 7000)
+            self.assertEqual(snap["platform_amount"], 3000)
+
+    def test_payment_fee_mode_must_match_original_snapshot(self):
+        for saved_flag, actual_flag in (("1", "2"), ("2", "1"), (None, "1"), ("3", "1")):
+            with (
+                self.subTest(saved_flag=saved_flag, actual_flag=actual_flag),
+                patch("requests.sessions.Session.post", return_value=signed_http_response(
+                    payment_receipt({**snapshot(), "fee_flag": actual_flag})
+                )),
+                self.assertRaises(DistributionUncertain),
+            ):
+                self.gateway.verify_payment({**snapshot(), "fee_flag": saved_flag})
+
+    def test_internal_fee_missing_malformed_or_wrong_bearer_is_not_guessed(self):
+        snap = {**snapshot(), "fee_flag": "2"}
+        valid = payment_receipt(snap, fee_amount="0.35")
+        for fee in (
+            {},
+            {"fee_huifu_id": MERCHANT, "fee_flag": "2"},
+            {"fee_huifu_id": USER_ID, "fee_flag": "2", "fee_amount": "0.35"},
+            {"fee_huifu_id": MERCHANT, "fee_flag": "2", "fee_amount": 0.35},
+            {"fee_huifu_id": MERCHANT, "fee_flag": "2", "fee_amount": "-0.35"},
+        ):
+            with (
+                self.subTest(fee=fee),
+                patch("requests.sessions.Session.post", return_value=signed_http_response(
+                    {**valid, "payment_fee": json.dumps(fee)}
+                )),
+                self.assertRaises(DistributionUncertain),
+            ):
+                self.gateway.verify_payment(snap)
 
     def test_payment_proof_checks_all_identifiers_delay_funds_and_platform_fees(self):
         for key, value in (
@@ -261,6 +312,12 @@ class DistributionContractTests(SimpleTestCase):
                     **({"delay_acct_flag": flag} if flag else {}),
                 )
             self.assertEqual(call.call_args.args[0].delay_acct_flag, flag or "N")
+            self.assertEqual(call.call_args.args[0].fee_flag, self.gateway.config.fee_flag)
+
+    @override_settings(HUIFU_FEE_FLAG="2")
+    def test_internal_payment_passes_fee_flag_to_channel(self):
+        self.gateway = HuifuDistributionGateway(HuifuPaymentConfig.from_settings())
+        self.test_payment_delay_default_n_and_explicit_y()
 
 
 @override_settings(**SETTINGS)
@@ -321,18 +378,19 @@ class DistributionStateTests(TransactionTestCase):
         )
         self.payment.save()
 
-    def run_execute(self):
+    def run_execute(self, *, fee_amount="0.60"):
         def respond(url, **kwargs):
             if url.endswith("/scanpay/query"):
                 snap = {
                     **snapshot(),
+                    "fee_flag": self.payment.distribution_cohort["fee_flag"],
                     "payment": {
                         "req_date": self.payment.req_date,
                         "req_seq_id": self.payment.req_seq_id,
                         "gateway_trade_no": self.payment.gateway_trade_no,
                     },
                 }
-                return signed_http_response(payment_receipt(snap))
+                return signed_http_response(payment_receipt(snap, fee_amount=fee_amount))
             record = ProviderOrderDistribution.objects.get(settlement=self.settlement)
             self.assertFalse(transaction.get_connection().in_atomic_block)
             self.assertEqual(record.status, "submitting")
@@ -349,11 +407,133 @@ class DistributionStateTests(TransactionTestCase):
         self.assertEqual(record.status, "processing")
         self.assertEqual(record.snapshot["provider_amount"], 7000)
         self.assertEqual(record.snapshot["platform_amount"], 3000)
+        self.assertEqual(record.snapshot["fee_flag"], "1")
+        self.assertEqual(record.snapshot["platform_split_amount"], 3000)
+        self.assertEqual(record.snapshot["split_amount"], 10000)
         with patch("requests.sessions.Session.post") as http:
             repeated, created = execute_distribution(self.order.order_no)
         self.assertFalse(created)
         self.assertEqual(repeated.pk, record.pk)
         http.assert_not_called()
+
+    def use_internal_payment(self):
+        with override_settings(HUIFU_FEE_FLAG="2"):
+            self.payment.distribution_cohort = payment_cohort(
+                self.order, self.allocation, HuifuPaymentConfig.from_settings(), now=self.now
+            )
+        self.assertEqual(self.payment.distribution_cohort["fee_flag"], "2")
+        self.payment.save(update_fields=["distribution_cohort"])
+
+    def test_internal_split_credits_full_provider_income_once_after_verified_query(self):
+        self.use_internal_payment()
+        # Current config is external again; the original payment remains internal.
+        record, created, http = self.run_execute(fee_amount="0.35")
+        self.assertTrue(created)
+        self.assertEqual(record.snapshot["fee_flag"], "2")
+        self.assertEqual(record.snapshot["provider_amount"], 7000)
+        self.assertEqual(record.snapshot["platform_amount"], 3000)
+        self.assertEqual(record.snapshot["platform_split_amount"], 2965)
+        self.assertEqual(record.snapshot["split_amount"], 9965)
+        self.assertEqual(record.payment_fee_amount, 35)
+        expected_receivers = receivers(USER_ID, MERCHANT, 7000, 2965)
+        self.assertEqual(record.snapshot["receivers"], expected_receivers)
+        self.assertEqual(
+            json.loads(http.call_args_list[1].kwargs["json"]["data"]["acct_split_bunch"])["acct_infos"],
+            expected_receivers,
+        )
+        self.assertFalse(ProviderIncomeWallet.objects.filter(provider=self.provider).exists())
+        with patch("requests.sessions.Session.post", return_value=signed_http_response(
+            confirm_receipt(record, query=True, split_fee_amount="0.00")
+        )):
+            query_distribution(self.order.order_no)
+            record = query_distribution(self.order.order_no)
+        self.assertEqual(record.status, "succeeded")
+        self.assertEqual(record.split_fee_amount, 0)
+        wallet = ProviderIncomeWallet.objects.get(provider=self.provider)
+        self.assertEqual(wallet.available_amount, 7000)
+        self.assertEqual(wallet.entries.count(), 1)
+        from backoffice.serializers import ProviderOrderSettlementSerializer
+
+        self.settlement.refresh_from_db()
+        data = ProviderOrderSettlementSerializer(self.settlement).data["distribution"]
+        for key, value in {
+            "payment_fee_flag": "2", "provider_amount": 7000, "platform_amount": 3000,
+            "platform_split_amount": 2965, "split_amount": 9965, "payment_fee_amount": 35,
+        }.items():
+            self.assertEqual(data[key], value)
+        with patch("requests.sessions.Session.post") as http:
+            repeated, created = execute_distribution(self.order.order_no)
+        self.assertFalse(created)
+        self.assertEqual(repeated.pk, record.pk)
+        http.assert_not_called()
+
+    @override_settings(HUIFU_FEE_FLAG="2")
+    def test_current_internal_mode_does_not_reinterpret_existing_external_payment(self):
+        record, _, _ = self.run_execute()
+        self.assertEqual(record.snapshot["fee_flag"], "1")
+        self.assertEqual(record.snapshot["platform_split_amount"], 3000)
+        self.assertEqual(record.snapshot["split_amount"], 10000)
+
+    def test_internal_fee_equal_platform_share_omits_zero_platform_receiver(self):
+        self.use_internal_payment()
+        record, _, _ = self.run_execute(fee_amount="30.00")
+        self.assertEqual(record.snapshot["receivers"], [{"huifu_id": USER_ID, "div_amt": "70.00"}])
+
+    def test_excessive_internal_fee_blocks_before_confirm_and_request_registration(self):
+        self.use_internal_payment()
+        with (
+            patch.object(HuifuDistributionGateway, "confirm") as send,
+            self.assertRaisesMessage(DistributionUncertain, "平台份额不足"),
+        ):
+            self.run_execute(fee_amount="30.01")
+        send.assert_not_called()
+        self.assertFalse(ProviderOrderDistribution.objects.exists())
+
+    def test_internal_gross_or_partial_available_balance_blocks_before_confirm(self):
+        self.use_internal_payment()
+        snap = {
+            **snapshot(), "fee_flag": "2",
+            "payment": {"req_date": self.payment.req_date, "req_seq_id": self.payment.req_seq_id,
+                        "gateway_trade_no": self.payment.gateway_trade_no},
+        }
+        for unconfirm_amt in ("100.00", "99.64", "70.00"):
+            data = {**payment_receipt(snap, fee_amount="0.35"), "unconfirm_amt": unconfirm_amt}
+            with (
+                self.subTest(unconfirm_amt=unconfirm_amt),
+                patch("requests.sessions.Session.post", return_value=signed_http_response(data)) as http,
+                self.assertRaisesMessage(DistributionUncertain, "可分账金额"),
+            ):
+                execute_distribution(self.order.order_no)
+            self.assertEqual(http.call_count, 1)  # Read-only payment query, never confirm.
+            self.assertFalse(ProviderOrderDistribution.objects.exists())
+
+    def test_legacy_external_record_display_does_not_subtract_payment_fee(self):
+        record, _, _ = self.run_execute()
+        for key in ("fee_flag", "platform_split_amount", "split_amount"):
+            record.snapshot.pop(key)
+        record.save(update_fields=["snapshot"])
+        from backoffice.serializers import ProviderOrderSettlementSerializer
+
+        self.settlement.refresh_from_db()
+        with override_settings(HUIFU_FEE_FLAG="2"):
+            data = ProviderOrderSettlementSerializer(self.settlement).data["distribution"]
+        self.assertEqual(data["payment_fee_flag"], "1")
+        self.assertEqual(data["platform_split_amount"], 3000)
+        self.assertEqual(data["split_amount"], 10000)
+
+    def test_inspect_displays_internal_net_amounts_without_channel_requests(self):
+        self.use_internal_payment()
+        self.run_execute(fee_amount="0.35")
+        output = StringIO()
+        with patch("requests.sessions.Session.post") as http:
+            call_command("provider_distribution", "inspect", self.order.order_no, stdout=output)
+        http.assert_not_called()
+        data = json.loads(output.getvalue())
+        self.assertEqual(data["payment_fee_flag"], "2")
+        self.assertEqual(data["platform_amount"], 3000)
+        self.assertEqual(data["platform_split_amount"], 2965)
+        self.assertEqual(data["split_amount"], 9965)
+        self.assertNotIn(USER_ID, output.getvalue())
 
     def test_query_success_preserves_provider_share_and_unknown_bank_fees(self):
         record, _, _ = self.run_execute()
@@ -412,7 +592,6 @@ class DistributionStateTests(TransactionTestCase):
             {"HUIFU_PROVIDER_DISTRIBUTION_IDS": ()},
             {"HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED": False},
             {"HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS": 0},
-            {"HUIFU_FEE_FLAG": "2"},
             {"HUIFU_MERCHANT_ID": "wrong"},
         ):
             with (
@@ -440,6 +619,7 @@ class DistributionStateTests(TransactionTestCase):
         for model, field, value in (
             (self.payment, "delay_acct_flag", "N"),
             (self.payment, "distribution_cohort", {}),
+            (self.payment, "distribution_cohort", {**self.payment.distribution_cohort, "fee_flag": "3"}),
             (self.account, "channel_checked_at", self.now - timedelta(hours=1)),
             (self.account, "channel_scope", "wrong"),
         ):

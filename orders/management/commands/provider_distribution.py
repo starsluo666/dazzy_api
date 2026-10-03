@@ -37,12 +37,20 @@ class Command(BaseCommand):
         # No channel account IDs, keys, bank details, or signed payloads in output.
         result = {"order_no": order_no, "status": "not_started"}
         if record:
+            platform_split_amount = record.snapshot.get(
+                "platform_split_amount", record.snapshot["platform_amount"]
+            )
             result.update(
                 req_date=record.req_date,
                 req_seq_id=record.req_seq_id,
                 status=record.status,
                 provider_amount=record.snapshot["provider_amount"],
                 platform_amount=record.snapshot["platform_amount"],
+                payment_fee_flag=record.snapshot.get("fee_flag", "1"),
+                platform_split_amount=platform_split_amount,
+                split_amount=record.snapshot.get(
+                    "split_amount", record.snapshot["provider_amount"] + platform_split_amount
+                ),
                 payment_fee_amount=record.payment_fee_amount,
                 split_fee_amount=record.split_fee_amount,
                 bank_settlement_fee_amount=None,

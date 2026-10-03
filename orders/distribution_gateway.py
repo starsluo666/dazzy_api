@@ -61,17 +61,32 @@ class HuifuDistributionGateway:
         }
         if any(data.get(key) != value for key, value in expected.items()):
             raise DistributionUncertain("原支付交易、商户或延时状态无法核实。")
-        if (
-            money(data.get("trans_amt")) != snapshot["paid_amount"]
-            or money(data.get("unconfirm_amt"))
-            != snapshot["provider_amount"] + snapshot["platform_amount"]
-        ):
-            raise DistributionUncertain("原支付金额或渠道可分账金额不一致。")
+        if money(data.get("trans_amt")) != snapshot["paid_amount"]:
+            raise DistributionUncertain("原支付金额不一致。")
         fee = json_object(data.get("payment_fee"))
-        if fee.get("fee_huifu_id") != snapshot["merchant_id"] or fee.get("fee_flag") != "1":
-            raise DistributionUncertain("渠道支付手续费未核实为平台外扣。")
+        fee_flag = snapshot.get("fee_flag")
+        if (
+            fee_flag not in {"1", "2"}
+            or fee.get("fee_flag") != fee_flag
+            or fee.get("fee_huifu_id") != snapshot["merchant_id"]
+        ):
+            raise DistributionUncertain("渠道支付手续费扣款方式或平台承担方与原支付快照不一致。")
+        payment_fee_amount = money(fee.get("fee_amount"))
+        # Preserve the gross business commission. Internal collection fees reduce
+        # only the platform's split, never the provider's contracted entitlement.
+        # External fees are paid separately and MUST NOT be deducted here again.
+        platform_split_amount = snapshot["platform_amount"]
+        if fee_flag == "2":
+            platform_split_amount -= payment_fee_amount
+            if platform_split_amount < 0:
+                raise DistributionUncertain("平台份额不足以承担支付手续费，禁止扣减达人收入，请人工核账。")
+        split_amount = snapshot["provider_amount"] + platform_split_amount
+        if split_amount <= 0 or money(data.get("unconfirm_amt")) != split_amount:
+            raise DistributionUncertain("渠道可分账金额与扣费后的分账总额不一致，请人工核账。")
         return {
-            "payment_fee_amount": money(fee.get("fee_amount")),
+            "payment_fee_amount": payment_fee_amount,
+            "platform_split_amount": platform_split_amount,
+            "split_amount": split_amount,
             "payment_query_digest": _canonical_digest(data),
         }
 
