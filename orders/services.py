@@ -120,6 +120,39 @@ def create_provider_order_huifu_payment_session(
     payment_scene: str,
     sub_openid: str = "",
 ):
+    from providers.cash_accounts import CashAccountVerificationExpired
+    from providers.receiving_onboarding import refresh_onboarding
+    from rest_framework.exceptions import APIException
+
+    args = {
+        "order_id": order_id,
+        "customer_id": customer_id,
+        "payment_scene": payment_scene,
+        "sub_openid": sub_openid,
+    }
+    try:
+        return _create_provider_order_huifu_payment_session(**args)
+    except CashAccountVerificationExpired as stale:
+        # The first preflight rolled back, including wallet allocation. No channel
+        # payment has been registered or sent. Refresh OUTSIDE all business locks.
+        if transaction.get_connection().in_atomic_block:
+            raise ValidationError("收款账户核验须在独立事务外执行。") from None
+        provider_id = stale.provider_id
+    try:
+        refresh_onboarding(ProviderProfile.objects.select_related("user").get(pk=provider_id))
+    except APIException:
+        raise ValidationError("收款账户暂未核验通过，尚未发起支付，请稍后重试。") from None
+    try:
+        # Recheck ownership, expiry, flags, allocation and account under the order
+        # lock. A concurrently registered request goes to the usual replay/query.
+        return _create_provider_order_huifu_payment_session(**args)
+    except CashAccountVerificationExpired:
+        raise ValidationError("收款账户正在核验，尚未发起支付，请稍后重试。") from None
+
+
+def _create_provider_order_huifu_payment_session(
+    *, order_id: int, customer_id: int, payment_scene: str, sub_openid: str = "",
+):
     """Create or replay one idempotent Huifu aggregate payment session."""
     from .wechat_oauth import validate_wechat_payment_payer
 
@@ -210,6 +243,10 @@ def create_provider_order_huifu_payment_session(
                 wallet_amount=allocation.wallet_amount, external_amount=0,
             ), True
         else:
+            from .distributions import payment_cohort
+
+            payment.distribution_cohort = payment_cohort(order, allocation, gateway.config, now=now)
+            payment.delay_acct_flag = "Y" if payment.distribution_cohort else "N"
             payment.req_date = payment.req_date or timezone.localtime(now).strftime("%Y%m%d")
             payment.req_seq_id = payment.req_seq_id or payment.payment_no
             payment.gateway_merchant_id = gateway.merchant_id
@@ -233,6 +270,8 @@ def create_provider_order_huifu_payment_session(
                     "gateway_response_code",
                     "payment_invoke_payload",
                     "wechat_payer_digest",
+                    "distribution_cohort",
+                    "delay_acct_flag",
                     "updated_at",
                 )
             )
@@ -254,6 +293,7 @@ def create_provider_order_huifu_payment_session(
             attach=attach,
             time_expire=time_expire,
             sub_openid=sub_openid,
+            **({"delay_acct_flag": "Y"} if payment.delay_acct_flag == "Y" else {}),
         )
     except HuifuGatewayError as exc:
         record_payment_error(payment, exc)
@@ -1306,6 +1346,9 @@ def create_provider_order_refund(
         if existing.order_id != order.id or existing.refund_amount != amount:
             raise ValidationError("退款幂等键对应的业务参数不一致。")
         return existing, False
+    from .distributions import assert_refund_not_distributed
+
+    assert_refund_not_distributed(order)
     payment = ProviderOrderPaymentOrder.objects.select_for_update().filter(order=order).first()
     if not payment or payment.status not in (
         ProviderOrderPaymentOrder.Status.PAID,
@@ -1784,6 +1827,9 @@ def process_provider_order_refund(refund_no: str, *, now=None):
 
     now = now or timezone.now()
     with transaction.atomic():
+        # Same lock order as distribution dispatch and refund creation.
+        order_id = ProviderOrderRefundOrder.objects.values_list("order_id", flat=True).get(refund_no=refund_no)
+        order = ProviderOrder.objects.select_for_update().get(pk=order_id)
         refund = (
             ProviderOrderRefundOrder.objects.select_for_update()
             .select_related("payment_order")
@@ -1791,6 +1837,9 @@ def process_provider_order_refund(refund_no: str, *, now=None):
         )
         if refund.status == ProviderOrderRefundOrder.Status.SUCCEEDED:
             return refund, False
+        from .distributions import assert_refund_not_distributed
+
+        assert_refund_not_distributed(order)
         payment = refund.payment_order
         channel = payment.channel
         amount = refund.external_refund_amount

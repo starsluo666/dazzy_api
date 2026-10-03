@@ -141,7 +141,8 @@ def sdk_call(request, extra, config):
                     raise ChannelUncertain()
                 # Initial passwords and unused personal fields must not leave the adapter.
                 used = {"resp_code", "huifu_id", "apply_no", "resp_business", "indv_base_info",
-                        "card_info", "settle_config_list", "user_list_info_list"}
+                        "card_info", "settle_config_list", "user_list_info_list",
+                        "qry_cash_config_list", "qry_cash_card_info_list"}
                 return {key: value for key, value in result.items() if key in used}
             finally:
                 ApiRequest._build_return_data = parser_before

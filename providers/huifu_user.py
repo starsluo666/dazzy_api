@@ -82,6 +82,35 @@ def settlement_config(raw):
         raise OnboardingUnavailable("银行卡结算参数尚未完成配置，请联系平台。") from None
 
 
+def cash_config(raw):
+    """Explicit T1/D1 pilot; platform pays all withdrawal fees externally."""
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        required = {"cash_type", "out_fee_flag", "out_fee_huifu_id", "out_fee_acct_type"}
+        amounts = {"fix_amt", "fee_rate", "weekday_fix_amt", "weekday_fee_rate"}
+        if not required <= value.keys() or value.keys() - (required | amounts):
+            raise ValueError
+        if any(not isinstance(item, str) for item in value.values()):
+            raise ValueError
+        if value["cash_type"] not in {"T1", "D1"} or not {"fix_amt", "fee_rate"} & value.keys():
+            raise ValueError
+        if value["out_fee_flag"] != "1" or value["out_fee_huifu_id"] != settings.HUIFU_MERCHANT_ID.strip():
+            raise ValueError
+        if not re.fullmatch(r"[0-9]{1,18}", value["out_fee_huifu_id"]) or value["out_fee_acct_type"] not in {"01", "02", "05"}:
+            raise ValueError
+        for key in amounts & value.keys():
+            item = value[key]
+            if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{2}", item) or len(item) > 6:
+                raise ValueError
+            if "rate" in key and Decimal(item) > 100:
+                raise ValueError
+            if key.startswith("weekday") and value["cash_type"] != "D1":
+                raise ValueError
+        return value
+    except (ValueError, TypeError, AttributeError):
+        raise OnboardingUnavailable("手动提现参数及平台承担手续费配置尚未完成，请联系平台。") from None
+
+
 @dataclass(frozen=True)
 class UserChannelConfig:
     sys_id: str
@@ -130,7 +159,7 @@ class UserChannelConfig:
                 raise ValueError
         except (ValueError, TypeError, IndexError):
             raise OnboardingUnavailable("平台开户密钥配置无效，请联系平台。") from None
-        values["settlement"] = settlement_config(settings.HUIFU_USER_SETTLEMENT_CONFIG) if for_submission else {}
+        values["settlement"] = cash_config(settings.HUIFU_USER_CASH_CONFIG) if for_submission else {}
         from .huifu_user_transport import ensure_transport_ready
         ensure_transport_ready()
         return cls(**values)
@@ -171,7 +200,7 @@ def business_payload(attempt, account, details, config):
     return {"req_seq_id": attempt.req_seq_id, "req_date": attempt.req_date,
             "huifu_id": account.user_huifu_id, "upper_huifu_id": config.upper_id,
             "account_level": "LV1", "card_info": encode(card),
-            "settle_config_list": encode([attempt.settlement_config]), "async_return_url": config.notify_url}
+            "cash_config": encode([cash_config(attempt.settlement_config)]), "async_return_url": config.notify_url}
 
 
 class HuifuUserGateway:

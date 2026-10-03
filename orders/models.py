@@ -302,6 +302,8 @@ class ProviderOrderPaymentOrder(models.Model):
     req_date = models.CharField("汇付请求日期", max_length=8, blank=True)
     req_seq_id = models.CharField("汇付请求流水号", max_length=128, blank=True)
     payment_scene = models.CharField("支付场景", max_length=32, blank=True)
+    delay_acct_flag = models.CharField("延时交易标记", max_length=1, default="N")
+    distribution_cohort = models.JSONField("首次下单分账范围快照", default=dict)
     trade_type = models.CharField("汇付交易类型", max_length=16, blank=True)
     payment_invoke_payload = models.JSONField("客户端调起参数", default=dict, blank=True)
     wechat_payer_digest = models.CharField("付款微信摘要", max_length=64, blank=True)
@@ -747,6 +749,7 @@ class ProviderOrderSettlementPlan(models.Model):
 
     class Status(models.TextChoices):
         WAITING = "waiting", "等待结算条件"
+        READY = "ready", "业务条件已满足"
         BLOCKED = "blocked", "待接通或核实资金链路"
         CANCELLED = "cancelled", "无需分账"
 
@@ -809,6 +812,52 @@ class ProviderOrderSettlementPlanRevision(models.Model):
         constraints = [models.UniqueConstraint(
             fields=("plan", "revision"), name="uniq_provider_plan_revision",
         )]
+
+
+class ProviderOrderDistribution(models.Model):
+    """One immutable channel request per settlement. Unknown outcomes are query-only.
+
+    No retry creates a second request, even after a failure. Reversal/re-distribution
+    is intentionally outside this controlled pilot and requires reconciliation.
+    """
+
+    class Status(models.TextChoices):
+        SUBMITTING = "submitting", "分账请求已登记"
+        UNKNOWN = "unknown", "分账结果待核实"
+        PROCESSING = "processing", "渠道分账处理中"
+        SUCCEEDED = "succeeded", "渠道分账成功（非银行卡到账）"
+        FAILED = "failed", "渠道分账失败（禁止自动重发）"
+
+    settlement = models.OneToOneField(ProviderOrderSettlement, on_delete=models.PROTECT, related_name="distribution")
+    req_date = models.CharField(max_length=8)
+    req_seq_id = models.CharField(max_length=32, unique=True)
+    status = models.CharField(max_length=16, choices=Status, default=Status.SUBMITTING)
+    snapshot = models.JSONField("不可变分账请求快照")
+    payment_fee_amount = models.PositiveBigIntegerField("支付手续费（分）")
+    split_fee_amount = models.PositiveBigIntegerField("分账手续费（分）", null=True)
+    gateway_trade_no = models.CharField(max_length=128, blank=True)
+    response_code = models.CharField(max_length=8, blank=True)
+    response_digest = models.CharField(max_length=64, blank=True)
+    attention_reason = models.CharField(max_length=200, blank=True)
+    last_queried_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_order_distribution"
+
+
+class ProviderOrderDistributionObservation(models.Model):
+    """Append-only sanitized evidence; no raw signed payloads or personal data."""
+    distribution = models.ForeignKey(ProviderOrderDistribution, on_delete=models.PROTECT, related_name="observations")
+    kind = models.CharField(max_length=8)
+    status = models.CharField(max_length=16)
+    response_code = models.CharField(max_length=8, blank=True)
+    response_digest = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "provider_distribution_observation"
 
 
 class ProviderOrderReview(models.Model):

@@ -167,13 +167,12 @@ class ProviderSettlementPlanTests(TestCase):
                 self.assertEqual(plan.fee_policy_snapshot["provider_receivable_amount"], 8000)
                 self.assertIsNone(plan.fee_policy_snapshot["total_fee_amount"])
                 self.assertIsNone(plan.fee_policy_snapshot["platform_net_amount"])
-                self.assertIn("channel_fee_policy_unverified", self.codes(plan))
-                self.assertIn("execution_disabled", self.codes(plan))
+                self.assertNotIn("channel_fee_policy_unverified", self.codes(plan))
+                self.assertNotIn("execution_disabled", self.codes(plan))
                 self.assertIn("freeze_period", self.codes(plan))
                 if wallet_amount:
                     self.assertIn("wallet_route_unconfirmed", self.codes(plan))
-                if wallet_amount < 10000:
-                    self.assertIn("external_route_unconfirmed", self.codes(plan))
+                self.assertNotIn("external_route_unconfirmed", self.codes(plan))
                 self.assertEqual(plan.revisions.count(), 1)
                 self.assertEqual(order.payment_order.status, "paid")
         self.assertEqual(WalletLedgerEntry.objects.count(), 0)
@@ -231,9 +230,9 @@ class ProviderSettlementPlanTests(TestCase):
             "settled",
         )
         plan = self.plan(settlement)
-        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.status, "ready")
         self.assertNotIn("freeze_period", self.codes(plan))
-        self.assertIn("execution_disabled", self.codes(plan))
+        self.assertEqual(plan.blockers, [])
         self.assertFalse(
             ProviderOrderSettlementSerializer(
                 ProviderOrderSettlement.objects.get(pk=settlement.pk),

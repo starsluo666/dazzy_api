@@ -108,6 +108,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ("json",)
 CELERY_TIMEZONE = "Asia/Shanghai"
 CELERY_BEAT_SCHEDULE = {
+    "process-provider-income-transfers": {
+        "task": "providers.process_income_transfers",
+        "schedule": 60.0,
+    },
     "process-due-account-closures": {
         "task": "accounts.process_due_account_closures",
         "schedule": 60.0,
@@ -219,11 +223,24 @@ HUIFU_NOTIFY_URL = os.getenv("HUIFU_NOTIFY_URL", "")
 HUIFU_FEE_FLAG = os.getenv("HUIFU_FEE_FLAG", "1")
 HUIFU_CONNECT_TIMEOUT_SECONDS = int(os.getenv("HUIFU_CONNECT_TIMEOUT_SECONDS", "15"))
 
+# Controlled provider-order pilot. Neither switch enables a scheduled payout job.
+HUIFU_PROVIDER_DELAYED_PAYMENT_ENABLED = os.getenv("HUIFU_PROVIDER_DELAYED_PAYMENT_ENABLED", "false").lower() in {"1", "true", "yes"}
+HUIFU_PROVIDER_DISTRIBUTION_ENABLED = os.getenv("HUIFU_PROVIDER_DISTRIBUTION_ENABLED", "false").lower() in {"1", "true", "yes"}
+HUIFU_PROVIDER_DISTRIBUTION_IDS = tuple(value.strip() for value in os.getenv("HUIFU_PROVIDER_DISTRIBUTION_IDS", "").split(",") if value.strip())
+# Explicit channel-side confirmation, NOT a request parameter or a fee-rate default.
+HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED = os.getenv("HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED", "false").lower() in {"1", "true", "yes"}
+HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS = int(os.getenv("HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS", "0"))
+
 # Individual split/settlement users, not acquiring merchants. No automatic fund transfer.
 HUIFU_USER_ONBOARDING_ENABLED = os.getenv("HUIFU_USER_ONBOARDING_ENABLED", "false").lower() in {"1", "true", "yes"}
 HUIFU_USER_UPPER_ID = os.getenv("HUIFU_USER_UPPER_ID", "")
 HUIFU_USER_NOTIFY_URL = os.getenv("HUIFU_USER_NOTIFY_URL", "")
 HUIFU_USER_SETTLEMENT_CONFIG = os.getenv("HUIFU_USER_SETTLEMENT_CONFIG", "")
+# New provider accounts use manual withdrawal; never fall back to automatic settlement.
+HUIFU_USER_CASH_CONFIG = os.getenv("HUIFU_USER_CASH_CONFIG", "")
+HUIFU_PROVIDER_WITHDRAWAL_ENABLED = os.getenv("HUIFU_PROVIDER_WITHDRAWAL_ENABLED", "false").lower() in {"1", "true", "yes"}
+HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS = int(os.getenv("HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS", "0"))
+HUIFU_PROVIDER_INCOME_JOBS_ENABLED = os.getenv("HUIFU_PROVIDER_INCOME_JOBS_ENABLED", "false").lower() in {"1", "true", "yes"}
 HUIFU_USER_SKILL_SOURCE = os.getenv("HUIFU_USER_SKILL_SOURCE", "hfps/1.3.5;hfms/1.0.4")
 # Collection is separate from channel onboarding and order splitting; default closed.
 PROVIDER_RECEIVING_ACCOUNT_COLLECTION_ENABLED = os.getenv(

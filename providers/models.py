@@ -250,6 +250,10 @@ class ProviderReceivingAccount(models.Model):
     audit_status = models.CharField(max_length=1, blank=True)
     card_status = models.CharField(max_length=1, blank=True)
     settlement_status = models.CharField(max_length=1, blank=True)
+    cash_status = models.CharField(max_length=1, blank=True)
+    automatic_settlement_disabled = models.BooleanField(null=True, default=None)
+    verified_cash_config = models.JSONField(default=dict, editable=False)
+    cash_card_ciphertext = models.TextField(blank=True, editable=False)
     channel_checked_at = models.DateTimeField(null=True, blank=True)
     channel_message = models.CharField(max_length=200, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -291,6 +295,70 @@ class ProviderReceivingNotification(models.Model):
 
     class Meta:
         db_table = "provider_receiving_notification"
+
+
+class ProviderIncomeWallet(models.Model):
+    """Provider earnings only; never the consumer stored-value wallet."""
+
+    provider = models.OneToOneField(ProviderProfile, on_delete=models.PROTECT, related_name="income_wallet")
+    available_amount = models.PositiveBigIntegerField(default=0)
+    reserved_amount = models.PositiveBigIntegerField(default=0)
+    paid_amount = models.PositiveBigIntegerField(default=0)
+    channel_scope = models.CharField(max_length=64)
+    receiver_id = models.CharField(max_length=18, editable=False)
+    hold_reason = models.CharField(max_length=200, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class ProviderWithdrawal(models.Model):
+    class Status(models.TextChoices):
+        SUBMITTING = "submitting", "提交中"
+        PROCESSING = "processing", "银行处理中"
+        UNKNOWN = "unknown", "结果核实中"
+        SUCCEEDED = "succeeded", "提现成功"
+        FAILED = "failed", "提现失败，金额已退回余额"
+        ATTENTION = "attention", "需人工核账"
+
+    wallet = models.ForeignKey(ProviderIncomeWallet, on_delete=models.PROTECT, related_name="withdrawals")
+    request_key = models.UUIDField()
+    req_seq_id = models.CharField(max_length=32, unique=True)
+    req_date = models.CharField(max_length=8)
+    amount = models.PositiveBigIntegerField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.SUBMITTING)
+    # Safe business evidence only. Card token lives in the encrypted receiving account.
+    snapshot = models.JSONField(default=dict, editable=False)
+    fee_amount = models.PositiveBigIntegerField(null=True)
+    response_code = models.CharField(max_length=8, blank=True)
+    response_digest = models.CharField(max_length=64, blank=True)
+    gateway_trade_no = models.CharField(max_length=128, blank=True)
+    last_queried_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-pk",)
+        constraints = [models.UniqueConstraint(fields=("wallet", "request_key"), name="provider_withdrawal_idempotency")]
+
+
+class ProviderIncomeEntry(models.Model):
+    wallet = models.ForeignKey(ProviderIncomeWallet, on_delete=models.PROTECT, related_name="entries")
+    source_key = models.CharField(max_length=80, unique=True)
+    kind = models.CharField(max_length=16)  # credit / reserve / paid / release
+    amount = models.PositiveBigIntegerField()
+    available_delta = models.BigIntegerField()
+    reserved_delta = models.BigIntegerField()
+    distribution = models.OneToOneField("orders.ProviderOrderDistribution", null=True, on_delete=models.PROTECT)
+    withdrawal = models.ForeignKey(ProviderWithdrawal, null=True, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ProviderWithdrawalObservation(models.Model):
+    withdrawal = models.ForeignKey(ProviderWithdrawal, on_delete=models.PROTECT, related_name="observations")
+    kind = models.CharField(max_length=8)
+    status = models.CharField(max_length=16)
+    response_code = models.CharField(max_length=8, blank=True)
+    response_digest = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class ProviderCategoryGrant(models.Model):

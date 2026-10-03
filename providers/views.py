@@ -694,7 +694,10 @@ class CurrentProviderIncomeView(APIView):
             }
             for item in settlements[:100]
         ]
-        return Response({"data": {"summary": summary, "items": items}})
+        from .withdrawals import income_wallet_data
+        response = Response({"data": {"summary": summary, "items": items, "wallet": income_wallet_data(provider)}})
+        response["Cache-Control"] = "no-store, private"
+        return response
 
 
 def _online_payload(provider, location=None):

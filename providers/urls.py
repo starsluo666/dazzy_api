@@ -1,4 +1,5 @@
 from django.urls import path
+from .withdrawal_views import ProviderWithdrawalView, ProviderWithdrawalRefreshView
 
 from .receiving_account_views import (
     CurrentProviderReceivingAccountView, ProviderReceivingRegionsView,
@@ -29,6 +30,8 @@ from .views import (
 )
 
 urlpatterns = [
+    path("providers/me/income/withdrawals/", ProviderWithdrawalView.as_view()),
+    path("providers/me/income/withdrawals/<str:withdrawal_no>/refresh/", ProviderWithdrawalRefreshView.as_view()),
     path("providers/me/receiving-account/regions/", ProviderReceivingRegionsView.as_view()),
     path("providers/me/receiving-account/submit/", ProviderReceivingSubmitView.as_view()),
     path("providers/me/receiving-account/refresh/", ProviderReceivingRefreshView.as_view()),

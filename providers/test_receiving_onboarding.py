@@ -15,6 +15,7 @@ from accounts.models import User
 from .huifu_user import (
     ChannelUncertain, OnboardingUnavailable, UserChannelConfig, business_payload,
     registration_payload, settlement_config,
+    cash_config,
 )
 from .models import ProviderProfile, ProviderReceivingAccount, ProviderReceivingAttempt, ProviderReceivingNotification
 from .receiving_accounts import CONSENT_VERSION, decrypt_details
@@ -28,6 +29,8 @@ CONSENT = {"consent_accepted": True, "consent_version": ONBOARDING_CONSENT_VERSI
 KEY = RSA.generate(2048)
 SETTLEMENT = {"settle_cycle": "T1", "settle_pattern": "P0", "settle_batch_no": "1000",
               "workday_fixed_ratio": "0.00", "workday_constant_amt": "0.00", "out_settle_flag": "2"}
+CASH = {"cash_type": "T1", "fix_amt": "0.10", "out_fee_flag": "1",
+        "out_fee_huifu_id": "9000000000000004", "out_fee_acct_type": "01"}
 CHANNEL_SETTINGS = dict(
     PROVIDER_RECEIVING_ACCOUNT_COLLECTION_ENABLED=True,
     PROVIDER_RECEIVING_ACCOUNT_ENCRYPTION_KEY=fixtures.TEST_KEY,
@@ -39,10 +42,11 @@ CHANNEL_SETTINGS = dict(
     HUIFU_USER_NOTIFY_URL="https://example.invalid/api/v1/providers/receiving-account/huifu-notify/",
     HUIFU_USER_SKILL_SOURCE="hfps/1.3.5;hfms/1.0.4",
     HUIFU_USER_SETTLEMENT_CONFIG=json.dumps(SETTLEMENT),
+    HUIFU_USER_CASH_CONFIG=json.dumps(CASH), HUIFU_MERCHANT_ID="9000000000000004",
 )
 USER_ID = "9000000000000003"
 SUCCESS = {"resp_code": "00000000", "huifu_id": USER_ID}
-ACCEPTED = {**SUCCESS, "apply_no": "OFFLINE1", "resp_business": '[{"type":"1","code":"S"},{"type":"3","code":"S"}]'}
+ACCEPTED = {**SUCCESS, "apply_no": "OFFLINE1", "resp_business": '[{"type":"1","code":"S"},{"type":"2","code":"S"}]'}
 
 
 @override_settings(**CHANNEL_SETTINGS)
@@ -86,7 +90,11 @@ class ReceivingOnboardingTests(TestCase):
             "resp_code": "00000000",
             "indv_base_info": json.dumps({"name": details["real_name"], "cert_type": "00", "cert_no": details["id_number"]}),
             "card_info": json.dumps({"card_type": "1", "card_name": details["real_name"], "card_no": details["bank_card_number"], "prov_id": "130000", "area_id": "130400"}),
-            "settle_config_list": json.dumps([{**SETTLEMENT, "settle_status": "1"}]),
+            "settle_config_list": "[]",
+            "qry_cash_config_list": json.dumps([{"cash_type": "T1", "fix_amt": "0.10", "switch_state": "1",
+                                                 "out_cash_flag": "1", "out_cash_huifuid": CASH["out_fee_huifu_id"], "out_cash_acct_type": "01"}]),
+            "qry_cash_card_info_list": json.dumps([{"card_type": "1", "card_name": details["real_name"], "card_no": details["bank_card_number"],
+                                                   "prov_id": "130000", "area_id": "130400", "status": "N", "token_no": "TESTTOKEN1"}]),
             **changes,
         }
 
@@ -103,7 +111,7 @@ class ReceivingOnboardingTests(TestCase):
         return APIClient().post("/api/v1/providers/receiving-account/huifu-notify/", {"data": raw, "sign": signature}, format="json")
 
     def test_disabled_misconfigured_and_mertest_never_send(self):
-        for config in ({"HUIFU_USER_ONBOARDING_ENABLED": False}, {"HUIFU_USER_SETTLEMENT_CONFIG": "{}"},
+        for config in ({"HUIFU_USER_ONBOARDING_ENABLED": False}, {"HUIFU_USER_CASH_CONFIG": "{}"},
                        {"HUIFU_ENV": "mertest"}, {"HUIFU_RSA_PRIVATE_KEY": "invalid"}):
             cache.clear()
             with self.settings(**config), patch("providers.receiving_onboarding.HuifuUserGateway.call") as call:
@@ -179,7 +187,8 @@ class ReceivingOnboardingTests(TestCase):
         self.assertEqual(registration["cert_end_date"], "20400101")
         self.assertEqual(business["upper_huifu_id"], CHANNEL_SETTINGS["HUIFU_USER_UPPER_ID"])
         self.assertEqual(json.loads(business["card_info"])["card_type"], "1")
-        self.assertEqual(json.loads(business["settle_config_list"]), [SETTLEMENT])
+        self.assertEqual(json.loads(business["cash_config"]), [CASH])
+        self.assertNotIn("settle_config_list", business)
         self.assertNotEqual(registration["req_seq_id"], business["req_seq_id"])
         self.assertEqual(account.onboarding_consent_version, ONBOARDING_CONSENT_VERSION)
         result = self.client.get(URL).data["data"]
@@ -251,9 +260,11 @@ class ReceivingOnboardingTests(TestCase):
         self.assertEqual(self.account.channel_status, "attention")
         self.assertIsNone(self.account.user_huifu_id)
 
-    def test_active_requires_matching_identity_card_and_enabled_settlement(self):
+    def test_active_requires_own_card_manual_cash_and_disabled_auto_settlement(self):
         self.open()
-        for changes in ({"indv_base_info": "{}"}, {"card_info": "{}"}, {"settle_config_list": '[{"settle_cycle":"T1","settle_status":"0"}]'}, {"settle_config_list": [{"settle_cycle": "T1", "settle_status": "1"}]}):
+        for changes in ({"indv_base_info": "{}"}, {"qry_cash_card_info_list": "[]"}, {"qry_cash_config_list": "[]"},
+                        {"settle_config_list": None}, {"settle_config_list": '[{"settle_cycle":"T1","settle_status":"1"}]'},
+                        {"settle_config_list": [{"settle_cycle": "T1", "settle_status": "0"}]}):
             with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(**changes)):
                 self.client.post(URL + "refresh/")
             self.assertNotEqual(self.account.channel_status, "active")
@@ -345,7 +356,7 @@ class ReceivingOnboardingTests(TestCase):
     def test_long_term_cert_omits_end_date_in_both_requests(self):
         details = decrypt_details(self.account)
         details.update(cert_long_term=True, cert_end_date=None)
-        attempt = ProviderReceivingAttempt(req_date="20261002", req_seq_id="a" * 32, settlement_config=SETTLEMENT)
+        attempt = ProviderReceivingAttempt(req_date="20261002", req_seq_id="a" * 32, settlement_config=CASH)
         self.assertNotIn("cert_end_date", registration_payload(attempt, details))
         card = json.loads(business_payload(attempt, self.account, details, UserChannelConfig.load())["card_info"])
         self.assertEqual(card["cert_validity_type"], "1")
@@ -357,3 +368,30 @@ class ReceivingOnboardingTests(TestCase):
                     {**SETTLEMENT, "workday_fixed_ratio": "101.00"}, {**SETTLEMENT, "settle_batch_no": "guess"}):
             with self.assertRaises(OnboardingUnavailable):
                 settlement_config(raw)
+
+    def test_cash_has_no_default_rates_and_forbids_provider_borne_fees(self):
+        self.assertEqual(cash_config(CASH), CASH)
+        for raw in ({}, SETTLEMENT, {**CASH, "out_fee_flag": "2"}, {**CASH, "out_fee_huifu_id": USER_ID},
+                    {**CASH, "cash_type": "D0"}, {**CASH, "fee_rate": "101.00"}):
+            with self.assertRaises(OnboardingUnavailable):
+                cash_config(raw)
+
+    def test_legacy_authorization_never_modifies_live_auto_settlement(self):
+        self.open()
+        account = self.account
+        account.onboarding_consent_version = "huifu-personal-settlement-v1"
+        account.channel_status = "active"
+        account.save()
+        ProviderReceivingAttempt.objects.filter(account=account, kind="configure").update(settlement_config=SETTLEMENT)
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call") as call:
+            self.assertTrue(self.client.get(URL).data["data"]["can_submit"])
+            self.assertEqual(self.submit().status_code, 200)
+            call.assert_not_called()
+        self.assertEqual(self.account.channel_status, "attention")
+        self.assertEqual(self.account.attempts.filter(kind="consent").count(), 1)
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response()):
+            self.client.post(URL + "refresh/")
+        self.assertEqual(self.account.channel_status, "active")
+        safe = self.client.get(URL).data
+        self.assertNotIn("TESTTOKEN1", str(safe))
+        self.assertNotIn("TESTTOKEN1", self.account.cash_card_ciphertext)

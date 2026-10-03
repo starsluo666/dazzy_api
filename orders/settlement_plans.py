@@ -170,13 +170,9 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
             ProviderOrderSettlementPlan.FundingType.MIXED,
         ):
             block("wallet_route_unconfirmed", "余额部分尚未接通渠道资金划转")
-        if funding_type in (
-            ProviderOrderSettlementPlan.FundingType.EXTERNAL,
-            ProviderOrderSettlementPlan.FundingType.MIXED,
-        ):
-            block("external_route_unconfirmed", "外部交易延时入账及可分账资金尚未核实")
-        block("execution_disabled", "仅生成分账准备记录，真实分账尚未接通")
-        block("channel_fee_policy_unverified", "手续费由平台承担，渠道实际扣费方及费用尚待核实")
+        # This is local readiness, NOT permission/proof of channel execution.
+        # Dispatch owns cohort/flags/receiver/funds/fee checks; channel results
+        # live on the distribution record, never as unconditional plan blockers.
 
     values = {
         "status": ProviderOrderSettlementPlan.Status.CANCELLED
@@ -184,7 +180,8 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
         else (
             ProviderOrderSettlementPlan.Status.WAITING
             if waiting
-            else ProviderOrderSettlementPlan.Status.BLOCKED
+            else ProviderOrderSettlementPlan.Status.BLOCKED if blockers
+            else ProviderOrderSettlementPlan.Status.READY
         ),
         "funding_type": funding_type,
         "paid_amount": settlement.paid_amount,
@@ -193,7 +190,7 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
         "platform_amount": settlement.platform_commission_amount,
         "funding_snapshot": funding,
         # Business policy is not proof of channel configuration. Actual channel
-        # fees are not collected in this phase, so leave them unknown, not zero.
+        # fees belong to distribution/withdrawal records, not this local plan.
         "fee_policy_snapshot": platform_fee_snapshot(
             provider_amount=settlement.provider_settlement_amount,
             platform_amount=settlement.platform_commission_amount,

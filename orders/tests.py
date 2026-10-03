@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
+from django.core.cache import cache
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -55,6 +56,9 @@ from .wechat_oauth import (
 @override_settings(DEBUG=True)
 class ProviderOrderApiTests(TestCase):
     def setUp(self):
+        # Database rollback does not clear DRF's throttle cache between scenarios.
+        cache.clear()
+        self.addCleanup(cache.clear)
         self.customer = User.objects.create_user(phone="13800000101", password="test")
         self.provider_user = User.objects.create_user(
             phone="13800000102", password="test", nickname="晓晓"
@@ -483,6 +487,20 @@ class ProviderOrderApiTests(TestCase):
         self.assertEqual(wrong_payer.status_code, 400)
         self.assertIn("当前微信与首次发起支付的微信不同", wrong_payer.json()["authorization"])
         gateway.return_value.create_payment.assert_called_once()
+
+    def test_delayed_cohort_is_persisted_before_request_and_not_reselected_on_replay(self):
+        cohort = {"version": "offline-cohort", "provider_id": self.provider.pk}
+        # Reuse the complete payer/session/replay scenario above with a controlled
+        # cohort selector. The selector's own eligibility is tested separately.
+        with patch("orders.distributions.payment_cohort", return_value=cohort) as select:
+            self.test_huifu_payment_session_uses_server_amount_and_is_idempotent()
+        select.assert_called_once()
+        payment = ProviderOrderPaymentOrder.objects.get(order__customer=self.customer)
+        self.assertEqual(payment.delay_acct_flag, "Y")
+        self.assertEqual(payment.distribution_cohort, cohort)
+        from orders.services import get_huifu_payment_gateway
+
+        self.assertEqual(get_huifu_payment_gateway.return_value.create_payment.call_args.kwargs["delay_acct_flag"], "Y")
 
     def test_huifu_payment_session_rejects_client_amount(self):
         created = self.client.post(

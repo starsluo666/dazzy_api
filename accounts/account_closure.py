@@ -288,6 +288,11 @@ def account_closure_blockers(user) -> list[dict[str, object]]:
         ),
     )
     blockers = []
+    from providers.models import ProviderIncomeWallet
+    if ProviderIncomeWallet.objects.filter(provider__user=user).filter(
+        Q(available_amount__gt=0) | Q(reserved_amount__gt=0) | ~Q(hold_reason="")
+    ).exists():
+        blockers.append({"code": "provider_income_wallet", "label": "未结清的达人收入或提现", "count": 1})
     from providers.models import ProviderReceivingAccount
     if ProviderReceivingAccount.objects.filter(provider__user=user, attempts__isnull=False).exists():
         blockers.append({"code": "receiving_channel", "label": "需客服核对的渠道收款账户", "count": 1})

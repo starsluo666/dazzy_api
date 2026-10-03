@@ -1453,7 +1453,7 @@ class ProviderOrderSettlementPlanSerializer(serializers.ModelSerializer):
     execution_enabled = serializers.SerializerMethodField()
 
     def get_execution_enabled(self, obj):
-        # No transfer implementation exists in this phase; not a runtime switch.
+        # UI capability only, not the channel/job switch. Never grant admin payouts.
         return False
 
     class Meta:
@@ -1475,6 +1475,22 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
     city_name = serializers.CharField(source="provider.service_city_name")
     status_label = serializers.CharField(source="get_status_display")
     distribution_plan = ProviderOrderSettlementPlanSerializer(read_only=True, allow_null=True)
+    distribution = serializers.SerializerMethodField()
+
+    def get_distribution(self, obj):
+        record = getattr(obj, "distribution", None)
+        if not record:
+            return None
+        return {
+            "req_date": record.req_date, "req_seq_id": record.req_seq_id,
+            "status": record.status, "status_label": record.get_status_display(),
+            "provider_amount": record.snapshot["provider_amount"],
+            "platform_amount": record.snapshot["platform_amount"],
+            "payment_fee_amount": record.payment_fee_amount, "split_fee_amount": record.split_fee_amount,
+            "bank_settlement_fee_amount": None, "bank_arrival_verified": False,
+            "response_code": record.response_code, "attention_reason": record.attention_reason,
+            "last_queried_at": record.last_queried_at, "created_at": record.created_at,
+        }
 
     class Meta:
         model = ProviderOrderSettlement
@@ -1485,7 +1501,7 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
             "platform_commission_rate", "platform_commission_amount",
             "provider_service_income_amount", "provider_settlement_amount", "frozen_at",
             "freeze_until", "dispute_reason", "settled_at", "cancelled_at", "created_at",
-            "updated_at", "distribution_plan",
+            "updated_at", "distribution_plan", "distribution",
         )
 
 

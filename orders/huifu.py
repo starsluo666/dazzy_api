@@ -286,10 +286,13 @@ class HuifuAggregatePaymentGateway:
         attach: str,
         time_expire: str,
         sub_openid: str = "",
+        delay_acct_flag: str = "N",
     ) -> HuifuPaymentSessionResult:
         from dg_sdk import Payment, PaymentCreateRequest
 
         self.config.validate_for_payment(trade_type=trade_type)
+        if delay_acct_flag not in {"Y", "N"}:
+            raise HuifuConfigurationError("延时交易标记无效。")
         method_expand = {"attach": attach[:128]}
         if trade_type == "T_JSAPI":
             if not sub_openid:
@@ -315,7 +318,7 @@ class HuifuAggregatePaymentGateway:
                 request.trans_amt = cents_to_yuan(amount)
                 request.goods_desc = goods_desc[:128]
                 request.time_expire = time_expire
-                request.delay_acct_flag = "N"
+                request.delay_acct_flag = delay_acct_flag
                 request.fee_flag = self.config.fee_flag
                 request.notify_url = self.config.notify_url
                 request.method_expand = json.dumps(

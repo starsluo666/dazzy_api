@@ -21,18 +21,19 @@ from .receiving_accounts import ReceivingDetailsSerializer, decrypt_details
 from .receiving_regions import validate_bank_region
 
 
-ONBOARDING_CONSENT_VERSION = "huifu-personal-settlement-v1"
+ONBOARDING_CONSENT_VERSION = "huifu-personal-cash-v2"
 ONBOARDING_NOTICE = (
     "我确认以上为本人真实身份及本人储蓄卡信息，同意乐搭伴将姓名、身份证号及有效期、"
     "银行卡号、银行所在省市、银行预留手机号提交上海汇付支付有限公司，"
-    "用于实名认证、个人收款用户开户、绑定本人结算卡及配置银行卡结算。"
+    "用于实名认证、个人收款用户开户、绑定本人提现卡及开通手动提现。"
+    "订单满足结算条件且渠道分账核验成功后计入达人余额，由本人主动申请提现至银行卡，手续费由平台承担。"
     "开户结果以汇付核验为准；开通不代表订单已分账或银行卡已到账，不会在此扣款。"
     "提交后如需更正资料或注销渠道账户，请联系客服处理。"
 )
 LABELS = {
     "not_connected": "资料已保存，待渠道开通", "registering": "正在申请开户",
-    "registered": "开户成功，待配置结算", "configuring": "正在配置银行卡结算",
-    "pending": "渠道审核处理中", "active": "银行卡结算已开通",
+    "registered": "开户成功，待配置提现", "configuring": "正在配置手动提现",
+    "pending": "渠道核验处理中", "active": "余额手动提现已开通",
     "rejected": "开户资料需修正", "attention": "渠道结果待核实",
 }
 
@@ -67,7 +68,7 @@ def _validate_materials(provider, details):
 def submit_onboarding(provider, data):
     config = UserChannelConfig.load(for_submission=True)
     if data.get("consent_accepted") is not True or data.get("consent_version") != ONBOARDING_CONSENT_VERSION:
-        raise ValidationError("请阅读并确认当前开户及银行卡结算授权。")
+        raise ValidationError("请阅读并确认当前开户及余额提现授权。")
     with transaction.atomic():
         lock_active_user_for_business(provider.user)
         provider = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
@@ -75,6 +76,19 @@ def submit_onboarding(provider, data):
         if not account:
             raise ValidationError("请先保存本人收款资料。")
         _scope(account, config)
+        if account.user_huifu_id and account.attempts.filter(kind="configure").exists() and account.onboarding_consent_version != ONBOARDING_CONSENT_VERSION:
+            # Renew consent only. Never silently modify an existing live channel account.
+            account.onboarding_consent_version = ONBOARDING_CONSENT_VERSION
+            account.onboarding_consented_at = timezone.now()
+            account.channel_status = "attention"
+            account.cash_status = ""
+            account.channel_message = "已确认手动提现授权；请平台在汇付侧关闭自动结算并配置取现，然后刷新核验。"
+            account.save()
+            consent = _attempt(account, "consent", config.settlement)
+            consent.status = "succeeded"
+            consent.finished_at = timezone.now()
+            consent.save()
+            return
         # Also prevents the browser double-tap/request retry starting a second creation.
         if account.channel_status not in {"not_connected", "rejected", "registered"}:
             return
@@ -135,7 +149,7 @@ def _execute(attempt, payload, config):
                 else:
                     account.user_huifu_id = user_id
                     account.channel_status = "registered"
-                    account.channel_message = "开户成功，正在准备银行卡结算配置。"
+                    account.channel_message = "开户成功，正在准备本人银行卡与手动提现配置。"
                     attempt.status = "succeeded"
             elif code in {"00000001", "00000103", "00000104"}:
                 # Only explicit pre-execution rejections. System/unknown codes never permit a new create.
@@ -164,8 +178,9 @@ def _execute(attempt, payload, config):
                 if account.audit_status not in {"Y", "N"}:
                     account.card_status = statuses.get("1", account.card_status)
                     account.settlement_status = statuses.get("3", account.settlement_status)
+                    account.cash_status = statuses.get("2", account.cash_status)
                     account.channel_status = "pending" if code in {"00000000", "00000100", "90000000"} else "attention"
-                    account.channel_message = "渠道已受理，请刷新状态确认银行卡与结算配置。" if account.channel_status == "pending" else "开户已保留，银行卡结算配置需核实，请联系客服。"
+                    account.channel_message = "渠道已受理，请刷新状态确认银行卡与手动提现配置。" if account.channel_status == "pending" else "开户已保留，手动提现配置需核实，请联系客服。"
                 if account.audit_status not in {"Y", "N"}:
                     attempt.status = "processing" if account.channel_status == "pending" else "unknown"
         attempt.save()
@@ -250,8 +265,6 @@ def refresh_onboarding(provider):
         identity = decode_field(response, "indv_base_info", dict)
         if identity.get("cert_type") != "00" or identity.get("cert_no") != details["id_number"] or identity.get("name") != details["real_name"]:
             raise ChannelUncertain()
-        card = decode_field(response, "card_info", dict, optional=True)
-        settlements = decode_field(response, "settle_config_list", list, optional=True)
         with transaction.atomic():
             account = ProviderReceivingAccount.objects.select_for_update().get(pk=account.pk)
             if ProviderReceivingAccount.objects.exclude(pk=account.pk).filter(user_huifu_id=user_id).exists():
@@ -260,21 +273,27 @@ def refresh_onboarding(provider):
             opening = account.attempts.filter(kind="configure").first()
             if not opening:
                 account.channel_status = "registered"
-                account.channel_message = "已确认本人渠道账户，请继续开通银行卡结算。"
+                account.channel_message = "已确认本人渠道账户，请继续开通余额手动提现。"
             else:
-                matching_card = card.get("card_type") == "1" and card.get("card_name") == details["real_name"] and card.get("card_no") == details["bank_card_number"] and card.get("prov_id") == details["bank_province_code"] and card.get("area_id") == details["bank_city_code"]
-                expected_cycle = opening.settlement_config.get("settle_cycle")
-                # Do not label a different fee/batch configuration as this application.
-                comparable = {key: value for key, value in opening.settlement_config.items() if key not in {"settle_pattern", "is_priority_receipt"}}
-                enabled = any(isinstance(item, dict) and item.get("settle_cycle") == expected_cycle and item.get("settle_status") == "1" and all(item.get(key) == value for key, value in comparable.items()) for item in settlements)
-                account.card_status = "S" if matching_card else "F"
-                account.settlement_status = "S" if enabled else "F"
-                if matching_card and enabled and account.audit_status not in {"P", "N"}:
+                from .cash_accounts import verify_cash_configuration
+                consent = account.attempts.filter(kind="consent").first()
+                expected = (consent or opening).settlement_config
+                ready = False
+                account.cash_status = "F"
+                account.automatic_settlement_disabled = None
+                account.verified_cash_config = {}
+                account.cash_card_ciphertext = ""
+                if "cash_type" in expected:
+                    try:
+                        ready = verify_cash_configuration(account, response, details, expected)
+                    except ChannelUncertain:
+                        pass
+                if ready and account.onboarding_consent_version == ONBOARDING_CONSENT_VERSION and account.audit_status not in {"P", "N"}:
                     account.channel_status = "active"
-                    account.channel_message = "已核验本人银行卡及结算配置；实际到账以渠道资金记录为准。"
+                    account.channel_message = "已核验手动提现、本人银行卡及自动结算关闭；申请提现后以渠道到账结果为准。"
                 else:
                     account.channel_status = "pending" if account.audit_status == "P" else "attention"
-                    account.channel_message = "银行卡或结算状态尚未确认可用，请稍后刷新或联系客服。"
+                    account.channel_message = "手动提现或自动结算关闭状态尚未核验；旧账户请联系平台切换，不能直接提现。"
             account.channel_checked_at = timezone.now()
             account.save()
             attempt.status = "succeeded"
@@ -333,8 +352,9 @@ def receive_notification(raw, sign):
                 account.audit_status = state
                 account.card_status = statuses.get("1", account.card_status)
                 account.settlement_status = statuses.get("3", account.settlement_status)
+                account.cash_status = statuses.get("2", account.cash_status)
                 account.channel_status = "attention" if state == "N" or "F" in statuses.values() or data["sub_resp_code"] not in {"00000000", "00000100", "90000000"} else "pending"
-                account.channel_message = "渠道审核未通过，请联系客服核实。" if state == "N" else "渠道状态已更新，请刷新核验银行卡结算。"
+                account.channel_message = "渠道审核未通过，请联系客服核实。" if state == "N" else "渠道状态已更新，请刷新核验本人银行卡与手动提现。"
                 # Even Y + S is not a bank payout. Active is confirmed by detail query.
                 account.save()
                 attempt.status = "rejected" if state == "N" else "processing"
