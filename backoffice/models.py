@@ -205,6 +205,29 @@ class PlatformOperationSetting(models.Model):
         return setting
 
 
+class ReceivingWithdrawalSetting(models.Model):
+    """Published onboarding defaults; never rewrites existing channel accounts."""
+
+    singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
+    cash_type = models.CharField(max_length=2, choices=(("T1", "下一工作日"), ("D1", "下一自然日")))
+    fix_amt = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    fee_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    weekday_fix_amt = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    weekday_fee_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    out_fee_acct_type = models.CharField(max_length=2, choices=(("01", "基本户"), ("02", "现金户"), ("05", "充值户")))
+    # Server supplied, not editable by clients. A changed merchant must not silently
+    # reuse fees agreed with the previous fee bearer.
+    fee_bearer_id = models.CharField(max_length=18, editable=False)
+    revision = models.PositiveIntegerField(default=1)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "backoffice_receiving_withdrawal_setting"
+        verbose_name = "收款与提现配置"
+        verbose_name_plural = verbose_name
+
+
 class ProviderOrderSupportNote(models.Model):
     order = models.ForeignKey(
         "orders.ProviderOrder", on_delete=models.PROTECT, related_name="support_notes"

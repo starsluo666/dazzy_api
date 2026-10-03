@@ -53,7 +53,8 @@ PROVIDER_RECEIVING_ACCOUNT_ENCRYPTION_KEY=<独立的32字节随机密钥，经�
 HUIFU_USER_ONBOARDING_ENABLED=false
 HUIFU_USER_UPPER_ID=<已确认归属主体的真实上级汇付号>
 HUIFU_USER_NOTIFY_URL=https://<对外API域名>/api/v1/providers/receiving-account/huifu-notify/
-HUIFU_USER_CASH_CONFIG=<已确认的平台承担手续费的手动提现JSON对象>
+# 未在后台配置时才读取此兼容项；新部署建议使用后台表单，不必手写 JSON。
+HUIFU_USER_CASH_CONFIG=
 HUIFU_USER_SKILL_SOURCE=hfps/1.3.5;hfms/1.0.4
 ```
 
@@ -63,7 +64,7 @@ HUIFU_USER_SKILL_SOURCE=hfps/1.3.5;hfms/1.0.4
 
 - 系统号所属主体角色、上级汇付号、产品及个人用户开户、余额查询和手动提现权限。
 - 商户私钥与已登记公钥配对，汇付公钥正确；通知地址 HTTPS 公网可达，且网关未要求用户登录。
-- 提现 JSON 明确 `cash_type=T1/D1`、真实 `fix_amt`/`fee_rate`、`out_fee_flag=1`、平台 `out_fee_huifu_id` 和 `out_fee_acct_type`；D1 工作日差异配置须按合同填写。不能照抄示例费率或推断费用承担方。旧 `HUIFU_USER_SETTLEMENT_CONFIG` 不再用于新开户。
+- 在「运营配置 → 收款与提现配置」选择 T1/D1、真实固定费用/费率和平台扣费账户；D1 工作日差异配置须按合同填写。代码固定 `out_fee_flag=1`，承担方取服务器 `HUIFU_MERCHANT_ID`。不能照抄示例费率或推断费用承担方。旧 `HUIFU_USER_SETTLEMENT_CONFIG` 不再用于新开户。
 - SDK 调试日志关闭，反向代理、APM 和录屏不采集收款请求体；数据库及密钥备份访问受限。
 
 以上确认、部署和重启完成后，再由有权限的人员把开户开关设为 `true`。只有达人另行授权并主动提交，才会发送真实资料；开关本身不会批量开户。首个真实账户需获得明确授权后联调，核对渠道后台、通知与查询结果。当前未实施此生产步骤。
@@ -71,6 +72,22 @@ HUIFU_USER_SKILL_SOURCE=hfps/1.3.5;hfms/1.0.4
 关闭开户开关会禁止新的主动提交；已提交账户仍需保留有效查询/通知配置以核对结果。不能直接改上级号或产品号来重试，跨渠道配置会被拦截。异常结果保持待核实，不通过人工改本地状态冒充渠道成功。
 
 ## API 与安全边界
+
+### 后台收款与提现表单
+
+部署时执行 `backoffice.0031_receivingwithdrawalsetting` 迁移，并更新运营前端。入口为「运营配置 → 收款与提现配置」，需 `operations.manage` 权限且属于平台全局数据范围（超级管理员亦可）；普通达人或城市代理不可访问。
+
+- GET/PUT `/api/v1/admin/operation-settings/receiving-withdrawal/`。GET 不建记录；PUT 完整提交表单、当前 `revision`、显式 `confirmed=true` 与非空变更说明；并发旧版本返回 409，不覆盖其他管理员的修改。更新与审计记录同一事务。
+- 表单无费率、周期或账户类型默认值。固定费用与百分比费率至少填一项，最多两位小数；明确的 `0` 表示免费，不将空值当零。两项同时填写相加；`0.05` 表示 `0.05%`。T1 不能带 D1 工作日字段。
+- 首次发布前，继续兼容 `HUIFU_USER_CASH_CONFIG`；发布后数据库优先，后续新建开户配置请求自动读取，不需重启。数据库缺表/读取失败、配置损坏或承担商户变更时阻止新提交，**不退回旧环境费率**。商户变更须重新核实费用并发布。
+- 环境变量中的商户号、上级号、产品、回调地址、密钥及开户/提现开关仍由运维配置。页面只返回本地检查结果，不返回密钥或原始渠道 ID；保存不更改这些参数，不触发任何汇付 HTTP 请求，不产生批量开户或出款。
+- 页面「本地校验通过」不等于已获得渠道业务权限、回调公网可达或账户已开通。开户、提现和资料登记仍有各自的开关与安全条件，正式业务需独立验收。
+- 发布仅影响后续新建请求的配置快照；已有请求、审核中账户及已开通账户不会自动变费率。原有核验与提现继续按各自持久化快照进行。旧账户调整仍需单独与汇付处理，不能改本地状态代替。
+- 操作记录可在「系统管理 → 操作审计」查看「更新收款与提现配置」，含修改前后、操作者及变更说明，不记录密钥或银行卡。
+
+离线回归：`uv run python scripts/check_wechat_auth.py backoffice.test_receiving_settings providers.test_receiving_onboarding providers.test_huifu_user_transport`；管理端 `npm run test:receiving-settings` 和 `npm run build`。
+
+### 达人本人接口
 
 本人基础路径：`/api/v1/providers/me/receiving-account/`。
 

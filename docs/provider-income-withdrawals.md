@@ -20,7 +20,7 @@
 此代码未部署，也未执行真实开户/改配置/分账/提现。不能把离线测试当成生产资金验收。
 
 1. 先部署后端迁移至 `orders/0030`、`providers/0022`，再更新 API、Celery Worker/Beat、达人端及后台；不要只发布前端。
-2. 新开户配置 `HUIFU_USER_CASH_CONFIG`（一个 JSON 对象）：`cash_type=T1/D1`，`fix_amt/fee_rate` 至少一个，费用为已核实的两位小数字符串；`out_fee_flag=1`、`out_fee_huifu_id=HUIFU_MERCHANT_ID`、`out_fee_acct_type=01/02/05`。D1 可分别提供工作日费用。**不提供可直接抄用的假费率。** 上级商户须开通对应个人用户取现能力及平台费用外扣权限。
+2. 新开户优先使用「运营配置 → 收款与提现配置」表单（需迁移 `backoffice/0031`），首次后台发布前才兼容 `HUIFU_USER_CASH_CONFIG`。规则为 `cash_type=T1/D1`、固定费用/百分比费率至少一个，费用由平台承担（`out_fee_flag=1`，承担方 `HUIFU_MERCHANT_ID`）；D1 可单独提供工作日费用。**不提供可直接抄用的假费率。** 表单更新不修改已有请求快照及渠道账户；配置读取异常不回退旧环境费率。上级商户须开通对应个人用户取现能力及平台费用外扣权限，详见[收款配置](provider-receiving-account.md)。
 3. 新开户只提交 `cash_config` 和本人 `card_info`，不提交 `settle_config_list`。旧 `HUIFU_USER_SETTLEMENT_CONFIG` 不再作为新开户参数。
 4. **已经开通自动结算的旧账户必须由平台在汇付侧先切换**，本次没有自动发送 `/user/busi/modify`，不会仅凭用户点按钮就修改渠道。达人重新确认 `huifu-personal-cash-v2` 授权，后端只记录新授权；随后刷新核验实际配置。
 5. 查询必须明确返回 `settle_config_list="[]"` 或所有条目 `settle_status="0"`，缺失字段不能证明已关闭。若真实渠道对未开通用户省略字段，应向汇付确认协议后补适配，不强行放行。本人卡必须为正常取现卡并返回 token；配置费用响应键是 `out_cash_*`，不是请求的 `out_fee_*`。

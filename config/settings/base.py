@@ -237,6 +237,7 @@ HUIFU_USER_UPPER_ID = os.getenv("HUIFU_USER_UPPER_ID", "")
 HUIFU_USER_NOTIFY_URL = os.getenv("HUIFU_USER_NOTIFY_URL", "")
 HUIFU_USER_SETTLEMENT_CONFIG = os.getenv("HUIFU_USER_SETTLEMENT_CONFIG", "")
 # New provider accounts use manual withdrawal; never fall back to automatic settlement.
+# Compatibility only: used before the first admin receiving/withdrawal publication.
 HUIFU_USER_CASH_CONFIG = os.getenv("HUIFU_USER_CASH_CONFIG", "")
 HUIFU_PROVIDER_WITHDRAWAL_ENABLED = os.getenv("HUIFU_PROVIDER_WITHDRAWAL_ENABLED", "false").lower() in {"1", "true", "yes"}
 HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS = int(os.getenv("HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS", "0"))

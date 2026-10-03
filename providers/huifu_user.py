@@ -144,7 +144,10 @@ class UserChannelConfig:
         )
         if any(not value for value in values.values()):
             raise OnboardingUnavailable()
-        url = urlsplit(values["notify_url"])
+        try:
+            url = urlsplit(values["notify_url"])
+        except ValueError:
+            raise OnboardingUnavailable() from None
         if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or len(values["notify_url"]) > 128:
             raise OnboardingUnavailable()
         if len(values["sys_id"]) > 32 or len(values["product_id"]) > 32 or not re.fullmatch(r"[0-9]{1,18}", values["upper_id"]):
@@ -159,7 +162,8 @@ class UserChannelConfig:
                 raise ValueError
         except (ValueError, TypeError, IndexError):
             raise OnboardingUnavailable("平台开户密钥配置无效，请联系平台。") from None
-        values["settlement"] = cash_config(settings.HUIFU_USER_CASH_CONFIG) if for_submission else {}
+        from backoffice.receiving_settings import effective_cash_config
+        values["settlement"] = effective_cash_config() if for_submission else {}
         from .huifu_user_transport import ensure_transport_ready
         ensure_transport_ready()
         return cls(**values)

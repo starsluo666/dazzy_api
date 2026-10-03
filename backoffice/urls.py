@@ -2,6 +2,7 @@ from django.urls import path
 
 from .asset_views import AdminAssetBatchDeleteView, AdminAssetListUploadView, AdminAssetRestoreView
 from .auth_views import AdminLogoutView, AdminPasswordLoginView, AdminTokenRefreshView
+from .receiving_setting_views import ReceivingWithdrawalSettingView
 from .views import (
     AdminActivityDetailView,
     AdminActivityActionView,
@@ -78,6 +79,7 @@ urlpatterns = [
     path("auth/logout/", AdminLogoutView.as_view(), name="backoffice-auth-logout"),
     path("operation-settings/provider-ordering/", ProviderOrderingSettingView.as_view(), name="backoffice-provider-ordering-setting"),
     path("operation-settings/platform/", PlatformOperationSettingView.as_view(), name="backoffice-platform-operation-setting"),
+    path("operation-settings/receiving-withdrawal/", ReceivingWithdrawalSettingView.as_view(), name="backoffice-receiving-withdrawal-setting"),
     path("me/", AdminMeView.as_view(), name="backoffice-me"),
     path("overview/", AdminOverviewView.as_view(), name="backoffice-overview"),
     path(

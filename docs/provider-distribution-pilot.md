@@ -48,7 +48,7 @@ HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED=false
 HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS=0
 ```
 
-渠道必须 prod，支付费用 `HUIFU_FEE_FLAG=1`（平台外扣）。新开户使用 `HUIFU_USER_CASH_CONFIG`，`out_fee_flag=1`、`out_fee_huifu_id` 为平台支付商户号；详情查询使用不同响应键 `out_cash_flag/out_cash_huifuid/out_cash_acct_type`。旧自动结算配置不能直接用于本流程。真实费率、账户类型、平台备付余额由渠道核实；改变环境变量不会修改既有渠道账户。
+渠道必须 prod，支付费用 `HUIFU_FEE_FLAG=1`（平台外扣）。新开户优先使用后台「收款与提现配置」，首次发布前兼容 `HUIFU_USER_CASH_CONFIG`；`out_fee_flag=1`、`out_fee_huifu_id` 为平台支付商户号。详情查询使用不同响应键 `out_cash_flag/out_cash_huifuid/out_cash_acct_type`。旧自动结算配置不能直接用于本流程。真实费率、账户类型、平台备付余额由渠道核实；更新后台表单或环境变量均不会自动修改既有渠道账户。表单权限、版本冲突与生效范围见[收款配置](provider-receiving-account.md)。
 
 ## 你准备好测试达人后
 

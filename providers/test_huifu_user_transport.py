@@ -41,7 +41,9 @@ def signed_http_response(data, *, key=CHANNEL_KEY):
 @override_settings(**{**fixtures.CHANNEL_SETTINGS, "HUIFU_RSA_PUBLIC_KEY": CHANNEL_KEY.public_key().export_key().decode()})
 class HuifuUserTransportTests(SimpleTestCase):
     def setUp(self):
-        self.config = UserChannelConfig.load(for_submission=True)
+        # Transport tests have no DB; publication/default selection is covered
+        # by the onboarding and backoffice integration tests.
+        self.config = replace(UserChannelConfig.load(), settlement=fixtures.CASH.copy())
         self.gateway = HuifuUserGateway(self.config)
         self.payload = {
             "req_seq_id": "a" * 32, "req_date": "20261002", "name": "测试/达人",

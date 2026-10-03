@@ -376,6 +376,35 @@ class ReceivingOnboardingTests(TestCase):
             with self.assertRaises(OnboardingUnavailable):
                 cash_config(raw)
 
+    def publish_test_fee(self, fee="1.20"):
+        from backoffice.models import ReceivingWithdrawalSetting
+        ReceivingWithdrawalSetting.objects.update_or_create(singleton_key="default", defaults={
+            "cash_type": "T1", "fix_amt": fee, "out_fee_acct_type": "01",
+            "fee_bearer_id": CASH["out_fee_huifu_id"], "updated_by": self.user,
+        })
+
+    def test_new_onboarding_uses_admin_fee_snapshot(self):
+        self.publish_test_fee()
+        gateway = self.open()
+        self.assertEqual(json.loads(gateway.call_args_list[1].args[1]["cash_config"])[0]["fix_amt"], "1.20")
+        self.assertEqual(self.account.attempts.get(kind="configure").settlement_config["fix_amt"], "1.20")
+
+    def test_publication_mid_registration_does_not_change_inflight_snapshot(self):
+        def send(kind, payload):
+            if kind == "register":
+                self.publish_test_fee()
+                return SUCCESS
+            self.assertEqual(json.loads(payload["cash_config"]), [CASH])
+            return ACCEPTED
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", side_effect=send):
+            self.assertEqual(self.submit().status_code, 200)
+        self.assertEqual(self.account.attempts.get(kind="configure").settlement_config, CASH)
+        self.assertEqual(UserChannelConfig.load(for_submission=True).settlement["fix_amt"], "1.20")
+        # Existing channel verification must still compare with the old snapshot.
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response()):
+            self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+        self.assertEqual(self.account.channel_status, "active")
+
     def test_legacy_authorization_never_modifies_live_auto_settlement(self):
         self.open()
         account = self.account

@@ -33,7 +33,7 @@ PERMISSION_GROUPS = (
             ("service_category.manage", "管理服务分类"),
             ("asset.view", "查看运营素材库"),
             ("asset.manage", "上传与管理运营素材"),
-            ("operations.manage", "管理平台参数与接单规则"),
+            ("operations.manage", "管理平台参数、接单规则与收款提现配置"),
         ),
     },
     {
