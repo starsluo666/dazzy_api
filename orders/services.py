@@ -42,6 +42,7 @@ from .huifu import (
 from .payment_recovery import (
     PaymentRecoveryRequired, record_payment_error, recoverable_payment_session,
 )
+from .settlement_plans import settlement_has_unresolved_refunds, sync_provider_settlement_plan
 
 MINIMUM_ADVANCE = timedelta(hours=1)
 MAXIMUM_ADVANCE = timedelta(days=3)
@@ -1278,6 +1279,7 @@ def create_customer_provider_order_after_sales_case(
         content="平台客服会尽快处理，结果将通过通知中心告知你。",
         dedupe_suffix=case.case_no,
     )
+    sync_provider_settlement_plan(order_no=order.order_no)
     return case, True
 
 
@@ -1382,6 +1384,7 @@ def create_provider_order_refund(
     from taskcenter.services import register_provider_order_refund
 
     register_provider_order_refund(refund)
+    sync_provider_settlement_plan(order_no=order.order_no)
     return refund, True
 
 
@@ -1468,6 +1471,7 @@ def ensure_provider_order_settlement(*, order_no: str, now=None):
         raise ValidationError("订单缺少已支付的支付单。")
     settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
     if settlement:
+        sync_provider_settlement_plan(order_no=order_no, now=now)
         return settlement, False
     rate = _settlement_commission_rate(order)
     amounts = _settlement_amounts(order, rate)
@@ -1487,6 +1491,7 @@ def ensure_provider_order_settlement(*, order_no: str, now=None):
         settlement.save(update_fields=("status", "cancelled_at", "updated_at"))
     else:
         register_provider_order_settlement(settlement)
+    sync_provider_settlement_plan(order_no=order_no, now=now, new_settlement=True)
     return settlement, True
 
 
@@ -1507,6 +1512,7 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
         ProviderOrderSettlement.Status.SETTLED,
         ProviderOrderSettlement.Status.CANCELLED,
     ):
+        sync_provider_settlement_plan(order_no=order_no, now=now)
         return {"state": "not_applicable", "order_no": order_no, "status": settlement.status}
     from backoffice.models import ProviderOrderAfterSalesCase
 
@@ -1517,10 +1523,11 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
             ProviderOrderAfterSalesCase.Status.PROCESSING,
             ProviderOrderAfterSalesCase.Status.APPROVED,
         ),
-    ).exists():
+    ).exists() or settlement_has_unresolved_refunds(order):
         settlement.status = ProviderOrderSettlement.Status.DISPUTE_FROZEN
-        settlement.dispute_reason = "存在待处理订单退款售后"
+        settlement.dispute_reason = "存在待处理订单售后或未完成退款"
         settlement.save(update_fields=("status", "dispute_reason", "updated_at"))
+        sync_provider_settlement_plan(order_no=order_no, now=now)
         return {"state": "dispute_frozen", "order_no": order_no}
     amounts = _settlement_amounts(
         order, settlement.platform_commission_rate
@@ -1531,16 +1538,19 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
         settlement.cancelled_at = now
         settlement.dispute_reason = ""
         settlement.save()
+        sync_provider_settlement_plan(order_no=order_no, now=now)
         return {"state": "cancelled", "order_no": order_no}
     if now < settlement.freeze_until:
         settlement.status = ProviderOrderSettlement.Status.RISK_FROZEN
         settlement.dispute_reason = ""
         settlement.save()
+        sync_provider_settlement_plan(order_no=order_no, now=now)
         return {"state": "not_due", "order_no": order_no, "deadline": settlement.freeze_until}
     settlement.status = ProviderOrderSettlement.Status.SETTLED
     settlement.settled_at = now
     settlement.dispute_reason = ""
     settlement.save()
+    sync_provider_settlement_plan(order_no=order_no, now=now)
     create_notification(
         recipient=settlement.provider.user,
         category=UserNotification.Category.ORDER,
@@ -1677,6 +1687,7 @@ def _complete_provider_order_refund(
                 settlement.dispute_reason = ""
                 settlement.save()
                 reopen_provider_order_settlement(settlement)
+            sync_provider_settlement_plan(order_no=order.order_no)
         transaction.on_commit(
             lambda: create_order_notification(
                 order=order,

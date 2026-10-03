@@ -102,6 +102,8 @@ uv run python scripts/check_wechat_auth.py
 
 ## 仍需单独完成
 
+本地分账准备记录、资金来源核对及退款暂停防护见[达人订单分账准备](provider-settlement-plans.md)。该阶段不调用真实分账或出款接口。
+
 - 经授权的生产开户验收及 PostgreSQL 并发验证。
 - 新订单履约后分账、售后冻结、分账退款、银行卡到账回执与对账。
 - 换卡、外部账户关闭和对应的数据保留流程。

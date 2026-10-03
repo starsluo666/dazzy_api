@@ -737,6 +737,80 @@ class ProviderOrderSettlement(models.Model):
     def __str__(self):
         return f"{self.settlement_no} / {self.order.order_no}"
 
+
+def generate_provider_settlement_plan_no():
+    return f"PSP{uuid.uuid4().hex[:20].upper()}"
+
+
+class ProviderOrderSettlementPlan(models.Model):
+    """Local preparation only. None of these states means funds were transferred."""
+
+    class Status(models.TextChoices):
+        WAITING = "waiting", "等待结算条件"
+        BLOCKED = "blocked", "待接通或核实资金链路"
+        CANCELLED = "cancelled", "无需分账"
+
+    class FundingType(models.TextChoices):
+        UNKNOWN = "unknown", "资金来源待核实"
+        EXTERNAL = "external", "全额外部支付"
+        WALLET = "wallet", "余额支付"
+        MIXED = "mixed", "混合支付"
+
+    plan_no = models.CharField(
+        max_length=24, unique=True, default=generate_provider_settlement_plan_no,
+        editable=False, verbose_name="分账准备单号",
+    )
+    settlement = models.OneToOneField(
+        ProviderOrderSettlement, on_delete=models.PROTECT, related_name="distribution_plan",
+    )
+    status = models.CharField(max_length=24, choices=Status, default=Status.BLOCKED)
+    funding_type = models.CharField(
+        max_length=16, choices=FundingType, default=FundingType.UNKNOWN,
+    )
+    paid_amount = models.PositiveBigIntegerField("订单实付（分）")
+    refunded_amount = models.PositiveBigIntegerField("已退款（分）")
+    provider_amount = models.PositiveBigIntegerField("达人应结算（分）")
+    platform_amount = models.PositiveBigIntegerField("平台抽成（分）")
+    funding_snapshot = models.JSONField("支付来源核对快照", default=dict)
+    fee_policy_snapshot = models.JSONField("平台手续费承担规则快照", default=dict)
+    blockers = models.JSONField("未出款原因", default=list)
+    requires_manual_review = models.BooleanField("历史结算需人工核账", default=True)
+    revision = models.PositiveIntegerField(default=1)
+    evaluated_at = models.DateTimeField("最近核对时间")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_order_settlement_plan"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(paid_amount=(
+                    models.F("refunded_amount") + models.F("provider_amount")
+                    + models.F("platform_amount")
+                )),
+                name="provider_plan_amount_matches",
+            ),
+        ]
+
+
+class ProviderOrderSettlementPlanRevision(models.Model):
+    """Append-only application audit: retries with identical values add no revision."""
+
+    plan = models.ForeignKey(
+        ProviderOrderSettlementPlan, on_delete=models.PROTECT, related_name="revisions",
+    )
+    revision = models.PositiveIntegerField()
+    snapshot = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "provider_order_settlement_plan_revision"
+        ordering = ("revision",)
+        constraints = [models.UniqueConstraint(
+            fields=("plan", "revision"), name="uniq_provider_plan_revision",
+        )]
+
+
 class ProviderOrderReview(models.Model):
     class AuditStatus(models.TextChoices):
         PENDING = "pending", "待审核"

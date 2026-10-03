@@ -38,6 +38,7 @@ from orders.models import (
     ProviderOrderSettlement,
 )
 from orders.services import create_provider_order_refund, refresh_provider_review_metrics
+from orders.settlement_plans import sync_provider_settlement_plan
 from providers.models import (
     ProviderCategoryGrant,
     ProviderLiveLocation,
@@ -1353,6 +1354,7 @@ def create_provider_order_after_sales_case(
         content="平台已登记退款/售后申请，处理结果会通过通知中心告知你。",
         dedupe_suffix=case.case_no,
     )
+    sync_provider_settlement_plan(order_no=order.order_no)
     return case
 
 
@@ -1439,6 +1441,7 @@ def review_provider_order_after_sales_case(
             reopen_provider_order_settlement(settlement)
         audit_action = "order.after_sales.reject"
     case.save()
+    sync_provider_settlement_plan(order_no=order.order_no)
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),

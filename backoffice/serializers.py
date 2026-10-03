@@ -26,6 +26,7 @@ from orders.models import (
     ProviderOrderRefundOrder,
     ProviderOrderReview,
     ProviderOrderSettlement,
+    ProviderOrderSettlementPlan,
 )
 from providers.models import ProviderProfile, ServiceCategory
 from providers.presence import (
@@ -1446,6 +1447,26 @@ class ProviderOrderRefundOrderSerializer(serializers.ModelSerializer):
         )
 
 
+class ProviderOrderSettlementPlanSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display")
+    funding_type_label = serializers.CharField(source="get_funding_type_display")
+    execution_enabled = serializers.SerializerMethodField()
+
+    def get_execution_enabled(self, obj):
+        # No transfer implementation exists in this phase; not a runtime switch.
+        return False
+
+    class Meta:
+        model = ProviderOrderSettlementPlan
+        fields = (
+            "plan_no", "status", "status_label", "funding_type", "funding_type_label",
+            "paid_amount", "refunded_amount", "provider_amount", "platform_amount",
+            "funding_snapshot", "fee_policy_snapshot", "blockers", "requires_manual_review", "revision",
+            "evaluated_at", "execution_enabled",
+        )
+        read_only_fields = fields
+
+
 class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
     order_no = serializers.CharField(source="order.order_no")
     provider_name = serializers.CharField(source="order.provider_name_snapshot")
@@ -1453,6 +1474,7 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
     city_code = serializers.CharField(source="provider.service_city_code")
     city_name = serializers.CharField(source="provider.service_city_name")
     status_label = serializers.CharField(source="get_status_display")
+    distribution_plan = ProviderOrderSettlementPlanSerializer(read_only=True, allow_null=True)
 
     class Meta:
         model = ProviderOrderSettlement
@@ -1463,7 +1485,7 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
             "platform_commission_rate", "platform_commission_amount",
             "provider_service_income_amount", "provider_settlement_amount", "frozen_at",
             "freeze_until", "dispute_reason", "settled_at", "cancelled_at", "created_at",
-            "updated_at",
+            "updated_at", "distribution_plan",
         )
 
 
