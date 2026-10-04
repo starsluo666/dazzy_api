@@ -163,6 +163,8 @@ class PlatformOperationSetting(models.Model):
     customer_service_phone = models.CharField(max_length=32, blank=True, default="")
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
+    provider_order_early_tolerance_minutes = models.PositiveSmallIntegerField(default=30)
+    provider_order_late_tolerance_minutes = models.PositiveSmallIntegerField(default=30)
     provider_order_review_timeout_days = models.PositiveSmallIntegerField(default=7)
     provider_order_settlement_freeze_days = models.PositiveSmallIntegerField(default=1)
     provider_commission_reset_period = models.CharField(max_length=16, default="month")

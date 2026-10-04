@@ -114,6 +114,8 @@ def register_provider_rejection_support_timeout(order):
 
 
 def register_provider_order_confirmation_timeout(order):
+    if order.fulfillment_review_required:
+        return None, False
     if not order.confirmation_expires_at:
         raise ValueError("用户确认截止时间不能为空。")
     return _register_task(
@@ -126,6 +128,8 @@ def register_provider_order_confirmation_timeout(order):
 
 
 def register_provider_order_settlement(settlement):
+    if settlement.order.fulfillment_review_required:
+        return None, False
     return _register_task(
         task_type=ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
         business_type="provider_order",
@@ -406,6 +410,8 @@ def cancel_activity_publish_payment_expiry(order_no: str, reason: str):
 
 
 def reopen_provider_order_settlement(settlement):
+    if settlement.order.fulfillment_review_required:
+        return None, False
     scheduled_at = max(settlement.freeze_until, timezone.now())
     dedupe_key = task_dedupe_key(
         ScheduledTask.Type.PROVIDER_ORDER_SETTLEMENT,
@@ -444,6 +450,8 @@ def reopen_provider_order_settlement(settlement):
 
 
 def reopen_provider_order_confirmation_timeout(order):
+    if order.fulfillment_review_required:
+        return None, False
     if not order.confirmation_expires_at:
         if not order.completion_submitted_at:
             raise ValueError("用户确认截止时间不能为空。")
@@ -670,11 +678,12 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
             ProviderOrder.objects.filter(
                 status=ProviderOrder.Status.PENDING_CONFIRMATION,
                 completion_submitted_at__isnull=False,
+                fulfillment_review_required=False,
             ),
             task_type=ScheduledTask.Type.PROVIDER_ORDER_CONFIRMATION_TIMEOUT,
             deadline_field="confirmation_expires_at",
         )
-        .only("order_no", "completion_submitted_at", "confirmation_expires_at")
+        .only("order_no", "completion_submitted_at", "confirmation_expires_at", "fulfillment_review_required")
         .order_by("id")[:batch_size]
     )
     for order in confirmation_orders:
@@ -717,6 +726,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
 
     settlement_task_query = ProviderOrderSettlement.objects.filter(
         status=ProviderOrderSettlement.Status.RISK_FROZEN,
+        order__fulfillment_review_required=False,
     ).select_related("order").order_by("id")[:batch_size]
     for settlement in settlement_task_query:
         task_exists = ScheduledTask.objects.filter(
@@ -1731,13 +1741,15 @@ def _claim_due_tasks(*, now, limit, task_types=None):
             attempt_count=F("attempt_count") + 1,
             updated_at=now,
         )
-    return list(ScheduledTask.objects.filter(id__in=task_ids).order_by("available_at", "id"))
+        # Snapshot the claimed lease before review/retry can reopen these rows.
+        return list(ScheduledTask.objects.filter(id__in=task_ids).order_by("available_at", "id"))
 
 
-def _finish_task(task_id: int, outcome: TaskExecutionOutcome, now):
+def _finish_task(task_id: int, outcome: TaskExecutionOutcome, now, *, lease_started_at, lease_attempt):
     with transaction.atomic():
         task = ScheduledTask.objects.select_for_update().get(id=task_id)
-        if task.status != ScheduledTask.Status.RUNNING:
+        if (task.status != ScheduledTask.Status.RUNNING
+                or task.started_at != lease_started_at or task.attempt_count != lease_attempt):
             return task.status
         task.status = outcome.status
         task.result = outcome.result
@@ -1762,10 +1774,11 @@ def _finish_task(task_id: int, outcome: TaskExecutionOutcome, now):
         return task.status
 
 
-def _fail_task(task_id: int, exc: Exception, now):
+def _fail_task(task_id: int, exc: Exception, now, *, lease_started_at, lease_attempt):
     with transaction.atomic():
         task = ScheduledTask.objects.select_for_update().get(id=task_id)
-        if task.status != ScheduledTask.Status.RUNNING:
+        if (task.status != ScheduledTask.Status.RUNNING
+                or task.started_at != lease_started_at or task.attempt_count != lease_attempt):
             return task.status
         task.last_error = f"{exc.__class__.__name__}: {exc}"[:4000]
         task.result = {}
@@ -1810,9 +1823,10 @@ def process_due_tasks(*, limit=100, task_types=None, now=None) -> dict:
         "failed": 0,
     }
     for task in tasks:
+        lease = {"lease_started_at": task.started_at, "lease_attempt": task.attempt_count}
         try:
             handler = TASK_HANDLERS[task.task_type]
-            final_status = _finish_task(task.id, handler(task, now), now)
+            final_status = _finish_task(task.id, handler(task, now), now, **lease)
             if final_status == ScheduledTask.Status.SUCCEEDED:
                 result["succeeded"] += 1
             elif final_status == ScheduledTask.Status.CANCELLED:
@@ -1822,8 +1836,11 @@ def process_due_tasks(*, limit=100, task_types=None, now=None) -> dict:
             elif final_status == ScheduledTask.Status.FAILED:
                 result["failed"] += 1
         except Exception as exc:  # Celery must keep processing the remaining batch.
-            final_status = _fail_task(task.id, exc, now)
-            result["failed" if final_status == ScheduledTask.Status.FAILED else "retried"] += 1
+            final_status = _fail_task(task.id, exc, now, **lease)
+            if final_status == ScheduledTask.Status.FAILED:
+                result["failed"] += 1
+            elif final_status == ScheduledTask.Status.PENDING:
+                result["retried"] += 1
     return result
 
 

@@ -139,6 +139,9 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
     )
     waiting = False
     if not cancelled:
+        if order.fulfillment_review_required:
+            block("fulfillment_review", "履约时间异常，等待客服审核")
+            waiting = True
         if not (order.customer_confirmed_at or order.auto_confirmed_at) or order.status not in (
             ProviderOrder.Status.PENDING_REVIEW,
             ProviderOrder.Status.COMPLETED,

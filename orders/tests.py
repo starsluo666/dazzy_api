@@ -1253,7 +1253,8 @@ class ProviderOrderApiTests(TestCase):
     def test_provider_fulfills_order_and_customer_confirms_completion(self, _build_url):
         order = self.create_paid_accepted_order()
 
-        departed = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/depart/")
+        self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/contact/")
+        departed = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/depart/", {"contact_confirmed": True}, content_type="application/json")
         self.assertEqual(departed.status_code, 200)
         self.assertEqual(departed.json()["data"]["status"], ProviderOrder.Status.DEPARTED)
         self.assertIsNotNone(departed.json()["data"]["departed_at"])
@@ -1284,12 +1285,14 @@ class ProviderOrderApiTests(TestCase):
             evidence.json()["data"]["arrival_photo_url"], "https://media.test/arrival.webp"
         )
 
-        started = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/start/")
+        with patch("orders.views.timezone.now", return_value=order.starts_at):
+            started = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/start/")
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.json()["data"]["status"], ProviderOrder.Status.IN_SERVICE)
         self.assertIsNotNone(started.json()["data"]["service_started_at"])
 
-        completed = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/complete/")
+        with patch("orders.views.timezone.now", return_value=order.ends_at):
+            completed = self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/complete/", {"longitude": "114.5", "latitude": "36.6"}, content_type="application/json")
         self.assertEqual(completed.status_code, 200)
         self.assertEqual(
             completed.json()["data"]["status"], ProviderOrder.Status.PENDING_CONFIRMATION
@@ -1411,11 +1414,14 @@ class ProviderOrderApiTests(TestCase):
         order = self.create_paid_accepted_order()
         order.status = ProviderOrder.Status.IN_SERVICE
         order.service_started_at = timezone.now() - timedelta(hours=2)
-        order.save(update_fields=("status", "service_started_at", "updated_at"))
+        order.starts_at = order.service_started_at
+        order.ends_at = timezone.now()
+        order.save()
         submitted_after = timezone.now()
 
         completed = self.client.post(
-            f"/api/v1/providers/me/orders/{order.order_no}/complete/"
+            f"/api/v1/providers/me/orders/{order.order_no}/complete/",
+            {"longitude": "114.5", "latitude": "36.6"}, content_type="application/json",
         )
 
         self.assertEqual(completed.status_code, 200)
@@ -1445,14 +1451,16 @@ class ProviderOrderApiTests(TestCase):
         order = self.create_paid_accepted_order()
         order.status = ProviderOrder.Status.IN_SERVICE
         order.service_started_at = timezone.now() - timedelta(hours=2)
-        order.save(update_fields=("status", "service_started_at", "updated_at"))
+        order.starts_at = order.service_started_at
+        order.ends_at = timezone.now()
+        order.save()
 
         with patch(
             "orders.views.register_provider_order_confirmation_timeout",
             side_effect=RuntimeError("task registration failed"),
         ):
             with self.assertRaises(RuntimeError):
-                self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/complete/")
+                self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/complete/", {"longitude": "114.5", "latitude": "36.6"}, content_type="application/json")
 
         order.refresh_from_db()
         self.assertEqual(order.status, ProviderOrder.Status.IN_SERVICE)
@@ -1472,7 +1480,8 @@ class ProviderOrderApiTests(TestCase):
             f"/api/v1/providers/me/orders/{order.order_no}/start/"
         )
         self.assertEqual(start_before_departure.status_code, 400)
-        self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/depart/")
+        self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/contact/")
+        self.client.post(f"/api/v1/providers/me/orders/{order.order_no}/depart/", {"contact_confirmed": True}, content_type="application/json")
 
         foreign_photo = MediaAsset.objects.create(
             owner=self.customer,

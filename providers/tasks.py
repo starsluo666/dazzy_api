@@ -39,6 +39,7 @@ def process_income_transfers():
                 distribution__isnull=True,
                 provider_id__in=settings.HUIFU_PROVIDER_DISTRIBUTION_IDS,
                 order__payment_order__delay_acct_flag="Y",
+                order__fulfillment_review_required=False,
                 distribution_plan__requires_manual_review=False,
             )
             .exclude(distribution_preflight__status="blocked")

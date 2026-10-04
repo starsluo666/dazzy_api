@@ -1551,6 +1551,11 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     ).first()
     if not settlement:
         return {"state": "missing", "order_no": order_no}
+    if order.fulfillment_review_required:
+        from .fulfillment import suspend_fulfillment_tasks
+        suspend_fulfillment_tasks(order)
+        sync_provider_settlement_plan(order_no=order_no, now=now)
+        return {"state": "fulfillment_held", "order_no": order_no}
     if settlement.status in (
         ProviderOrderSettlement.Status.SETTLED,
         ProviderOrderSettlement.Status.CANCELLED,
@@ -2266,6 +2271,10 @@ def auto_confirm_provider_order(order_no: str, *, now=None) -> dict:
             "order_no": order_no,
             "order_status": order.status,
         }
+    if order.fulfillment_review_required:
+        from .fulfillment import suspend_fulfillment_tasks
+        suspend_fulfillment_tasks(order)
+        return {"state": "fulfillment_held", "order_no": order_no}
     if not order.confirmation_expires_at:
         return {"state": "invalid", "order_no": order_no, "reason": "missing_deadline"}
     if order.confirmation_expires_at > now:

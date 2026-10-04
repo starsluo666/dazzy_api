@@ -217,6 +217,14 @@ class DistributionJobSafetyTests(TransactionTestCase):
     setUp = withdrawals.IncomeJobTests.setUp
     respond = withdrawals.IncomeJobTests.respond
 
+    def test_fulfillment_hold_skips_new_dispatch_and_receiving_refresh(self):
+        self.order.fulfillment_review_required = True
+        self.order.save(update_fields=("fulfillment_review_required",))
+        with patch("requests.sessions.Session.post") as http, patch("providers.tasks.refresh_onboarding") as refresh:
+            self.assertEqual(process_income_transfers()["distribution_submitted"], 0)
+        http.assert_not_called()
+        refresh.assert_not_called()
+
     def test_blocked_refunded_order_is_not_retried_by_background_job(self):
         record_preflight_failure(self.order.order_no, "refunded_order")
         with patch("requests.sessions.Session.post") as http:

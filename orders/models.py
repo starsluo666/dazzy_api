@@ -97,6 +97,8 @@ class ProviderOrder(models.Model):
         verbose_name="有效联系登记人",
     )
     departed_at = models.DateTimeField("达人出发时间", null=True, blank=True)
+    provider_contact_initiated_at = models.DateTimeField("达人发起联系时间", null=True, blank=True)
+    departure_contact_confirmed_at = models.DateTimeField("达人确认已联系核实时间", null=True, blank=True)
     arrival_photo = models.OneToOneField(
         "mediafiles.MediaAsset",
         on_delete=models.PROTECT,
@@ -118,6 +120,15 @@ class ProviderOrder(models.Model):
     )
     service_started_at = models.DateTimeField("服务开始时间", null=True, blank=True)
     completion_submitted_at = models.DateTimeField("达人提交完成时间", null=True, blank=True)
+    completion_longitude = models.DecimalField("完成GCJ-02经度", max_digits=10, decimal_places=7, null=True, blank=True)
+    completion_latitude = models.DecimalField("完成GCJ-02纬度", max_digits=10, decimal_places=7, null=True, blank=True)
+    completion_location_accuracy_m = models.DecimalField("完成定位精度（米）", max_digits=8, decimal_places=2, null=True, blank=True)
+    fulfillment_policy = models.JSONField("履约时间规则快照", default=dict, blank=True)
+    fulfillment_review_required = models.BooleanField("履约异常待审核", default=False, db_index=True)
+    fulfillment_revision = models.PositiveIntegerField("履约异常版本", default=0)
+    fulfillment_issues = models.JSONField("履约异常记录", default=list, blank=True)
+    fulfillment_reviews = models.JSONField("履约复核记录", default=list, blank=True)
+    confirmation_remaining_seconds = models.PositiveIntegerField("暂停时剩余确认秒数", null=True, blank=True)
     confirmation_expires_at = models.DateTimeField("用户确认截止时间", null=True, blank=True)
     customer_confirmed_at = models.DateTimeField("用户确认完成时间", null=True, blank=True)
     auto_confirmed_at = models.DateTimeField("系统自动确认时间", null=True, blank=True)

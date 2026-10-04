@@ -38,6 +38,7 @@ from taskcenter.services import (
 )
 
 from .models import ProviderOrder, ProviderOrderPaymentOrder, ProviderOrderReview, UserCoupon
+from .fulfillment import assess_timing
 from .payment_gateway import get_provider_order_payment_gateway
 from .serializers import (
     ProviderOrderAfterSalesInputSerializer,
@@ -45,6 +46,8 @@ from .serializers import (
     ProviderOrderInputSerializer,
     ProviderOrderPaymentSessionInputSerializer,
     ProviderOrderArrivalEvidenceInputSerializer,
+    ProviderOrderLocationInputSerializer,
+    ProviderOrderDepartInputSerializer,
     ProviderOrderManageQuerySerializer,
     ProviderOrderManageSerializer,
     MyProviderOrderReviewSerializer,
@@ -638,6 +641,23 @@ class CurrentProviderOrderRejectView(CurrentProviderOrderDetailView):
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
+class CurrentProviderOrderContactView(CurrentProviderOrderDetailView):
+    @transaction.atomic
+    def post(self, request, order_no):
+        order = self.get_object(request, order_no, for_update=True)
+        if order.status not in (
+            ProviderOrder.Status.PENDING_SERVICE, ProviderOrder.Status.DEPARTED,
+            ProviderOrder.Status.IN_SERVICE, ProviderOrder.Status.PENDING_CONFIRMATION,
+        ):
+            raise ValidationError({"status": "仅已接单且尚未确认完成的订单可以联系用户。"})
+        # An initiated call is not evidence the user answered. Departure requires
+        # a separate, explicit attestation and never relies on device storage.
+        if not order.provider_contact_initiated_at:
+            order.provider_contact_initiated_at = timezone.now()
+            order.save(update_fields=("provider_contact_initiated_at", "updated_at"))
+        return Response({"data": ProviderOrderManageSerializer(order).data})
+
+
 class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
     @transaction.atomic
     def post(self, request, order_no):
@@ -646,9 +666,14 @@ class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_SERVICE:
             raise ValidationError({"status": "订单不在待服务状态。"})
+        if not order.provider_contact_initiated_at:
+            raise ValidationError({"contact": "请先点击联系用户，确认订单情况。"})
+        serializer = ProviderOrderDepartInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         order.status = ProviderOrder.Status.DEPARTED
         order.departed_at = timezone.now()
-        order.save(update_fields=("status", "departed_at", "updated_at"))
+        order.departure_contact_confirmed_at = order.departed_at
+        order.save(update_fields=("status", "departed_at", "departure_contact_confirmed_at", "updated_at"))
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_DEPARTED,
@@ -708,7 +733,8 @@ class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
             raise ValidationError({"arrival_photo": "请先上传清晰包含本人及到场环境的集合照片。"})
         order.status = ProviderOrder.Status.IN_SERVICE
         order.service_started_at = timezone.now()
-        order.save(update_fields=("status", "service_started_at", "updated_at"))
+        assess_timing(order, stage="start", now=order.service_started_at)
+        order.save()
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_STARTED,
@@ -726,6 +752,8 @@ class CurrentProviderOrderCompleteView(CurrentProviderOrderDetailView):
             order.status == ProviderOrder.Status.PENDING_CONFIRMATION
             and order.completion_submitted_at
         ):
+            if order.fulfillment_review_required:
+                return Response({"data": ProviderOrderManageSerializer(order).data})
             if not order.confirmation_expires_at:
                 order.confirmation_expires_at = order.completion_submitted_at + timedelta(
                     days=platform_operation_rules()[
@@ -737,23 +765,29 @@ class CurrentProviderOrderCompleteView(CurrentProviderOrderDetailView):
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.IN_SERVICE:
             raise ValidationError({"status": "订单不在服务中状态。"})
+        serializer = ProviderOrderLocationInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        location = serializer.validated_data
         completed_at = timezone.now()
         order.status = ProviderOrder.Status.PENDING_CONFIRMATION
         order.completion_submitted_at = completed_at
         order.confirmation_expires_at = completed_at + timedelta(
             days=platform_operation_rules()["provider_order_confirmation_timeout_days"]
         )
-        order.save(
-            update_fields=(
-                "status", "completion_submitted_at", "confirmation_expires_at", "updated_at",
-            )
-        )
-        register_provider_order_confirmation_timeout(order)
+        order.completion_longitude = location["longitude"]
+        order.completion_latitude = location["latitude"]
+        order.completion_location_accuracy_m = location.get("accuracy_m")
+        assess_timing(order, stage="completion", now=completed_at)
+        order.save()
+        if not order.fulfillment_review_required:
+            register_provider_order_confirmation_timeout(order)
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_COMPLETION_SUBMITTED,
             title="达人已提交服务完成",
-            content="请确认本次服务是否完成；逾期未操作，系统将按规则自动确认。",
+            content=("本次服务履约时间需客服核实，自动确认及分账已暂停。"
+                     if order.fulfillment_review_required else
+                     "请确认本次服务是否完成；逾期未操作，系统将按规则自动确认。"),
         )
         return Response({"data": ProviderOrderManageSerializer(order).data})
 

@@ -536,14 +536,18 @@ def order_anomaly_query(code):
         support_contact_deadline_at__lte=timezone.now(),
         support_contacted_at__isnull=True,
     )
+    confirmation_overdue &= Q(fulfillment_review_required=False)
+    fulfillment_review = Q(fulfillment_review_required=True)
     mapping = {
         "missing_evidence": missing_evidence,
         "timeline_gap": timeline_gap,
         "confirmation_overdue": confirmation_overdue,
         "support_contact_overdue": support_contact_overdue,
+        "fulfillment_review": fulfillment_review,
+        "fulfillment_resolved": Q(fulfillment_review_required=False, fulfillment_revision__gt=0),
     }
     if code == "all":
-        return missing_evidence | timeline_gap | confirmation_overdue | support_contact_overdue
+        return missing_evidence | timeline_gap | confirmation_overdue | support_contact_overdue | fulfillment_review
     return mapping[code]
 
 
@@ -2221,6 +2225,32 @@ class ProviderOrderAdminDetailView(APIView):
         access = resolve_admin_access(request.user)
         access.require("order.fulfillment.view")
         order = get_admin_provider_order(access, order_no)
+        return Response({"data": ProviderOrderAdminSerializer(order).data})
+
+
+class ProviderOrderFulfillmentReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, order_no):
+        from .serializers import ProviderOrderFulfillmentReviewInputSerializer
+        from orders.fulfillment import resolve_fulfillment_review
+        access = resolve_admin_access(request.user)
+        access.require("order.fulfillment.review")
+        serializer = ProviderOrderFulfillmentReviewInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = get_object_or_404(
+            provider_order_queryset(access).select_for_update(of=("self",)), order_no=order_no,
+        )
+        if resolve_fulfillment_review(order, actor=request.user, **serializer.validated_data):
+            AdminAuditLog.objects.create(
+                actor=request.user, organization=access.member.organization if access.member else None,
+                action="order.fulfillment.review", target_type="provider_order", target_id=order.order_no,
+                before={"fulfillment_review_required": True, "revision": order.fulfillment_revision},
+                after={"fulfillment_review_required": False, "reason": serializer.validated_data["reason"],
+                       "confirmation_expires_at": order.confirmation_expires_at.isoformat() if order.confirmation_expires_at else None},
+                request_id=request.headers.get("X-Request-ID", ""), ip_address=client_ip(request),
+            )
         return Response({"data": ProviderOrderAdminSerializer(order).data})
 
 

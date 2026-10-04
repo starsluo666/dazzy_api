@@ -318,6 +318,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "service_started_at", "completion_submitted_at", "confirmation_expires_at",
             "customer_confirmed_at", "auto_confirmed_at", "review", "payment_order",
             "review_expires_at",
+            "fulfillment_review_required",
             "refund_orders", "settlement", "after_sales",
         )
 
@@ -367,8 +368,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
         }
 
 
-class ProviderOrderArrivalEvidenceInputSerializer(serializers.Serializer):
-    photo_id = serializers.UUIDField()
+class ProviderOrderLocationInputSerializer(serializers.Serializer):
     longitude = serializers.DecimalField(
         max_digits=10, decimal_places=7, min_value=-180, max_value=180
     )
@@ -378,6 +378,19 @@ class ProviderOrderArrivalEvidenceInputSerializer(serializers.Serializer):
     accuracy_m = serializers.DecimalField(
         required=False, allow_null=True, max_digits=8, decimal_places=2, min_value=0
     )
+
+
+class ProviderOrderArrivalEvidenceInputSerializer(ProviderOrderLocationInputSerializer):
+    photo_id = serializers.UUIDField()
+
+
+class ProviderOrderDepartInputSerializer(serializers.Serializer):
+    contact_confirmed = serializers.BooleanField()
+
+    def validate_contact_confirmed(self, value):
+        if not value:
+            raise serializers.ValidationError("请先联系用户，核实订单情况后再确认出发。")
+        return value
 
 
 class ProviderOrderManageQuerySerializer(serializers.Serializer):
@@ -401,6 +414,8 @@ class ProviderOrderManageSerializer(ProviderOrderSerializer):
             "contact_phone_display",
             "meeting_longitude",
             "meeting_latitude",
+            "provider_contact_initiated_at", "departure_contact_confirmed_at",
+            "completion_longitude", "completion_latitude", "completion_location_accuracy_m",
         )
 
     def get_acceptance_expires_at(self, obj):

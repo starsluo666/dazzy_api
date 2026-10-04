@@ -41,6 +41,7 @@ from .views import (
     ProviderOrderAfterSalesListView,
     ProviderOrderAdminDetailView,
     ProviderOrderAdminListView,
+    ProviderOrderFulfillmentReviewView,
     ProviderOrderEvidenceView,
     ProviderOrderFinanceListView,
     ProviderOrderRefundRetryView,
@@ -245,6 +246,7 @@ urlpatterns = [
         ProviderOrderEvidenceView.as_view(),
         name="backoffice-provider-order-evidence",
     ),
+    path("provider-orders/<str:order_no>/fulfillment-review/", ProviderOrderFulfillmentReviewView.as_view(), name="backoffice-provider-order-fulfillment-review"),
     path(
         "provider-orders/<str:order_no>/review/action/",
         ProviderOrderReviewActionView.as_view(),

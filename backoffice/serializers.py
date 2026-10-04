@@ -1203,6 +1203,8 @@ CUSTOMER_CONFIRMATION_REQUIRED_STATUSES = frozenset(
 
 def provider_order_anomalies(order):
     anomalies = []
+    if order.fulfillment_review_required:
+        anomalies.append({"code": "fulfillment_review", "label": "履约异常待审核"})
     if order.status in EVIDENCE_REQUIRED_STATUSES and not order.arrival_photo_id:
         anomalies.append({"code": "missing_evidence", "label": "缺少集合照"})
     timeline_gap = (
@@ -1223,6 +1225,7 @@ def provider_order_anomalies(order):
         )
     if (
         order.status == ProviderOrder.Status.PENDING_CONFIRMATION
+        and not order.fulfillment_review_required
         and confirmation_deadline
         and confirmation_deadline <= timezone.now()
     ):
@@ -1260,6 +1263,7 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
         choices=(
             "all", "any", "missing_evidence", "timeline_gap", "confirmation_overdue",
             "support_contact_overdue",
+            "fulfillment_review", "fulfillment_resolved",
         ),
     )
     city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
@@ -1283,6 +1287,11 @@ class ProviderOrderReviewActionSerializer(serializers.Serializer):
 class ProviderOrderSupportNoteInputSerializer(serializers.Serializer):
     content = serializers.CharField(min_length=1, max_length=1000, trim_whitespace=True)
     marks_customer_contact = serializers.BooleanField(required=False, default=False)
+
+
+class ProviderOrderFulfillmentReviewInputSerializer(serializers.Serializer):
+    revision = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(min_length=2, max_length=1000, trim_whitespace=True)
 
 
 class ProviderOrderSupportNoteSerializer(serializers.ModelSerializer):
@@ -1537,6 +1546,7 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
     contact_gender_label = serializers.CharField(source="get_contact_gender_display")
     arrival_photo_available = serializers.SerializerMethodField()
     arrival_location = serializers.SerializerMethodField()
+    completion_location = serializers.SerializerMethodField()
     anomalies = serializers.SerializerMethodField()
     support_notes = ProviderOrderSupportNoteSerializer(many=True, read_only=True)
     support_contacted_by_name = serializers.CharField(
@@ -1564,6 +1574,10 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "confirmation_expires_at", "customer_confirmed_at", "auto_confirmed_at",
             "cancelled_at", "review", "created_at", "updated_at",
             "anomalies", "support_notes", "after_sales_cases",
+            "provider_contact_initiated_at", "departure_contact_confirmed_at",
+            "completion_location", "fulfillment_policy", "fulfillment_review_required",
+            "fulfillment_revision", "fulfillment_issues", "fulfillment_reviews",
+            "confirmation_remaining_seconds",
         )
 
     @staticmethod
@@ -1612,6 +1626,12 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
 
     def get_anomalies(self, obj):
         return provider_order_anomalies(obj)
+
+    def get_completion_location(self, obj):
+        if obj.completion_longitude is None or obj.completion_latitude is None:
+            return None
+        return {"longitude": obj.completion_longitude, "latitude": obj.completion_latitude,
+                "accuracy_m": obj.completion_location_accuracy_m}
 
     def get_provider_rejection_refund(self, obj):
         reference = f"provider-rejection-timeout:{obj.order_no}"
@@ -1900,6 +1920,8 @@ class DiscoveryCitySerializer(serializers.Serializer):
 
 
 class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    provider_order_early_tolerance_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)
+    provider_order_late_tolerance_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)
     discovery_cities = DiscoveryCitySerializer(many=True, required=False, allow_empty=False)
 
     def validate_discovery_cities(self, value):

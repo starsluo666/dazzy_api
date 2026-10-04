@@ -418,6 +418,26 @@ class DistributionStateTests(TransactionTestCase):
         self.assertEqual(repeated.pk, record.pk)
         http.assert_not_called()
 
+    def test_fulfillment_hold_blocks_dispatch_before_any_channel_call(self):
+        self.order.fulfillment_review_required = True
+        self.order.save(update_fields=("fulfillment_review_required",))
+        with patch("requests.sessions.Session.post") as http, self.assertRaises(ValidationError):
+            execute_distribution(self.order.order_no)
+        http.assert_not_called()
+        self.assertFalse(ProviderOrderDistribution.objects.filter(settlement=self.settlement).exists())
+
+    def test_hold_created_during_payment_preflight_blocks_registration_and_send(self):
+        from .models import ProviderOrder
+        from .distribution_gateway import HuifuDistributionGateway
+        def verify(snap):
+            ProviderOrder.objects.filter(pk=self.order.pk).update(fulfillment_review_required=True)
+            return {"payment_fee_amount": 60, "available_amount": 10000}
+        with patch.object(HuifuDistributionGateway, "verify_payment", side_effect=verify), patch.object(HuifuDistributionGateway, "confirm") as confirm:
+            with self.assertRaises(ValidationError):
+                execute_distribution(self.order.order_no)
+        confirm.assert_not_called()
+        self.assertFalse(ProviderOrderDistribution.objects.filter(settlement=self.settlement).exists())
+
     def use_internal_payment(self):
         with override_settings(HUIFU_FEE_FLAG="2"):
             self.payment.distribution_cohort = payment_cohort(

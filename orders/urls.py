@@ -4,6 +4,7 @@ from .views import (
     CurrentProviderOrderAcceptView,
     CurrentProviderOrderArrivalEvidenceView,
     CurrentProviderOrderCompleteView,
+    CurrentProviderOrderContactView,
     CurrentProviderOrderDepartView,
     CurrentProviderOrderDetailView,
     CurrentProviderOrderListView,
@@ -37,6 +38,7 @@ urlpatterns = [
     ),
     path("providers/me/orders/", CurrentProviderOrderListView.as_view()),
     path("providers/me/orders/<str:order_no>/", CurrentProviderOrderDetailView.as_view()),
+    path("providers/me/orders/<str:order_no>/contact/", CurrentProviderOrderContactView.as_view()),
     path(
         "providers/me/orders/<str:order_no>/accept/",
         CurrentProviderOrderAcceptView.as_view(),
