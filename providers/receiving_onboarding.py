@@ -281,7 +281,11 @@ def refresh_onboarding(provider):
                 ready = verify_cash_configuration(account, response, details, expected)
                 if ready and account.onboarding_consent_version == ONBOARDING_CONSENT_VERSION and account.audit_status not in {"P", "N"}:
                     account.channel_status = "active"
-                    account.channel_message = "已核验手动提现、本人银行卡及自动结算关闭；申请提现后以渠道到账结果为准。"
+                    settlement_notice = account.channel_message or "已核验自动结算关闭。"
+                    account.channel_message = (
+                        "本人银行卡与手动提现配置已核验。" + settlement_notice
+                        + "申请提现后以渠道到账结果为准。"
+                    )
                 else:
                     account.channel_status = "pending" if account.audit_status == "P" else "attention"
                     notices = []

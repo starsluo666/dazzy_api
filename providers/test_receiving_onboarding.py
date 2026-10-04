@@ -264,7 +264,7 @@ class ReceivingOnboardingTests(TestCase):
     def test_active_requires_own_card_manual_cash_and_disabled_auto_settlement(self):
         self.open()
         for changes in ({"indv_base_info": "{}"}, {"qry_cash_card_info_list": "[]"}, {"qry_cash_config_list": "[]"},
-                        {"settle_config_list": None}, {"settle_config_list": '[{"settle_cycle":"T1","settle_status":"1"}]'},
+                        {"settle_config_list": "not-json"}, {"settle_config_list": '[{"settle_cycle":"T1","settle_status":"1"}]'},
                         {"settle_config_list": [{"settle_cycle": "T1", "settle_status": "0"}]}):
             with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(**changes)):
                 self.client.post(URL + "refresh/")
@@ -274,6 +274,109 @@ class ReceivingOnboardingTests(TestCase):
             self.client.post(URL + "refresh/")
         self.assertEqual(self.account.channel_status, "active")
         self.assertIsNotNone(self.account.channel_checked_at)
+
+    def test_signed_query_without_settlements_uses_platform_policy(self):
+        from .cash_accounts import manual_cash_account
+        from .test_huifu_user_transport import signed_http_response
+
+        self.open()
+        omitted = self.query_response()
+        omitted.pop("settle_config_list")
+        for query in (omitted, self.query_response(settle_config_list=None),
+                      self.query_response(settle_config_list="")):
+            with self.subTest(value=query.get("settle_config_list"), keys=tuple(query)):
+                cache.clear()
+                with patch("requests.sessions.Session.post", return_value=signed_http_response(query, key=KEY)) as http:
+                    response = self.client.post(URL + "refresh/")
+                self.assertEqual(response.status_code, 200)
+                http.assert_called_once()
+                result = response.data["data"]
+                self.assertEqual(result["channel_status"], "active")
+                self.assertIs(result["automatic_settlement_disabled"], True)
+                self.assertIn("按平台规则暂按未开通处理", result["channel_notice"])
+                self.assertNotIn("已核验自动结算关闭", result["channel_notice"])
+                self.assertIn("按平台规则暂按未开通处理", self.account.channel_message)
+                self.assertEqual(manual_cash_account(self.provider.pk, SimpleNamespace(
+                    sys_id=CHANNEL_SETTINGS["HUIFU_SYS_ID"],
+                    product_id=CHANNEL_SETTINGS["HUIFU_PRODUCT_ID"],
+                    merchant_id=CHANNEL_SETTINGS["HUIFU_MERCHANT_ID"],
+                )).pk, self.account.pk)
+        self.assertEqual(self.account.attempts.filter(kind="register").count(), 1)
+        self.assertEqual(self.account.attempts.filter(kind="configure").count(), 1)
+
+    def test_later_enabled_or_invalid_result_revokes_omission_readiness(self):
+        from .cash_accounts import manual_cash_account
+        from rest_framework.exceptions import ValidationError
+
+        self.open()
+        config = SimpleNamespace(
+            sys_id=CHANNEL_SETTINGS["HUIFU_SYS_ID"],
+            product_id=CHANNEL_SETTINGS["HUIFU_PRODUCT_ID"],
+            merchant_id=CHANNEL_SETTINGS["HUIFU_MERCHANT_ID"],
+        )
+        for changes in (
+            {"settle_config_list": '[{"settle_status":"1"}]'},
+            {"settle_config_list": '[{"settle_status":"0"},{"settle_status":"1"}]'},
+            {"settle_config_list": "not-json"},
+            {"settle_config_list": "[{}]"},
+        ):
+            with self.subTest(changes=changes):
+                cache.clear()
+                with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(settle_config_list=None)):
+                    self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+                self.assertEqual(self.account.channel_status, "active")
+                with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(**{"settle_config_list": None, **changes})):
+                    self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+                self.assertNotEqual(self.account.channel_status, "active")
+                with self.assertRaises(ValidationError):
+                    manual_cash_account(self.provider.pk, config)
+
+    def test_failed_queries_never_apply_omission_policy(self):
+        self.open()
+        for changes in ({"resp_code": "99999999"}, {"huifu_id": "9000000000000009"},
+                        {"indv_base_info": "{}"}):
+            with self.subTest(changes=changes):
+                response = self.query_response(settle_config_list=None, **changes)
+                with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=response):
+                    self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+                self.assertEqual(self.account.channel_status, "attention")
+                self.assertIsNone(self.account.automatic_settlement_disabled)
+                self.assertIsNone(self.account.channel_checked_at)
+        self.assertEqual(self.account.attempts.filter(kind="query", status="unknown").count(), 3)
+
+    def test_failed_query_cannot_renew_expired_omission_readiness(self):
+        from .cash_accounts import CashAccountVerificationExpired, manual_cash_account
+
+        self.open()
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(settle_config_list=None)):
+            self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+        account = self.account
+        checked_at = timezone.now() - timezone.timedelta(minutes=31)
+        account.channel_checked_at = checked_at
+        account.save()
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", side_effect=ChannelUncertain()):
+            self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+        # Existing short-lived snapshots survive transport errors, but a failed
+        # query must never renew their timestamp or infer a fresh disabled state.
+        self.assertEqual(self.account.channel_checked_at, checked_at)
+        with self.assertRaises(CashAccountVerificationExpired):
+            manual_cash_account(self.provider.pk, SimpleNamespace(
+                sys_id=CHANNEL_SETTINGS["HUIFU_SYS_ID"],
+                product_id=CHANNEL_SETTINGS["HUIFU_PRODUCT_ID"],
+                merchant_id=CHANNEL_SETTINGS["HUIFU_MERCHANT_ID"],
+            ))
+
+    def test_unsigned_missing_settlement_query_does_not_activate(self):
+        from .test_huifu_user_transport import http_response
+
+        self.open()
+        response = self.query_response()
+        response.pop("settle_config_list")
+        with patch("requests.sessions.Session.post", return_value=http_response(response)):
+            self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+        self.assertEqual(self.account.channel_status, "attention")
+        self.assertIsNone(self.account.automatic_settlement_disabled)
+        self.assertIsNone(self.account.channel_checked_at)
 
     def test_query_rejects_mismatched_user_even_when_materials_match(self):
         self.open()
@@ -301,8 +404,9 @@ class ReceivingOnboardingTests(TestCase):
         self.assertEqual(result["channel_status"], "attention")
         self.assertEqual(result["cash_status"], "")
         self.assertEqual(result["card_status"], "")
-        self.assertIsNone(result["automatic_settlement_disabled"])
-        for label in ("自动结算配置", "手动提现配置", "提现银行卡资料"):
+        self.assertIs(result["automatic_settlement_disabled"], True)
+        self.assertIn("按平台规则暂按未开通处理", result["channel_notice"])
+        for label in ("手动提现配置", "提现银行卡资料"):
             self.assertIn(f"渠道未返回{label}", result["channel_notice"])
         self.assertEqual(self.account.verified_cash_config, {})
         self.assertEqual(self.account.cash_card_ciphertext, "")
@@ -337,7 +441,7 @@ class ReceivingOnboardingTests(TestCase):
             account.audit_status = audit
             account.onboarding_consent_version = "huifu-personal-settlement-v1"
             account.save()
-            with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response()):
+            with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(settle_config_list=None)):
                 result = self.client.post(URL + "refresh/").data["data"]
             self.assertNotEqual(result["channel_status"], "active")
             self.assertIn(notice, result["channel_notice"])

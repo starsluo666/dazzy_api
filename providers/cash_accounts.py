@@ -1,4 +1,4 @@
-"""Verified manual-cash readiness; never infer disabled auto-settlement from omission."""
+"""Manual-cash readiness with the platform's explicit missing-settlement policy."""
 
 from datetime import timedelta
 import re
@@ -42,7 +42,8 @@ def verify_cash_configuration(account, response, details, expected):
     """S=verified, F=confirmed unmet condition, blank/None=insufficient evidence.
 
     Updates independent checks and a safe diagnostic on the caller's locked account.
-    Only a complete result may authorize the caller to mark the account active.
+    Missing settlement configuration follows the platform's temporary policy;
+    all other configuration groups still require complete verification.
     """
     # Rebuild every check from this response; do not retain a stale S or default to F.
     account.automatic_settlement_disabled = None
@@ -51,13 +52,20 @@ def verify_cash_configuration(account, response, details, expected):
     account.verified_cash_config = {}
     account.cash_card_ciphertext = ""
     issues = []
-    settlements = _query_rows(response, "settle_config_list", "自动结算配置", issues)
+    # Platform decision (2026-10-05), NOT a confirmed Huifu protocol guarantee:
+    # an omitted/null/empty settlement field is treated as no automatic settlement.
+    # Keep this exception local: malformed values and missing cash/card fields
+    # must not inherit it. The caller already verifies success, signature and identity.
+    settlements_omitted = response.get("settle_config_list") in (None, "")
+    settlements = [] if settlements_omitted else _query_rows(
+        response, "settle_config_list", "自动结算配置", issues,
+    )
     if settlements is not None:
         if any(row.get("settle_status") == "1" for row in settlements):
             account.automatic_settlement_disabled = False
             issues.append("渠道自动结算仍开启，需平台联系汇付关闭")
         elif all(row.get("settle_status") == "0" for row in settlements):
-            # Only explicit [] or every status=0 proves disabled auto-settlement.
+            # Includes the platform-approved omission policy above.
             account.automatic_settlement_disabled = True
         else:
             issues.append("渠道自动结算状态缺失或无法识别")
@@ -135,6 +143,8 @@ def verify_cash_configuration(account, response, details, expected):
         "；".join(issues) + "。暂不可提现，请稍后刷新；持续异常请联系客服。"
         if issues else ""
     )
+    if settlements_omitted:
+        account.channel_message += "渠道未返回自动结算配置，按平台规则暂按未开通处理。"
     return (
         account.automatic_settlement_disabled is True
         and account.card_status == "S" and account.cash_status == "S"

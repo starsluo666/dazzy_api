@@ -11,7 +11,7 @@
 1. 达人保存本人收款资料，敏感字段加密；保存本身不触发开户。
 2. 达人单独确认 `huifu-personal-cash-v2` 开户及余额提现授权后，持久化申请流水，调用 `/v2/user/basicdata/indv`。
 3. 获得汇付用户号后先落库，再调用 `/v2/user/busi/open` 配置本人储蓄卡和手动提现参数。`card_info` 与 `cash_config` 分别为一层 String(JSON Object) 和 String(JSON Array)，手机号使用本人银行预留号码；不再发送自动结算 `settle_config_list`。
-4. 同步受理和审核通知不直接视为配置就绪；通过 `/v2/user/basicdata/query` 核对身份、本人卡、手动提现参数及平台承担手续费，并明确核验自动结算已关闭。字段缺失不能视为关闭。
+4. 同步受理和审核通知不直接视为配置就绪；通过 `/v2/user/basicdata/query` 核对身份、本人卡、手动提现参数及平台承担手续费，并判定自动结算状态。按平台 2026-10-05 确认的临时规则，`settle_config_list` 缺失、`null` 或空字符串时暂按未开通自动结算处理；这不是汇付已确认关闭的证明，其他缺失或异常字段不享受此兼容。
 5. 开户结果未知时不重复创建。`/v2/user/list/query` 严格核对归属，并经详情查询确认身份后恢复用户号；查不到不表示可以再次开户。
 
 地区来自官方编码表，不使用用户手填名称作为渠道编码。资料保存、渠道开户、审核和银行卡结算状态分开展示；前端延续分组表单及明确的操作反馈。提交渠道后禁止直接修改或删除本地资料，换卡、更正和外部账户注销需另行处理，不自动调用渠道变更接口。
@@ -100,10 +100,12 @@ HUIFU_USER_SKILL_SOURCE=hfps/1.3.5;hfms/1.0.4
 
 上述本人接口均鉴权、限流并禁止缓存。通知路径 `/api/v1/providers/receiving-account/huifu-notify/` 不使用用户登录鉴权，但必须通过签名和申请关联校验。
 
-### 刷新后的核验结果（2026-10-04）
+### 刷新后的核验结果（2026-10-05）
 
 - `cash_status/card_status` 为本地汇总状态，不是对汇付拒绝码的原样透传。刷新查询后，`S` 表示该项已核对，`F` 表示明确未满足条件（如提现关闭、费率或本人银行卡不匹配）；空字符串表示缺失、格式异常、脱敏或结果存在歧义，不能称为“开户失败”。
-- `automatic_settlement_disabled=true` 仅来自明确空配置列表或所有结算开关关闭；`false` 表示仍有开启项；`null` 表示没有可靠结果。省略字段绝不推断为已关闭。
+- `automatic_settlement_disabled=true` 表示按当前规则判定不自动结算：明确空配置列表、所有结算开关关闭，或按平台授权的临时兼容规则处理缺失/`null`/空字符串。后一种情况在持久化的 `channel_notice` 明确标记“渠道未返回自动结算配置，按平台规则暂按未开通处理”，不冒充渠道已核验关闭。达人端、运营端汇总显示“按未开启处理”。
+- 明确出现 `settle_status="1"` 时返回 `false`，仍阻止提现；有内容但格式错误、原生数组、JSON `null`、缺少条目状态或未知状态均返回 `null`，不采用兼容规则。后续成功查询返回开启或配置异常时会撤销此前的就绪状态。整个查询失败不采用该响应，也不刷新上次核验时间，原有 30 分钟有效期不变。
+- 此例外只用于验签、成功码、用户号及身份校验通过后的用户查询同步响应，不修改开户请求或通知处理，不改变汇付侧实际配置。字段缺失是否等同未配置仍需汇付确认；若实际存在自动结算，资金可能提前转入银行卡。更改该业务假设时集中调整 `providers/cash_accounts.py` 中的 `settlements_omitted` 分支，保留其余安全核验。
 - 三组结果独立核验；某一组缺失不会吞掉其他组结果，也不会沿用上次银行卡或提现核验成功。`channel_notice` 给出固定白名单原因，不回传渠道原始响应、姓名、卡号、卡标识或手续费承担方 ID。
 - 只有完整核验、当前授权及审核状态满足条件才进入 `active`；原有提现开关、白名单、限额、余额和时效校验不变。整体查询验签或身份核对失败时不采用响应内容。
 - 已用于渠道申请的资料不再提示“尚未提交”或“可以直接清除”；资料登记可用时 `collection_unavailable_reason` 为空。旧数据不会批量改状态，部署后需点击「刷新渠道状态」重新查询；本次无需数据库迁移。
@@ -142,4 +144,4 @@ uv run python scripts/check_wechat_auth.py
 
 实际使用开户 skill references：`user-onboarding-individual.md`、`user-onboarding-business-open.md`、`user-onboarding-detail-query.md`、`user-onboarding-list-query.md`、`user-onboarding-complete-field-catalog.md`、`user-onboarding-field-contracts.md`、`user-onboarding-platform-contracts.md`、`user-onboarding-shared-server-sdk-matrix.md`、`user-onboarding-shared-signing-v2.md`、`user-onboarding-shared-credential-boundary.md`、`user-onboarding-shared-overview.md`、`user-onboarding-external-resources.md`、`user-onboarding-error-codes.md`。支付 skill references：`shared-local-sandbox.md`、`copilot-existing-system.md`、`copilot-go-live-checklist.md`、`copilot-solution-selection.md`、`aggregation-python-adapter.md`。
 
-字段与协议依据：[个人用户开户](https://paas.huifu.com/partners/api/doc/yhgl/api_yhgl_gryhjbxxzc.md)、[用户业务入驻](https://paas.huifu.com/partners/api/doc/yhgl/api_yhgl_ywrz.md)、[用户信息查询](https://paas.huifu.com/partners/api/doc/yhgl/api_yhgl_yhywcx.md)。列表查询的字段表与示例存在字符串/数组差异，适配点兼容两种形态；若详情只返回脱敏号码或省略结算配置，不猜测匹配成功，保持待核实并联系汇付确认。
+字段与协议依据：[个人用户开户](https://paas.huifu.com/partners/api/doc/yhgl/api_yhgl_gryhjbxxzc.md)、[用户业务入驻](https://paas.huifu.com/partners/api/doc/yhgl/api_yhgl_ywrz.md)、[用户信息查询](https://paas.huifu.com/partners/api/doc/yhgl/api_yhgl_yhywcx.md)。列表查询的字段表与示例存在字符串/数组差异，适配点兼容两种形态；若详情只返回脱敏号码，不猜测匹配成功，保持待核实并联系汇付确认。省略结算配置仅遵循上文平台明确授权的临时业务规则，不作为官方协议结论。

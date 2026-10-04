@@ -68,7 +68,10 @@ class CashConfigurationTests(SimpleTestCase):
             "qry_cash_card_info_list": "card_status",
         }
         for key, state in fields.items():
-            for value in (None, "", "not-json", "{}", "null", [], [{}], "[null]", "[1]"):
+            values = ("not-json", "{}", "null", [], [{}], "[null]", "[1]", False, 0, " ")
+            if key != "settle_config_list":
+                values = (None, "", *values)
+            for value in values:
                 with self.subTest(key=key, value=value):
                     self.assertFalse(self.verify({**self.response, key: value}))
                     self.assertEqual(getattr(self.account, state), None if state == "automatic_settlement_disabled" else "")
@@ -81,8 +84,32 @@ class CashConfigurationTests(SimpleTestCase):
                         self.assertEqual(self.account.verified_cash_config, {})
             response = dict(self.response)
             response.pop(key)
-            self.assertFalse(self.verify(response))
+            self.assertEqual(self.verify(response), key == "settle_config_list")
             self.assertIn("未返回", self.account.channel_message)
+
+    def test_omitted_settlements_follow_platform_policy_without_claiming_verified(self):
+        omitted = dict(self.response)
+        omitted.pop("settle_config_list")
+        for response in (omitted, {**self.response, "settle_config_list": None},
+                         {**self.response, "settle_config_list": ""}):
+            with self.subTest(response_keys=tuple(response), value=response.get("settle_config_list")):
+                self.assertTrue(self.verify(response))
+                self.assertIs(self.account.automatic_settlement_disabled, True)
+                self.assertEqual(self.account.card_status, "S")
+                self.assertEqual(self.account.cash_status, "S")
+                self.assertIn("按平台规则暂按未开通处理", self.account.channel_message)
+                self.assertNotIn("已核验自动结算关闭", self.account.channel_message)
+
+    def test_omission_policy_never_relaxes_card_or_cash_checks(self):
+        response = dict(self.response)
+        response.pop("settle_config_list")
+        for key in ("qry_cash_config_list", "qry_cash_card_info_list"):
+            for value in (None, "", "[]", "not-json"):
+                with self.subTest(key=key, value=value):
+                    self.assertFalse(self.verify({**response, key: value}))
+                    self.assertIs(self.account.automatic_settlement_disabled, True)
+                    self.assertIn("暂不可提现", self.account.channel_message)
+                    self.assertIn("按平台规则暂按未开通处理", self.account.channel_message)
 
     def test_missing_settlement_status_is_not_reported_as_enabled(self):
         for status in (None, "", "unknown", 0, False, []):
