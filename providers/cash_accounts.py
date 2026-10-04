@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.views.decorators.debug import sensitive_variables
 from rest_framework.exceptions import ValidationError
 
-from .huifu_user import decode_field, digest
+from .huifu_user import ChannelUncertain, decode_field, digest
 from .models import ProviderReceivingAccount
 from .receiving_accounts import encrypt_details
 
@@ -22,47 +22,123 @@ class CashAccountVerificationExpired(ValidationError):
 
 
 @sensitive_variables()
+def _query_rows(response, key, label, issues):
+    if response.get(key) in (None, ""):
+        issues.append(f"渠道未返回{label}")
+        return None
+    try:
+        rows = decode_field(response, key, list)
+        if not all(isinstance(row, dict) for row in rows):
+            raise ChannelUncertain()
+        return rows
+    except ChannelUncertain:
+        # Whitelisted descriptions only: never echo raw responses or exceptions.
+        issues.append(f"渠道返回的{label}格式异常")
+        return None
+
+
+@sensitive_variables()
 def verify_cash_configuration(account, response, details, expected):
-    # Optional/missing groups do not prove absence. Explicit [] or all status=0 do.
-    settlements = decode_field(response, "settle_config_list", list)
-    disabled = all(isinstance(row, dict) and row.get("settle_status") == "0" for row in settlements)
-    cash = decode_field(response, "qry_cash_config_list", list)
-    cards = decode_field(response, "qry_cash_card_info_list", list)
+    """S=verified, F=confirmed unmet condition, blank/None=insufficient evidence.
+
+    Updates independent checks and a safe diagnostic on the caller's locked account.
+    Only a complete result may authorize the caller to mark the account active.
+    """
+    # Rebuild every check from this response; do not retain a stale S or default to F.
+    account.automatic_settlement_disabled = None
+    account.card_status = ""
+    account.cash_status = ""
+    account.verified_cash_config = {}
+    account.cash_card_ciphertext = ""
+    issues = []
+    settlements = _query_rows(response, "settle_config_list", "自动结算配置", issues)
+    if settlements is not None:
+        if any(row.get("settle_status") == "1" for row in settlements):
+            account.automatic_settlement_disabled = False
+            issues.append("渠道自动结算仍开启，需平台联系汇付关闭")
+        elif all(row.get("settle_status") == "0" for row in settlements):
+            # Only explicit [] or every status=0 proves disabled auto-settlement.
+            account.automatic_settlement_disabled = True
+        else:
+            issues.append("渠道自动结算状态缺失或无法识别")
+
+    cash = _query_rows(response, "qry_cash_config_list", "手动提现配置", issues)
     mapping = {
         "out_fee_flag": "out_cash_flag",
         "out_fee_huifu_id": "out_cash_huifuid",
         "out_fee_acct_type": "out_cash_acct_type",
     }
-    matching = [
-        row
-        for row in cash
-        if isinstance(row, dict)
-        and row.get("switch_state") == "1"
-        and all(row.get(mapping.get(key, key)) == value for key, value in expected.items())
-    ]
-    candidates = [
-        row
-        for row in cards
-        if isinstance(row, dict)
-        and row.get("status") == "N"
-        and row.get("card_type") == "1"
-        and row.get("card_name") == details["real_name"]
-        and row.get("card_no") == details["bank_card_number"]
-        and row.get("prov_id") == details["bank_province_code"]
-        and row.get("area_id") == details["bank_city_code"]
-        and isinstance(row.get("token_no"), str)
-        and re.fullmatch(r"[0-9A-Za-z]{1,20}", row["token_no"])
-    ]
-    account.automatic_settlement_disabled = disabled
-    account.card_status = "S" if len(candidates) == 1 else "F"
-    account.cash_status = "S" if expected and len(matching) == 1 else "F"
-    account.verified_cash_config = expected if account.cash_status == "S" else {}
-    account.cash_card_ciphertext = (
-        encrypt_details(account.provider_id, {"token_no": candidates[0]["token_no"]})
-        if len(candidates) == 1
-        else ""
+    valid_expected = (
+        isinstance(expected, dict)
+        and expected.get("cash_type") in ("T1", "D1")
+        and all(expected.get(key) for key in mapping)
+        and bool(expected.get("fix_amt") or expected.get("fee_rate"))
     )
-    return disabled and account.card_status == "S" and account.cash_status == "S"
+    if not valid_expected:
+        issues.append("缺少有效的手动提现授权配置，请联系平台核实")
+    elif cash is not None:
+        fields = {mapping.get(key, key): value for key, value in expected.items()}
+        relevant = [row for row in cash if row.get("cash_type") == expected["cash_type"]]
+        if any(row.get("cash_type") not in ("T1", "D1", "D0") for row in cash) or any(
+            row.get("switch_state") not in ("0", "1")
+            or (row.get("switch_state") == "1" and any(
+                not isinstance(row.get(key), str) or not row[key] for key in fields
+            ))
+            for row in relevant
+        ):
+            issues.append("渠道手动提现配置不完整，无法核对开关、费率及承担方")
+        elif len(relevant) > 1:
+            issues.append("渠道返回多条同周期提现配置，需平台核实")
+        elif not relevant or relevant[0].get("switch_state") == "0":
+            account.cash_status = "F"
+            issues.append("渠道未开通所授权周期的手动提现")
+        elif any(relevant[0][key] != value for key, value in fields.items()):
+            account.cash_status = "F"
+            issues.append("渠道提现费率或手续费承担方与授权配置不一致")
+        else:
+            account.cash_status = "S"
+            account.verified_cash_config = expected
+
+    cards = _query_rows(response, "qry_cash_card_info_list", "提现银行卡资料", issues)
+    if cards is not None:
+        card_fields = {
+            "card_type": "1", "card_name": details["real_name"],
+            "card_no": details["bank_card_number"],
+            "prov_id": details["bank_province_code"], "area_id": details["bank_city_code"],
+        }
+        if any(
+            row.get("status") not in ("N", "C")
+            or any(not isinstance(row.get(key), str) or not row[key] for key in card_fields)
+            or "*" in row.get("card_name", "") or "*" in row.get("card_no", "")
+            for row in cards
+        ):
+            issues.append("渠道提现银行卡资料不完整或已脱敏，暂无法核验")
+        else:
+            candidates = [row for row in cards if row["status"] == "N" and all(
+                row[key] == value for key, value in card_fields.items()
+            )]
+            if not candidates:
+                account.card_status = "F"
+                issues.append("渠道未找到与已保存资料一致的正常本人提现卡")
+            elif len(candidates) != 1:
+                issues.append("渠道返回多张匹配提现卡，需平台核实")
+            elif not isinstance(candidates[0].get("token_no"), str) or not re.fullmatch(
+                r"[0-9A-Za-z]{1,20}", candidates[0]["token_no"]
+            ):
+                issues.append("渠道未返回有效的提现卡标识")
+            else:
+                account.card_status = "S"
+                account.cash_card_ciphertext = encrypt_details(
+                    account.provider_id, {"token_no": candidates[0]["token_no"]},
+                )
+    account.channel_message = (
+        "；".join(issues) + "。暂不可提现，请稍后刷新；持续异常请联系客服。"
+        if issues else ""
+    )
+    return (
+        account.automatic_settlement_disabled is True
+        and account.card_status == "S" and account.cash_status == "S"
+    )
 
 
 def manual_cash_account(provider_id, config, *, now=None, lock=False, require_fresh=True):

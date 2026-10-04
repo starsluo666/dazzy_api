@@ -28,6 +28,11 @@ COLLECTION_NOTICE = (
     "仅向你展示脱敏号码。当前尚未向汇付提交开户或绑卡，不会发起分账或扣款。"
     "资料可以清除；正式提交渠道前会另行告知并征得你的同意。"
 )
+SUBMITTED_COLLECTION_NOTICE = (
+    "收款资料已用于渠道申请，开户、银行卡及手动提现状态以渠道核验结果为准。"
+    "身份证号、银行卡号和联系电话加密保存，仅展示脱敏号码。"
+    "资料不能直接清除；如需更正或注销渠道账户，请联系客服。刷新状态不会发起分账或提现。"
+)
 CHANNEL_NOTICE = "收款渠道尚未开通；保存资料不代表开户、绑卡或分账成功。"
 
 
@@ -192,11 +197,14 @@ def receiving_account_data(provider):
         # PUT still fails closed; never replace unreadable data with a blank draft.
         readable = False
         details = {}
+    enabled = collection_available() and readable
+    has_attempts = bool(account and account.attempts.exists())
+    submitted = bool(account and (has_attempts or account.user_huifu_id))
     return {
         **receiving_account_summary(provider),
-        "collection_enabled": collection_available() and readable,
-        "can_edit": collection_available() and readable and not locked,
-        "can_clear": bool(account and not account.attempts.exists()),
+        "collection_enabled": enabled,
+        "can_edit": enabled and not locked,
+        "can_clear": bool(account and not has_attempts),
         "onboarding_enabled": channel_available(),
         "can_submit": bool(account and (account.channel_status in {"not_connected", "rejected", "registered"} or (account.user_huifu_id and account.onboarding_consent_version != ONBOARDING_CONSENT_VERSION)) and readable and provider.has_verified_identity and channel_available()),
         "can_refresh": bool(account and account.onboarding_consented_at and readable),
@@ -204,7 +212,9 @@ def receiving_account_data(provider):
         "onboarding_notice": ONBOARDING_NOTICE,
         "collection_unavailable_reason": (
             "已保存资料暂时无法读取，请联系客服核实。"
-            if not readable else "平台准备完成后，你可以在这里填写资料。当前不影响查看订单和账务收入。"
+            if not readable else (
+                "" if enabled else "收款资料填写暂未开放。当前不影响查看订单和账务收入。"
+            )
         ),
         "identity_verified": provider.has_verified_identity,
         "real_name": provider.identity_real_name,
@@ -215,7 +225,7 @@ def receiving_account_data(provider):
         "bank_province_code": details.get("bank_province_code", ""),
         "bank_city_code": details.get("bank_city_code", ""),
         "consent_version": CONSENT_VERSION,
-        "collection_notice": COLLECTION_NOTICE,
+        "collection_notice": SUBMITTED_COLLECTION_NOTICE if submitted else COLLECTION_NOTICE,
     }
 
 

@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from Crypto.PublicKey import RSA
@@ -282,6 +283,87 @@ class ReceivingOnboardingTests(TestCase):
         self.assertEqual(self.account.user_huifu_id, USER_ID)
         self.assertEqual(self.account.attempts.get(kind="query").status, "unknown")
         self.assertIsNone(self.account.channel_checked_at)
+
+    def test_refresh_missing_group_does_not_report_cash_failure_or_keep_stale_card(self):
+        from .cash_accounts import manual_cash_account
+        from rest_framework.exceptions import ValidationError
+
+        self.open()
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response()):
+            self.assertEqual(self.client.post(URL + "refresh/").status_code, 200)
+        self.assertEqual(self.account.channel_status, "active")
+        incomplete = self.query_response(settle_config_list=None, qry_cash_config_list=None,
+                                         qry_cash_card_info_list=None)
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=incomplete):
+            response = self.client.post(URL + "refresh/")
+        self.assertEqual(response.status_code, 200)
+        result = response.data["data"]
+        self.assertEqual(result["channel_status"], "attention")
+        self.assertEqual(result["cash_status"], "")
+        self.assertEqual(result["card_status"], "")
+        self.assertIsNone(result["automatic_settlement_disabled"])
+        for label in ("自动结算配置", "手动提现配置", "提现银行卡资料"):
+            self.assertIn(f"渠道未返回{label}", result["channel_notice"])
+        self.assertEqual(self.account.verified_cash_config, {})
+        self.assertEqual(self.account.cash_card_ciphertext, "")
+        with self.assertRaises(ValidationError):
+            manual_cash_account(self.provider.pk, SimpleNamespace(
+                sys_id=CHANNEL_SETTINGS["HUIFU_SYS_ID"],
+                product_id=CHANNEL_SETTINGS["HUIFU_PRODUCT_ID"],
+                merchant_id=CHANNEL_SETTINGS["HUIFU_MERCHANT_ID"],
+            ))
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call") as gateway:
+            self.submit()
+            gateway.assert_not_called()
+
+    def test_refresh_reports_different_reasons_for_disabled_cash_and_enabled_settlement(self):
+        self.open()
+        response = self.query_response(
+            settle_config_list='[{"settle_status":"1"}]', qry_cash_config_list="[]",
+        )
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=response):
+            result = self.client.post(URL + "refresh/").data["data"]
+        self.assertEqual(result["cash_status"], "F")
+        self.assertEqual(result["card_status"], "S")
+        self.assertIs(result["automatic_settlement_disabled"], False)
+        self.assertIn("仍开启", result["channel_notice"])
+        self.assertIn("未开通所授权周期", result["channel_notice"])
+        self.assertNotIn("TESTTOKEN1", str(result))
+
+    def test_refresh_explains_audit_and_old_authorization_blocks(self):
+        self.open()
+        for audit, notice in (("P", "渠道审核中"), ("N", "渠道审核未通过")):
+            account = self.account
+            account.audit_status = audit
+            account.onboarding_consent_version = "huifu-personal-settlement-v1"
+            account.save()
+            with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response()):
+                result = self.client.post(URL + "refresh/").data["data"]
+            self.assertNotEqual(result["channel_status"], "active")
+            self.assertIn(notice, result["channel_notice"])
+            self.assertIn("需先确认当前手动提现授权", result["channel_notice"])
+            self.assertLessEqual(len(result["channel_notice"]), 200)
+
+    def test_submitted_copy_no_longer_claims_unsubmitted_or_clearable(self):
+        self.open()
+        result = self.client.get(URL).data["data"]
+        self.assertTrue(result["collection_enabled"])
+        self.assertEqual(result["collection_unavailable_reason"], "")
+        self.assertIn("已用于渠道申请", result["collection_notice"])
+        self.assertIn("不能直接清除", result["collection_notice"])
+        self.assertNotIn("尚未向汇付提交", result["collection_notice"])
+        self.assertFalse(result["can_clear"])
+
+    def test_uncertain_or_rejected_request_never_shows_draft_copy(self):
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", side_effect=ChannelUncertain()):
+            self.submit()
+        for status in ("attention", "rejected"):
+            account = self.account
+            account.channel_status = status
+            account.save()
+            result = self.client.get(URL).data["data"]
+            self.assertIn("已用于渠道申请", result["collection_notice"])
+            self.assertFalse(result["can_clear"])
 
     def test_recovery_does_not_bind_id_from_mismatched_detail_response(self):
         with patch("providers.receiving_onboarding.HuifuUserGateway.call", side_effect=ChannelUncertain()):

@@ -387,8 +387,11 @@ class WithdrawalStateTests(TransactionTestCase):
             ("channel_checked_at", None),
             ("channel_checked_at", self.now + timedelta(days=1)),
             ("automatic_settlement_disabled", False),
+            ("automatic_settlement_disabled", None),
             ("channel_status", "attention"),
             ("cash_status", "F"),
+            ("cash_status", ""),
+            ("card_status", ""),
         ):
             original = getattr(self.account, field)
             setattr(self.account, field, value)

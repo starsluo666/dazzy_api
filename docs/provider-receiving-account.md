@@ -100,6 +100,16 @@ HUIFU_USER_SKILL_SOURCE=hfps/1.3.5;hfms/1.0.4
 
 上述本人接口均鉴权、限流并禁止缓存。通知路径 `/api/v1/providers/receiving-account/huifu-notify/` 不使用用户登录鉴权，但必须通过签名和申请关联校验。
 
+### 刷新后的核验结果（2026-10-04）
+
+- `cash_status/card_status` 为本地汇总状态，不是对汇付拒绝码的原样透传。刷新查询后，`S` 表示该项已核对，`F` 表示明确未满足条件（如提现关闭、费率或本人银行卡不匹配）；空字符串表示缺失、格式异常、脱敏或结果存在歧义，不能称为“开户失败”。
+- `automatic_settlement_disabled=true` 仅来自明确空配置列表或所有结算开关关闭；`false` 表示仍有开启项；`null` 表示没有可靠结果。省略字段绝不推断为已关闭。
+- 三组结果独立核验；某一组缺失不会吞掉其他组结果，也不会沿用上次银行卡或提现核验成功。`channel_notice` 给出固定白名单原因，不回传渠道原始响应、姓名、卡号、卡标识或手续费承担方 ID。
+- 只有完整核验、当前授权及审核状态满足条件才进入 `active`；原有提现开关、白名单、限额、余额和时效校验不变。整体查询验签或身份核对失败时不采用响应内容。
+- 已用于渠道申请的资料不再提示“尚未提交”或“可以直接清除”；资料登记可用时 `collection_unavailable_reason` 为空。旧数据不会批量改状态，部署后需点击「刷新渠道状态」重新查询；本次无需数据库迁移。
+
+排查入口：达人端「收款账户 → 刷新渠道状态」，运营端「达人管理 → 详情 → 收款账户资料」。若提示缺少配置、返回格式异常或资料已脱敏，将具体提示及核验时间交平台与汇付核实，不必提供完整身份证或银行卡。只有明确提示自动结算仍开启时才要求渠道关闭；不要直接修改数据库状态，也不要重复开户。
+
 完整身份证、银行卡、银行预留电话及申请资料保存在 AES-256-GCM 加密内容中；每次保存使用新 nonce，AAD 绑定达人 ID 与版本。本人接口和后台仅回显号码掩码，前端不持久化敏感表单。密钥丢失无法恢复已有资料；轮换需旧密钥解密、新密钥重加密并验证，不能直接覆盖旧密钥。
 
 账号注销会清除尚未提交渠道的资料；只要存在渠道提交记录，就要求客服先核对外部账户，不能把正式渠道账户当成可直接删除的草稿。有收入余额、提现冻结款或账务异常时也禁止注销。平台资料保存授权 `receiving-materials-v1` 不授权自动对外提交；开户前必须另行确认 `huifu-personal-cash-v2`。
@@ -107,7 +117,7 @@ HUIFU_USER_SKILL_SOURCE=hfps/1.3.5;hfms/1.0.4
 ## 验证与沙箱边界
 
 ```sh
-uv run python scripts/check_wechat_auth.py providers.test_huifu_user_transport providers.test_receiving_onboarding providers.test_receiving_accounts accounts.test_account_closure orders.test_huifu_gateway orders.test_huifu orders.test_payment_recovery
+uv run python scripts/check_wechat_auth.py providers.test_cash_accounts providers.test_huifu_user_transport providers.test_receiving_onboarding providers.test_receiving_accounts accounts.test_account_closure orders.test_huifu_gateway orders.test_huifu orders.test_payment_recovery
 uv run python scripts/check_wechat_auth.py
 ```
 

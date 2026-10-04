@@ -278,22 +278,22 @@ def refresh_onboarding(provider):
                 from .cash_accounts import verify_cash_configuration
                 consent = account.attempts.filter(kind="consent").first()
                 expected = (consent or opening).settlement_config
-                ready = False
-                account.cash_status = "F"
-                account.automatic_settlement_disabled = None
-                account.verified_cash_config = {}
-                account.cash_card_ciphertext = ""
-                if "cash_type" in expected:
-                    try:
-                        ready = verify_cash_configuration(account, response, details, expected)
-                    except ChannelUncertain:
-                        pass
+                ready = verify_cash_configuration(account, response, details, expected)
                 if ready and account.onboarding_consent_version == ONBOARDING_CONSENT_VERSION and account.audit_status not in {"P", "N"}:
                     account.channel_status = "active"
                     account.channel_message = "已核验手动提现、本人银行卡及自动结算关闭；申请提现后以渠道到账结果为准。"
                 else:
                     account.channel_status = "pending" if account.audit_status == "P" else "attention"
-                    account.channel_message = "手动提现或自动结算关闭状态尚未核验；旧账户请联系平台切换，不能直接提现。"
+                    notices = []
+                    if account.audit_status == "P":
+                        notices.append("渠道审核中，暂不可提现。")
+                    elif account.audit_status == "N":
+                        notices.append("渠道审核未通过，请联系客服核实。")
+                    if account.onboarding_consent_version != ONBOARDING_CONSENT_VERSION:
+                        notices.append("需先确认当前手动提现授权。")
+                    # The verifier records only fixed, non-sensitive descriptions.
+                    notices.append(account.channel_message)
+                    account.channel_message = "".join(notices)
             account.channel_checked_at = timezone.now()
             account.save()
             attempt.status = "succeeded"
