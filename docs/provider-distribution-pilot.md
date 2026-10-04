@@ -85,7 +85,57 @@ sudo bash ./deploy-docker.sh manage provider_distribution query 订单号
 
 ```powershell
 $env:COS_BUCKET='offline-test-1250000000'
-uv run python scripts/check_wechat_auth.py orders.test_distributions providers.test_withdrawals orders.test_settlement_plans orders.test_settlement_fees orders.tests orders.test_huifu orders.test_huifu_gateway orders.test_payment_recovery wallets.tests.WalletServiceTests backoffice.tests backoffice.test_receiving_settings taskcenter.tests
+uv run python scripts/check_wechat_auth.py orders.test_distributions orders.test_distribution_safety providers.test_withdrawals orders.test_settlement_plans orders.test_settlement_fees orders.tests orders.test_huifu orders.test_huifu_gateway orders.test_payment_recovery wallets.tests.WalletServiceTests backoffice.tests backoffice.test_receiving_settings taskcenter.tests
 ```
 
 独立内存库迁移，HTTP 完全替身；SDK 本体签名验签链使用临时 RSA 密钥。不是生产资金验收。
+
+## 2026-10-04 安全修订与验收边界
+
+本轮仍是存量 Django / Python 官方 `dg-sdk 2.0.24` 聚合支付：V4 原支付查询 → V2 延时交易确认 → V3 确认查询 → 达人收入余额 → 用户主动提现。保留原支付、退款、冻结期、业务结算和通知验签路径，不修改达人比例，不根据前端回跳或同步受理回包入账。
+
+### 已验签证据冲突与短暂未知必须区分
+
+- 已验签查单的收款人、金额、费用承担方、流水或终态与原请求/已核验结果冲突：新增观察记录只存原因码、返回码和摘要；保留原成功/失败终态，设置持久冲突标记并冻结该达人新增提现。
+- 首次入账前发生冲突，同样建立零余额的冻结钱包，避免其他订单后续入账绕过保护。余额和历史流水不直接扣减或撤销；已登记/已发出的提现也不冒充已经撤销。
+- 后续正常查询不能自动解除冲突或补入冲突订单收入。解除须先人工核对，不提供数据库改成功/清空标记的操作指引。
+- 超时、未验签、缺少费用/明细仍为待核验，不作为真实金额冲突；不会仅凭网络异常冻结此前已核验的余额，也不会授权重发。
+
+### 渠道预检查、重试和可见性
+
+新增 `ProviderOrderDistributionPreflight`，与本地准备单独立：保存固定白名单原因码及说明、同类连续失败数、最近检查时间、下次自动检查时间。后台「达人结算」列表/详情及 `provider_distribution inspect` 均可查看，不保存异常原文、个人资料或密钥。
+
+预检查失败不创建资金请求，不占用分账流水；后台任务按 1、2、4、8、16、32、60 分钟退避，后续上限 60 分钟。相同原因第 3 次及其后 2 的幂次失败写 ERROR 告警；首次失败写 WARNING。已登记的资金请求永远只查询，不使用这条退避逻辑重新出款。并发晚到的预检查失败不能覆盖已登记状态。
+
+后台任务每轮优先查询最多 50 条未终态分账，另留 10 条额度复核距上次查询至少 6 小时的成功记录，不按创建日期截断历史成功记录。首次证据冲突写 ERROR，并在后台明确提示暂停提现。日志告警仍须接入部署环境的日志监控/通知渠道；这不等同于已完成汇付账单级每日财务对账。
+
+### 退款支持范围
+
+| 情况 | 本轮行为 |
+| --- | --- |
+| 尚未分账、尚未完成本地结算的订单申请退款 | 保留既有退款流程和幂等校验 |
+| 退款待处理、处理中或失败 | 不允许分账，先核清退款结果 |
+| 首次分账前已有成功部分退款 | 显式阻断后续分账；后台标记人工核账，不自动重试 |
+| 全额退款 | 本地结算取消，无需分账 |
+| 任意已登记分账请求后的退款/回退/重新分账 | 继续阻断自动操作；不能靠删除原分账记录重发 |
+
+该边界同时适用于内扣和外扣，不猜测部分退款后原支付手续费是否返还或待确认余额如何变化。开放部分退款后的分账与分账回退，需要汇付明确回退接口、可回退余额、手续费退还规则和提现后余额不足的处理，再单独开发、验收；本轮没有接通自动回退。
+
+### 部署顺序和待人工验收
+
+1. 本轮新增迁移 `orders.0031_distribution_safety_diagnostics`；先迁移，再更新 API 与 worker，最后更新管理后台。不启用新的资金开关，不回填或重算旧资金记录。
+2. 重跑离线回归和 `scripts/check_postgres_regression.py`。后者凭据仅由 stdin 传入，原库只读，创建随机名一次性库；测试结束核对其自动清理结果。禁止向真实汇付发送请求。
+3. 经授权后，白名单单笔小额走完整支付、服务完成、冻结期、分账查单、余额入账、主动提现、银行卡到账链路，留存受控脱敏核验材料。
+4. 核对实际签名回包是否含完整分账费用/收款明细；字段缺失不能按零费用或只看 S 入账。需补充查询时按官方接口契约另行适配。
+5. 实收支付费率、提现“0.02”的单位及节假日计费条件需渠道人工确认。平台分账金额不等于扣除全部费用后的最终净收益。
+6. 扩大开放前仍需完成分账后退款回退、账单级对账和日志告警通知投递。代码测试不是商户权限、费率或实际资金到账证明。
+
+参考 skill：`huifu-pay-integration` 的存量接入、服务端 SDK 矩阵、Python 适配、聚合扫码查单、上线清单。接口字段另与[汇付交易确认查询](https://paas.huifu.com/partners/api/doc/smzf/api_jyqrcx.md)核对。
+
+### 本轮已执行验证（2026-10-04）
+
+- PostgreSQL 18.4 / PostGIS 3.6.4 一次性隔离库：124 项测试通过，0 失败、0 错误、0 跳过，其中收入并发专项 13 项，包括退款与分账竞争、内扣并发分账、防重复入账、防重复提现、冲突与成功查询竞争、提现核验期间冻结。原提供库仅作只读前置检查，一次性库已自动删除。
+- 补充组合异常保护并修正旧协议测试替身后，最终 PostgreSQL 专项 39 项再次全部通过（含完整 13 项并发、15 项安全回归及 11 项签名/协议测试），无跳过；本次临时库也已清理。该复测与上面的 124 项有重叠，不代表 163 个独立用例。
+- 最终版本离线 SpatiaLite 回归：304 项通过，覆盖分账保护、内/外扣部分退款拦截、任务退避、原订单/支付/退款/钱包、运营配置和后台权限。包含“缺少费用字段不能掩盖另一条明细的金额冲突”的组合异常；旧协议测试替身已补齐真实模型已有的交易流水字段。
+- 改动文件 Ruff 静态检查、管理后台 TypeScript 检查及生产构建通过。后台构建仍提示已有的大包体积警告，不是构建失败。
+- 未执行部署、真实汇付交易、真实分账、真实提现或费率验收。上述测试不能替代白名单实单及银行卡到账核对。

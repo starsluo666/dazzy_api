@@ -9,6 +9,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from orders.distributions import execute_distribution, query_distribution
+from orders.distribution_preflight import record_preflight_failure
 from orders.models import ProviderOrderDistribution, ProviderOrderSettlement
 from orders.settlement_plans import sync_provider_settlement_plan
 from .models import ProviderWithdrawal
@@ -40,12 +41,21 @@ def process_income_transfers():
                 order__payment_order__delay_acct_flag="Y",
                 distribution_plan__requires_manual_review=False,
             )
+            .exclude(distribution_preflight__status="blocked")
+            .filter(
+                Q(distribution_preflight__next_retry_at__isnull=True)
+                | Q(distribution_preflight__next_retry_at__lte=timezone.now())
+            )
             .select_related("provider__user", "order")
             .order_by("distribution_plan__evaluated_at", "pk")[:20]
         )
         for settlement in candidates:
             try:
-                refresh_onboarding(settlement.provider)
+                try:
+                    refresh_onboarding(settlement.provider)
+                except Exception:
+                    record_preflight_failure(settlement.order.order_no, "receiving_account")
+                    raise
                 _, created = execute_distribution(settlement.order.order_no)
                 counts["distribution_submitted"] += int(created)
             except Exception:
@@ -67,7 +77,18 @@ def process_income_transfers():
         .select_related("settlement__order")
         .order_by(F("last_queried_at").asc(nulls_first=True), "pk")[:50]
     )
-    for record in pending:
+    # Separate quota prevents successful-record reconciliation from starving
+    # pending requests. Recheck all successes over time, not just a 7-day window.
+    due_successes = (
+        ProviderOrderDistribution.objects.filter(status="succeeded")
+        .filter(Q(last_queried_at__isnull=True)
+                | Q(last_queried_at__lte=timezone.now() - timedelta(hours=6)))
+        .select_related("settlement__order")
+        .order_by(F("last_queried_at").asc(nulls_first=True), "pk")[:10]
+    )
+    # Materialize both lists before querying so a newly confirmed success is not
+    # selected again in this run, even if the scheduler's clock changes.
+    for record in [*pending, *due_successes]:
         try:
             query_distribution(record.settlement.order.order_no)
             counts["distribution_queried"] += 1

@@ -1283,7 +1283,7 @@ class ProviderOrderFinanceListView(APIView):
             "order__provider", "payment_order", "beneficiary", "operator"
         )
         settlements = ProviderOrderSettlement.objects.select_related(
-            "order", "provider", "distribution_plan", "distribution"
+            "order", "provider", "distribution_plan", "distribution", "distribution_preflight"
         )
         if not access.all_data:
             payments = payments.filter(order__provider__service_city_code__in=access.city_codes)

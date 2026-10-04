@@ -332,7 +332,12 @@ class WithdrawalStateTests(TransactionTestCase):
 
     def test_successful_distribution_ignores_transient_and_late_pending_queries(self):
         for state in ("unknown", "processing", "succeeded"):
-            _save_result(self.distribution.pk, {"status": state}, queried=True)
+            result = {"status": state}
+            if state == "succeeded":
+                # A verified successful query includes the same fee/trade proof.
+                result.update(split_fee_amount=self.distribution.split_fee_amount,
+                              gateway_trade_no=self.distribution.gateway_trade_no)
+            _save_result(self.distribution.pk, result, queried=True)
             self.distribution.refresh_from_db()
             self.wallet.refresh_from_db()
             self.assertEqual(self.distribution.status, "succeeded")

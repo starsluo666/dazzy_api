@@ -74,6 +74,14 @@ def credit_distribution(record):
 
 def hold_distribution_wallet(record):
     ProviderProfile.objects.select_for_update().get(pk=record.settlement.provider_id)
+    if record.snapshot.get("income_mode") == "manual_cash_v1":
+        # A conflict can precede the first credit. Preserve the hold for future
+        # earnings as well, without inventing or reversing any ledger entries.
+        ProviderIncomeWallet.objects.get_or_create(
+            provider_id=record.settlement.provider_id,
+            defaults={"channel_scope": record.snapshot["receiver_scope"],
+                      "receiver_id": record.snapshot["receiver_id"]},
+        )
     wallet = (
         ProviderIncomeWallet.objects.select_for_update()
         .filter(provider_id=record.settlement.provider_id)

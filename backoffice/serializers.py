@@ -1476,6 +1476,12 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display")
     distribution_plan = ProviderOrderSettlementPlanSerializer(read_only=True, allow_null=True)
     distribution = serializers.SerializerMethodField()
+    distribution_preflight = serializers.SerializerMethodField()
+
+    def get_distribution_preflight(self, obj):
+        from orders.distribution_preflight import preflight_summary
+
+        return preflight_summary(getattr(obj, "distribution_preflight", None))
 
     def get_distribution(self, obj):
         record = getattr(obj, "distribution", None)
@@ -1499,6 +1505,7 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
             "payment_fee_amount": record.payment_fee_amount, "split_fee_amount": record.split_fee_amount,
             "bank_settlement_fee_amount": None, "bank_arrival_verified": False,
             "response_code": record.response_code, "attention_reason": record.attention_reason,
+            "evidence_conflict_code": record.evidence_conflict_code,
             "last_queried_at": record.last_queried_at, "created_at": record.created_at,
         }
 
@@ -1511,7 +1518,7 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
             "platform_commission_rate", "platform_commission_amount",
             "provider_service_income_amount", "provider_settlement_amount", "frozen_at",
             "freeze_until", "dispute_reason", "settled_at", "cancelled_at", "created_at",
-            "updated_at", "distribution_plan", "distribution",
+            "updated_at", "distribution_plan", "distribution", "distribution_preflight",
         )
 
 

@@ -2,11 +2,13 @@ import json
 
 from django.core.management.base import BaseCommand, CommandError
 from django.core.exceptions import ObjectDoesNotExist
+from django.core.serializers.json import DjangoJSONEncoder
 from rest_framework.exceptions import APIException
 
 from orders.distribution_transport import DistributionUncertain
 from orders.distributions import execute_distribution, query_distribution
-from orders.models import ProviderOrderDistribution
+from orders.models import ProviderOrderDistribution, ProviderOrderDistributionPreflight
+from orders.distribution_preflight import preflight_summary
 
 
 class Command(BaseCommand):
@@ -36,6 +38,11 @@ class Command(BaseCommand):
             raise CommandError(str(exc)) from None
         # No channel account IDs, keys, bank details, or signed payloads in output.
         result = {"order_no": order_no, "status": "not_started"}
+        result["preflight"] = preflight_summary(
+            ProviderOrderDistributionPreflight.objects.filter(
+                settlement__order__order_no=order_no
+            ).first()
+        )
         if record:
             platform_split_amount = record.snapshot.get(
                 "platform_split_amount", record.snapshot["platform_amount"]
@@ -57,5 +64,6 @@ class Command(BaseCommand):
                 bank_arrival_verified=False,
                 response_code=record.response_code,
                 attention_reason=record.attention_reason,
+                evidence_conflict_code=record.evidence_conflict_code,
             )
-        self.stdout.write(json.dumps(result, ensure_ascii=False))
+        self.stdout.write(json.dumps(result, ensure_ascii=False, cls=DjangoJSONEncoder))

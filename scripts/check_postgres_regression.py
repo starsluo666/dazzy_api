@@ -24,6 +24,7 @@ from psycopg import sql
 
 DEFAULT_LABELS = [
     "orders.test_distributions",
+    "orders.test_distribution_safety",
     "orders.test_settlement_plans",
     "orders.test_settlement_fees",
     "orders.tests",

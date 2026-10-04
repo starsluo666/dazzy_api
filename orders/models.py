@@ -814,6 +814,28 @@ class ProviderOrderSettlementPlanRevision(models.Model):
         )]
 
 
+class ProviderOrderDistributionPreflight(models.Model):
+    """Latest channel-execution gate; independent of local settlement readiness."""
+
+    class Status(models.TextChoices):
+        DEFERRED = "deferred", "渠道预检查未通过"
+        BLOCKED = "blocked", "暂停自动分账，待人工核账"
+        REGISTERED = "registered", "已登记分账请求"
+
+    settlement = models.OneToOneField(
+        ProviderOrderSettlement, on_delete=models.PROTECT, related_name="distribution_preflight",
+    )
+    status = models.CharField(max_length=16, choices=Status)
+    reason_code = models.CharField(max_length=64, blank=True)
+    reason_message = models.CharField(max_length=200, blank=True)
+    failure_count = models.PositiveIntegerField(default=0)
+    checked_at = models.DateTimeField()
+    next_retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = "provider_distribution_preflight"
+
+
 class ProviderOrderDistribution(models.Model):
     """One immutable channel request per settlement. Unknown outcomes are query-only.
 
@@ -839,6 +861,7 @@ class ProviderOrderDistribution(models.Model):
     response_code = models.CharField(max_length=8, blank=True)
     response_digest = models.CharField(max_length=64, blank=True)
     attention_reason = models.CharField(max_length=200, blank=True)
+    evidence_conflict_code = models.CharField(max_length=64, blank=True)
     last_queried_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -854,6 +877,7 @@ class ProviderOrderDistributionObservation(models.Model):
     status = models.CharField(max_length=16)
     response_code = models.CharField(max_length=8, blank=True)
     response_digest = models.CharField(max_length=64, blank=True)
+    reason_code = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

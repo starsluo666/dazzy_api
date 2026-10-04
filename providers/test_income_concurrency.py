@@ -12,8 +12,13 @@ from rest_framework.exceptions import ValidationError
 
 from orders import test_distributions as distribution
 from orders.distribution_gateway import HuifuDistributionGateway
+from orders.distribution_preflight import record_preflight_failure
+from orders.distribution_transport import DistributionEvidenceConflict
 from orders.distributions import execute_distribution, query_distribution
-from orders.models import ProviderOrder, ProviderOrderDistribution, ProviderOrderRefundOrder
+from orders.models import (
+    ProviderOrder, ProviderOrderDistribution, ProviderOrderDistributionPreflight,
+    ProviderOrderRefundOrder,
+)
 from orders.services import create_provider_order_refund
 from . import test_withdrawals as withdrawal
 from .models import (
@@ -69,9 +74,11 @@ class DistributionConcurrencyTests(TransactionTestCase):
         def verify(snapshot):
             self.assertFalse(connection.in_atomic_block)
             preflight.wait(timeout=15)
+            internal = snapshot["fee_flag"] == "2"
             return {
-                "payment_fee_amount": 60, "payment_query_digest": "synthetic",
-                "platform_split_amount": 3000, "split_amount": 10000,
+                "payment_fee_amount": 35 if internal else 60, "payment_query_digest": "synthetic",
+                "platform_split_amount": 2965 if internal else 3000,
+                "split_amount": 9965 if internal else 10000,
             }
 
         def confirm(record):
@@ -88,6 +95,40 @@ class DistributionConcurrencyTests(TransactionTestCase):
         self.assertEqual(len({record.pk for record, _ in results}), 1)
         self.assertEqual(ProviderOrderDistribution.objects.count(), 1)
         send.assert_called_once()
+
+    def test_internal_concurrent_distribution_dispatches_once_with_net_platform_share(self):
+        distribution.DistributionStateTests.use_internal_payment(self)
+        self.test_concurrent_distribution_dispatches_only_once()
+        record = ProviderOrderDistribution.objects.get()
+        self.assertEqual(record.snapshot["provider_amount"], 7000)
+        self.assertEqual(record.snapshot["platform_split_amount"], 2965)
+
+    def test_concurrent_preflight_failures_preserve_failure_count(self):
+        parallel(*[lambda: record_preflight_failure(self.order.order_no, "payment_proof")] * 2)
+        record = ProviderOrderDistributionPreflight.objects.get()
+        self.assertEqual(record.failure_count, 2)
+        self.assertEqual((record.next_retry_at - record.checked_at).total_seconds(), 120)
+
+    def test_concurrent_conflict_and_success_never_clear_hold_or_duplicate_credit(self):
+        record, _, _ = distribution.DistributionStateTests.run_execute(self)
+        checked = Barrier(2)
+
+        def query(row):
+            index = checked.wait(timeout=15)
+            if index == 0:
+                raise DistributionEvidenceConflict(
+                    "query_amount_conflict", response_code="00000000", response_digest="a" * 64,
+                )
+            return {"status": "succeeded", "split_fee_amount": 20, "gateway_trade_no": "OFFLINE"}
+
+        with patch.object(HuifuDistributionGateway, "query", side_effect=query):
+            parallel(*[lambda: query_distribution(self.order.order_no)] * 2)
+        record.refresh_from_db()
+        self.assertEqual(record.evidence_conflict_code, "query_amount_conflict")
+        wallet = ProviderIncomeWallet.objects.get()
+        self.assertTrue(wallet.hold_reason)
+        self.assertIn(wallet.available_amount, (0, 7000))
+        self.assertLessEqual(wallet.entries.count(), 1)
 
     def test_concurrent_success_queries_credit_once_and_create_one_wallet(self):
         record, _, _ = distribution.DistributionStateTests.run_execute(self)
@@ -284,6 +325,43 @@ class WithdrawalConcurrencyTests(TransactionTestCase):
         results = self.concurrent_requests([uuid.uuid4(), uuid.uuid4()])
         self.assertEqual(sum(pk == "rejected" for pk, _ in results), 1)
         self.assertEqual(sum(created for _, created in results), 1)
+
+    def test_distribution_conflict_during_cash_preflight_prevents_reservation(self):
+        in_preflight, held = Event(), Event()
+
+        def refresh(provider):
+            ProviderReceivingAccount.objects.filter(provider=provider).update(channel_checked_at=timezone.now())
+
+        def balance(receiver):
+            in_preflight.set()
+            self.assertTrue(held.wait(timeout=15))
+            return {"available_amount": 7000, "acct_id": "B00000001", "response_digest": "synthetic"}
+
+        def conflict():
+            self.assertTrue(in_preflight.wait(timeout=15))
+            try:
+                from orders.distributions import _save_result
+
+                _save_result(self.distribution.pk, {
+                    "status": "unknown", "evidence_conflict_code": "query_amount_conflict",
+                    "response_code": "00000000", "response_digest": "a" * 64,
+                }, queried=True)
+            finally:
+                held.set()
+
+        def withdraw():
+            with self.assertRaises(ValidationError):
+                create_withdrawal(self.provider, amount=5000, request_key=uuid.uuid4())
+
+        with (
+            patch("providers.withdrawals.refresh_onboarding", side_effect=refresh),
+            patch.object(HuifuWithdrawalGateway, "balance", side_effect=balance),
+            patch.object(HuifuWithdrawalGateway, "submit") as send,
+        ):
+            parallel(withdraw, conflict)
+        send.assert_not_called()
+        self.assertFalse(ProviderWithdrawal.objects.exists())
+        self.assert_balances(7000, 0, 0)
 
     def reconcile_twice(self, state):
         record, _, _ = withdrawal.WithdrawalStateTests.submit(self)

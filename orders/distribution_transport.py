@@ -24,6 +24,24 @@ class DistributionUncertain(Exception):
     """Never interpret an unverified/ambiguous result as success or safe to resend."""
 
 
+class DistributionPreflightError(DistributionUncertain):
+    """A sanitized reason code for a payment proof that cannot authorize a split."""
+
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
+class DistributionEvidenceConflict(DistributionUncertain):
+    """Verified channel evidence contradicts the immutable request, not a timeout."""
+
+    def __init__(self, code, *, response_code, response_digest):
+        self.code = code
+        self.response_code = response_code
+        self.response_digest = response_digest
+        super().__init__("渠道分账证据冲突，请人工核账；禁止重发。")
+
+
 def validate_transport(config):
     from dg_sdk import DGClient
     from dg_sdk.core import log_util

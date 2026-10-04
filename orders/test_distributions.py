@@ -106,7 +106,9 @@ def confirm_receipt(record, *, query=False, split_fee_amount="0.10"):
 class DistributionContractTests(SimpleTestCase):
     def setUp(self):
         self.gateway = HuifuDistributionGateway(HuifuPaymentConfig.from_settings())
-        self.record = SimpleNamespace(req_date="20261004", req_seq_id="PD1", snapshot=snapshot())
+        self.record = SimpleNamespace(
+            req_date="20261004", req_seq_id="PD1", snapshot=snapshot(), gateway_trade_no="",
+        )
 
     def test_real_sdk_routes_signed_envelopes_and_request_identities(self):
         responses = [

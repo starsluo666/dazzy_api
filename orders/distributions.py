@@ -1,5 +1,6 @@
 """Default-closed delayed split pilot. Verified new splits credit provider income."""
 
+import logging
 import uuid
 
 from django.conf import settings
@@ -9,8 +10,13 @@ from rest_framework.exceptions import ValidationError
 
 from providers.cash_accounts import manual_cash_account
 from .distribution_gateway import HuifuDistributionGateway, receivers
-from .distribution_transport import DistributionUncertain, validate_transport
-from .huifu import HuifuPaymentConfig, _canonical_digest
+from .distribution_transport import (
+    DistributionEvidenceConflict, DistributionUncertain, validate_transport,
+)
+from .distribution_preflight import (
+    DistributionBlocked, mark_preflight_registered, record_preflight_failure,
+)
+from .huifu import HuifuConfigurationError, HuifuPaymentConfig, _canonical_digest
 from .models import (
     ProviderOrder,
     ProviderOrderDistribution,
@@ -18,6 +24,8 @@ from .models import (
     ProviderOrderPaymentOrder,
 )
 from .settlement_plans import sync_provider_settlement_plan
+
+logger = logging.getLogger(__name__)
 
 
 def _scope(config):
@@ -49,7 +57,11 @@ def _policy(config, *, provider_id, amount):
 
 
 def _receiver(provider_id, config, now):
-    return manual_cash_account(provider_id, config, now=now)
+    try:
+        return manual_cash_account(provider_id, config, now=now)
+    except ValidationError as exc:
+        exc.preflight_code = "receiving_account"
+        raise
 
 
 def payment_cohort(order, allocation, config, *, now):
@@ -79,14 +91,22 @@ def _snapshot(order, config, *, now):
     plan = sync_provider_settlement_plan(order_no=order.order_no, now=now)
     if not plan or plan.status == "cancelled":
         raise ValidationError("订单没有可执行的分账准备单。")
+    # Refund handling remains intact; only subsequent channel distribution is gated.
+    # No assumptions about whether Huifu returns the original collection fee.
+    if plan.refunded_amount or order.refund_orders.filter(status="succeeded").exists():
+        raise DistributionBlocked("refunded_order")
     # The plan owns local readiness; channel checks below are independent proof.
     reasons = [item["message"] for item in plan.blockers]
     if reasons or plan.funding_type != "external" or plan.requires_manual_review:
         raise ValidationError(reasons or "仅支持新产生且来源已核对的全额外部支付订单。")
     payment = ProviderOrderPaymentOrder.objects.get(order=order)
-    _policy(
-        config, provider_id=order.provider_id, amount=plan.provider_amount + plan.platform_amount
-    )
+    try:
+        _policy(
+            config, provider_id=order.provider_id, amount=plan.provider_amount + plan.platform_amount
+        )
+    except ValidationError as exc:
+        exc.preflight_code = "configuration"
+        raise
     account = _receiver(order.provider_id, config, now)
     cohort = payment.distribution_cohort
     # Fee mode belongs to the original payment, not today's environment setting.
@@ -141,6 +161,19 @@ def execute_distribution(order_no):
     # The durable request must commit before network I/O, never inside an outer tx.
     if transaction.get_connection().in_atomic_block:
         raise ValidationError("分账执行必须在独立事务外运行。")
+    try:
+        return _execute_distribution(order_no)
+    except Exception as exc:
+        default_code = (
+            "configuration" if isinstance(exc, HuifuConfigurationError) else
+            "local_conditions" if isinstance(exc, ValidationError) else "payment_proof"
+        )
+        code = getattr(exc, "preflight_code", getattr(exc, "code", default_code))
+        record_preflight_failure(order_no, code)
+        raise
+
+
+def _execute_distribution(order_no):
     config = HuifuPaymentConfig.from_settings()
     with transaction.atomic():
         order = ProviderOrder.objects.select_for_update().get(order_no=order_no)
@@ -158,7 +191,7 @@ def execute_distribution(order_no):
         # Refunds, fee snapshots or the receiving account may have changed during I/O.
         current = _snapshot(order, config, now=timezone.now())
         if current != snapshot or not settings.HUIFU_PROVIDER_DISTRIBUTION_ENABLED:
-            raise ValidationError("分账条件已变更，请重新检查订单。")
+            raise DistributionBlocked("snapshot_changed")
         record = ProviderOrderDistribution.objects.create(
             settlement_id=snapshot["settlement_id"],
             req_date=timezone.localdate().strftime("%Y%m%d"),
@@ -173,6 +206,7 @@ def execute_distribution(order_no):
             },
             payment_fee_amount=evidence["payment_fee_amount"],
         )
+        mark_preflight_registered(snapshot["settlement_id"])
     try:
         result = gateway.confirm(record)
     except Exception:
@@ -189,6 +223,11 @@ def query_distribution(order_no):
         raise ValidationError("分账记录所属渠道范围与当前配置不同。")
     try:
         result = HuifuDistributionGateway(config).query(record)
+    except DistributionEvidenceConflict as exc:
+        result = {
+            "status": "unknown", "evidence_conflict_code": exc.code,
+            "response_code": exc.response_code, "response_digest": exc.response_digest,
+        }
     except DistributionUncertain:
         result = {"status": "unknown"}
     return _save_result(record.pk, result, queried=True)
@@ -197,21 +236,34 @@ def query_distribution(order_no):
 @transaction.atomic
 def _save_result(record_id, result, *, queried):
     record = ProviderOrderDistribution.objects.select_for_update().get(pk=record_id)
+    terminal = record.status in {"succeeded", "failed"}
+    conflict = result.get("evidence_conflict_code", "") if queried else ""
+    if terminal and queried and result["status"] in {"succeeded", "failed"}:
+        if result["status"] != record.status:
+            conflict = "query_terminal_conflict"
+        elif record.status == "succeeded":
+            if result.get("split_fee_amount") != record.split_fee_amount:
+                conflict = "query_fee_conflict"
+            elif result.get("gateway_trade_no", "") != record.gateway_trade_no:
+                conflict = "query_trade_conflict"
     ProviderOrderDistributionObservation.objects.create(
         distribution=record,
         kind="query" if queried else "submit",
         status=result["status"],
         response_code=result.get("response_code", ""),
         response_digest=result.get("response_digest", ""),
+        reason_code=conflict,
     )
-    terminal = record.status in {"succeeded", "failed"}
     # Out-of-order query/submit responses never roll back a verified terminal state.
-    if (
-        terminal and queried
-        and result["status"] in {"succeeded", "failed"}
-        and result["status"] != record.status
-    ):
-        record.attention_reason = "后续查询与已核验终态不一致，请人工核账；禁止重发。"
+    if conflict:
+        if not record.evidence_conflict_code:
+            logger.error("Provider split evidence conflict: request=%s reason=%s", record.req_seq_id, conflict)
+        record.evidence_conflict_code = record.evidence_conflict_code or conflict
+        record.attention_reason = "渠道分账证据与原请求或已核验终态不一致，已暂停新增提现，请人工核账；禁止重发。"
+        if not terminal:
+            record.status = "unknown"
+    elif record.evidence_conflict_code:
+        pass  # Sticky hold: a later apparently normal response cannot clear a dispute.
     elif not terminal:
         for key in (
             "status",
@@ -229,7 +281,7 @@ def _save_result(record_id, result, *, queried):
         record.last_queried_at = timezone.now()
     record.save()
     from providers.income_wallet import credit_distribution, hold_distribution_wallet
-    if record.attention_reason and terminal:
+    if record.evidence_conflict_code or (record.attention_reason and terminal):
         hold_distribution_wallet(record)
     elif queried and record.status == "succeeded" and result["status"] == "succeeded":
         credit_distribution(record)
