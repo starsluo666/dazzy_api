@@ -155,6 +155,24 @@ class HeifUploadTests(TestCase):
         self.assertEqual(asset.category, MediaAsset.Category.ORDER_EVIDENCE)
         self.public_upload.assert_not_called()
 
+    def test_every_customer_photo_endpoint_accepts_apple_photo(self):
+        for endpoint, scope in (
+            ("avatars", MediaAsset.Scope.PUBLIC),
+            ("activity-covers", MediaAsset.Scope.PUBLIC),
+            ("provider-lifestyle-photos", MediaAsset.Scope.PUBLIC),
+            ("review-images", MediaAsset.Scope.PUBLIC),
+            ("support-attachments", MediaAsset.Scope.PRIVATE),
+            ("order-evidence", MediaAsset.Scope.PRIVATE),
+        ):
+            with self.subTest(endpoint=endpoint):
+                response = self.upload(endpoint, filename="wx_temp", mime="application/octet-stream")
+                asset = self.assert_jpeg(response, scope=scope)
+                if scope == MediaAsset.Scope.PRIVATE:
+                    self.build_url.assert_called_with(asset.object_key, private=True)
+                if endpoint == "avatars":
+                    self.user.refresh_from_db()
+                    self.assertEqual(self.user.avatar_object_key, asset.object_key)
+
     def test_invalid_heif_and_fake_heif_file_are_rejected_without_storage(self):
         for data in (b"not an image", b"\x00\x00\x00\x18ftypheic", self.photo[:-80]):
             with self.subTest(size=len(data)):

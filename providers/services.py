@@ -66,8 +66,6 @@ def submit_provider_application(*, user) -> ProviderProfile:
         raise ValidationError({"application_birth_date": "申请达人需年满18周岁。"})
     if not profile.lifestyle_photo_id:
         missing.append("近期生活照")
-    if len(profile.bio.strip()) < 10:
-        missing.append("达人简介")
     if not profile.service_city_code or not profile.service_city_name:
         missing.append("服务城市")
     if missing:
@@ -231,6 +229,7 @@ def disable_provider_service(*, provider: ProviderProfile, service: ProviderServ
 
 
 def provider_profile_blockers(profile: ProviderProfile) -> list[str]:
+    from .training import training_required
     blockers = []
     if profile.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED:
         blockers.append("请等待达人开通审核通过")
@@ -246,6 +245,8 @@ def provider_profile_blockers(profile: ProviderProfile) -> list[str]:
         blockers.append("请先添加并启用至少一项服务")
     if profile.admin_order_restricted:
         blockers.append(profile.admin_restriction_reason or "平台当前限制接单")
+    if training_required(profile):
+        blockers.append("请先完成接单学习并通过考核")
     return blockers
 
 

@@ -39,6 +39,28 @@ class OperationsAssetTests(APITestCase):
             content_type="image/png", size_bytes=100,
         )
 
+    @patch("backoffice.asset_views.build_media_url", return_value="https://example.test/photo.jpg")
+    def test_operations_assets_accept_heic_and_store_jpeg(self, _url):
+        from mediafiles.test_heif_uploads import heif_photo
+
+        stored = []
+        def capture(**kwargs):
+            stored.append(kwargs["body"].read())
+            return "etag"
+
+        with patch("mediafiles.views.upload_public_stream", side_effect=capture):
+            for kind in ("image", "icon"):
+                response = self.client.post(reverse("backoffice-assets"), {
+                    "file": SimpleUploadedFile("IMG.HEIC", heif_photo(), "application/octet-stream"),
+                    "kind": kind,
+                }, format="multipart")
+                self.assertEqual(response.status_code, 201, response.data)
+                asset = MediaAsset.objects.get(pk=response.data["data"]["id"])
+                self.assertEqual(asset.content_type, "image/jpeg")
+                self.assertTrue(asset.object_key.endswith(".jpg"))
+                with Image.open(BytesIO(stored[-1])) as decoded:
+                    self.assertEqual(decoded.format, "JPEG")
+
     @patch("backoffice.asset_views.build_media_url", return_value="https://example.test/icon.png")
     @patch("mediafiles.views.upload_public_stream", return_value="etag")
     def test_upload_and_list_only_curated_public_assets(self, upload_stream, _url):

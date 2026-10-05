@@ -75,6 +75,7 @@ class ProviderOrderApiTests(TestCase):
             status=ProviderProfile.Status.APPROVED,
             onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
             identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            training_passed_at=timezone.now(),
             display_name="晓晓",
             is_accepting_orders=True,
             lifestyle_photo=lifestyle_photo,

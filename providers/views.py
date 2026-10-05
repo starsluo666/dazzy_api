@@ -626,6 +626,8 @@ class CurrentProviderWorkbenchView(APIView):
                     ),
                     "pending_service_revision_count": pending_service_revision_count,
                     "is_profile_complete": provider.is_profile_complete,
+                    "training_required": not (provider.training_exempt or provider.training_passed_at),
+                    "training_passed_at": provider.training_passed_at,
                     "can_accept_orders": not provider_profile_blockers(provider),
                     "onboarding_blockers": provider_profile_blockers(provider),
                     "service_city_code": provider.service_city_code,

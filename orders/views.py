@@ -557,6 +557,9 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
                 {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
                 status=409,
             )
+        from providers.training import require_training
+
+        require_training(order.provider)
         order.status = ProviderOrder.Status.PENDING_SERVICE
         order.accepted_at = timezone.now()
         order.save(update_fields=("status", "accepted_at", "updated_at"))

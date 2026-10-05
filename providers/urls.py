@@ -1,4 +1,5 @@
 from django.urls import path
+from .training_views import ProviderTrainingView, ProviderTrainingLessonView, ProviderTrainingSubmitView
 from .withdrawal_views import ProviderWithdrawalView, ProviderWithdrawalRefreshView
 
 from .receiving_account_views import (
@@ -30,6 +31,9 @@ from .views import (
 )
 
 urlpatterns = [
+    path("providers/me/training/", ProviderTrainingView.as_view()),
+    path("providers/me/training/lessons/<uuid:lesson_id>/complete/", ProviderTrainingLessonView.as_view()),
+    path("providers/me/training/submit/", ProviderTrainingSubmitView.as_view()),
     path("providers/me/income/withdrawals/", ProviderWithdrawalView.as_view()),
     path("providers/me/income/withdrawals/<str:withdrawal_no>/refresh/", ProviderWithdrawalRefreshView.as_view()),
     path("providers/me/receiving-account/regions/", ProviderReceivingRegionsView.as_view()),

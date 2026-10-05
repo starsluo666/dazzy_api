@@ -96,7 +96,14 @@ class PublicImageUploadView(APIView):
             size_mb = self.max_size // (1024 * 1024)
             raise ValidationError({"file": f"{self.field_label}大小不能超过{size_mb}MB。"})
         self.validate_image_content(uploaded)
-        uploaded = self.prepare_upload(request, uploaded)
+        prepared = self.prepare_upload(request, uploaded)
+        try:
+            return self.store_asset(request, prepared)
+        finally:
+            if prepared is not uploaded:
+                prepared.close()
+
+    def store_asset(self, request, uploaded):
         extension = self.allowed_types.get(uploaded.content_type)
         if not extension:
             raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
@@ -114,6 +121,7 @@ class PublicImageUploadView(APIView):
             original_filename=uploaded.name,
             content_type=uploaded.content_type,
             size_bytes=uploaded.size,
+            duration_ms=getattr(uploaded, "duration_ms", None),
         )
         try:
             asset.etag = self.upload_stream(
@@ -166,14 +174,19 @@ class ProviderVideoUploadView(ProviderLifestylePhotoUploadView):
     category = MediaAsset.Category.PROVIDER_VIDEO
     field_label = "展示视频"
     supported_formats = "MP4 或 MOV"
-    allowed_types = {"video/mp4": ".mp4", "video/quicktime": ".mov", "application/octet-stream": ".mp4"}
+    allowed_types = {"video/mp4": ".mp4"}
 
     def validate_image_content(self, uploaded):
         from .video import validate_provider_video
 
-        if uploaded.content_type not in self.allowed_types:
-            raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
+        # iOS / WeChat may label MOV as octet-stream or omit the MIME type.
+        # Validate actual bytes, then decode; neither filename nor MIME is trusted.
         validate_provider_video(uploaded)
+
+    def prepare_upload(self, request, uploaded):
+        from .video_normalization import normalize_video_upload
+
+        return normalize_video_upload(uploaded, max_size=self.max_size)
 
     def post(self, request):
         from providers.models import ProviderProfile
@@ -183,7 +196,9 @@ class ProviderVideoUploadView(ProviderLifestylePhotoUploadView):
             status=ProviderProfile.Status.APPROVED,
         ).exists():
             raise ValidationError({"file": "达人申请通过后才可上传展示视频。"})
-        return super().post(request)
+        asset = self.create_asset(request)
+        return Response({"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key),
+                                  "duration_ms": asset.duration_ms}}, status=201)
 
 
 class ProviderIdentityPhotoUploadView(PublicImageUploadView):

@@ -49,6 +49,7 @@ def online_provider_query(now=None) -> Q:
         live_location__accuracy_m__lte=rules["max_accuracy_m"],
     )
     query &= ~Q(bio="") & ~Q(service_city_code="") & ~Q(service_city_name="")
+    query &= Q(training_exempt=True) | Q(training_passed_at__isnull=False)
     cutoff = (now or timezone.now()) - rules["timeout"] if rules["timeout"] is not None else None
     if cutoff is not None:
         query &= Q(live_location__received_at__gte=cutoff)
@@ -69,6 +70,7 @@ def provider_is_online(provider: ProviderProfile, now=None) -> bool:
         or not provider.has_verified_identity
         or not provider.is_profile_complete
         or not provider.is_accepting_orders
+        or not (provider.training_exempt or provider.training_passed_at)
         or provider.admin_order_restricted
         or not provider.user.is_active
         or provider.user.account_status != provider.user.AccountStatus.ACTIVE

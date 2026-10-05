@@ -136,6 +136,9 @@ class ProviderApplicationSerializer(serializers.ModelSerializer):
             "gender",
             "age",
             "lifestyle_photo_url",
+            # Public profile fields are completed in the provider app, not at application.
+            "bio",
+            "max_service_radius_km",
             "agreement_accepted_at",
             "submitted_at",
             "reviewed_at",
@@ -176,12 +179,6 @@ class ProviderApplicationSerializer(serializers.ModelSerializer):
             return None
         today = timezone.localdate()
         return today.year - value.year - ((today.month, today.day) < (value.month, value.day))
-
-    def validate_bio(self, value: str) -> str:
-        value = value.strip()
-        if value and len(value) < 10:
-            raise serializers.ValidationError("达人简介至少填写10个字。")
-        return value
 
 class ProviderApplicationSubmitSerializer(serializers.Serializer):
     agreement_accepted = serializers.BooleanField()

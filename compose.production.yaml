@@ -26,6 +26,10 @@ x-app: &app
 services:
   api:
     <<: *app
+    # Two sync workers may each hold a 50MB upload and bounded transcode files.
+    # Keep temporary media ephemeral; the old 64MB mount cannot fit this pipeline.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m,mode=1777
     build:
       context: .
       target: runtime

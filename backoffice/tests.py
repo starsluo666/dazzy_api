@@ -140,6 +140,7 @@ class BackofficeProviderReviewTests(APITestCase):
             application_birth_date=datetime(1998, 6, 18).date(),
             display_name="邯郸达人",
             identity_status=ProviderProfile.IdentityStatus.VERIFIED,
+            training_passed_at=timezone.now(),
             lifestyle_photo=cls.handan_lifestyle_photo,
             service_city_code="130400",
             service_city_name="邯郸市",

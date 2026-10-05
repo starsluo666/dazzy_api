@@ -18,13 +18,31 @@
 
 ### 初始申请
 
-1. 用户填写真实姓名、出生日期、近期生活照、简介、常用城市等申请信息。
+1. 用户填写真实姓名、出生日期、近期生活照、服务城市等申请信息。申请不再要求简介和服务半径；两项在达人端完善正式资料，城市仍用于审核归属。
 2. 客服审核申请；通过时必须勾选允许经营的服务分类。
 3. 申请通过后，达人分别提交实名认证、达人资料和服务配置。
 4. 三项均有待审核记录后，`onboarding_status` 自动变为 `pending_review`。
 5. 客服在“开通审核”中统一审批：
    - 通过：实名认证、资料及待审核服务在同一事务中生效，达人变为可开通状态。
    - 驳回：三部分均记录驳回结果和原因，达人修正后重新提交。
+6. 从未接过单的达人须完成接单学习并通过答题，才可开启在线接单及接受订单。其他开通、实名认证及服务限制继续生效。
+
+### 首次接单学习
+
+- 后台「运营配置 → 接单学习」，仅平台 `operations.manage` 权限可管理，城市代理即使持有该权限也不可操作。
+- 可管理最多 30 篇分段文字资料、50 道单选题（2–6 个选项，两个选项可作判断题），支持排序、移除、答案说明和通过分数。默认 100 分全部答对，可重新作答。
+- 保存草稿不改变线上内容；至少一篇资料及一道有效题目才可发布。每次发布生成不可变快照，用配置 revision 防止运营相互覆盖。
+- 达人逐篇确认学习后作答；服务端校验全部阅读记录、题目和答案范围并判分。不向达人端发送标准答案或内部说明。按题目等权计分，显示分数向下取整。
+- 通过时间、答题记录和学习版本保存在数据库。通过后不因后续版本更新要求重考；未通过者遇到发布新版本返回 409，需刷新重新学习。重复通过请求不重复记通过记录。
+- 后端在开启在线、在线展示/可下单判断和接受订单时分别拦截，旧客户端不能绕过。未发布内容时新达人暂不能接单，须先由运营发布；不植入默认标准答案。
+- `providers.0023_first_order_training` 将迁移时存在 `accepted_at` 的历史订单所属达人标记免考，其余须学习。不以入驻通过、订单数量、支付成功代替已接过单的证据。
+- 入口：达人工作台提示卡及「我的 → 接单学习」。这不是人工开通审核的一部分，学习不自动批准实名认证/资料/服务，也不改变已接订单的履约流程。
+
+接口：`GET /api/v1/providers/me/training/`；`POST /api/v1/providers/me/training/lessons/{uuid}/complete/`（version_id）；`POST /api/v1/providers/me/training/submit/`（version_id、answers）。管理端 `GET/PATCH /api/v1/admin/provider-training/`（revision、draft），`POST /api/v1/admin/provider-training/publish/`（revision）。
+
+发布顺序：备份数据库 → 测试环境执行全部迁移 → 部署 API 和管理端 → 保存并发布学习内容 → 发布两端应用并验收。生产库迁移、正式资料发布和真机验收不由本地测试代替。并发锁使用数据库事务和行锁，本地 SpatiaLite 测试不替代 PostgreSQL 并发验收。
+
+离线回归：`uv run python scripts/check_wechat_auth.py providers.test_training providers.test_media providers.tests orders.tests orders.test_fulfillment`；达人端 `npm run test:training`、`npm run type-check` 和 H5/小程序构建。城市分类的 JSON contains 用例仅在支持该查询的数据库（生产 PostgreSQL）运行。
 
 ### 开通后资料变更
 

@@ -4,7 +4,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
-from django.test import TestCase
+from django.test import TestCase, skipUnlessDBFeature
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -58,6 +58,7 @@ def make_provider_eligible(provider):
         )
     provider.identity_status = ProviderProfile.IdentityStatus.VERIFIED
     provider.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
+    provider.training_passed_at = timezone.now()
     provider.display_name = provider.display_name or provider.user.nickname
     provider.bio = provider.bio or "这是已经完成实名认证和公开资料的达人简介。"
     provider.service_city_code = provider.service_city_code or "130400"
@@ -67,6 +68,7 @@ def make_provider_eligible(provider):
 
 
 class ProviderModelTests(TestCase):
+    @skipUnlessDBFeature("supports_json_field_contains")
     @patch("providers.serializers.build_media_url", side_effect=lambda key: f"https://media.test/{key}")
     def test_public_service_categories_follow_visibility_city_and_icon(self, _build_url):
         empty = self.client.get("/api/v1/service-categories/?city_code=130400")
@@ -660,7 +662,7 @@ class ProviderSelfManagementTests(TestCase):
         profile.refresh_from_db()
         self.assertFalse(profile.is_accepting_orders)
 
-    def test_provider_application_rejects_radius_outside_supported_range(self):
+    def test_provider_application_ignores_radius_from_legacy_clients(self):
         too_small = self.client.patch(
             "/api/v1/providers/me/application/",
             {"max_service_radius_km": 9},
@@ -672,8 +674,9 @@ class ProviderSelfManagementTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(too_small.status_code, 400)
-        self.assertEqual(too_large.status_code, 400)
+        self.assertEqual(too_small.status_code, 200)
+        self.assertEqual(too_large.status_code, 200)
+        self.assertEqual(ProviderProfile.objects.get(user=self.user).max_service_radius_km, 10)
 
     def test_approved_provider_can_manage_own_services(self):
         profile = ProviderProfile.objects.create(

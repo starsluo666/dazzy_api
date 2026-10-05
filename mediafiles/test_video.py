@@ -17,7 +17,7 @@ def box(kind, payload):
 
 
 def video_container(brand=b"mp42", handler=b"vide"):
-    # Small structural fixture: upload validation does not decode video frames.
+    # Structural-only fixture. Codec integration lives in test_video_normalization.
     return (
         box(b"ftyp", brand + b"\0" * 4 + brand)
         + box(b"moov", box(b"trak", box(b"mdia", box(b"hdlr", b"\0" * 8 + handler))))
@@ -50,13 +50,25 @@ class ProviderVideoTests(TestCase):
     @patch("mediafiles.views.build_media_url", return_value="https://media.test/video.mp4")
     @patch("mediafiles.views.upload_public_stream", return_value="video-etag")
     def test_upload_accepts_mp4_and_mov_and_normalizes_device_mime(self, upload, _url):
-        for brand, expected_type in ((b"mp42", "video/mp4"), (b"qt  ", "video/quicktime")):
-            with self.subTest(brand=brand):
+        prepared = []
+        def convert(original, *, max_size):
+            self.assertEqual(original.content_type, "video/quicktime" if brand == b"qt  " else "video/mp4")
+            self.assertEqual(max_size, 50 * 1024 * 1024)
+            result = SimpleUploadedFile(original.name, b"normalized-mp4", "video/mp4")
+            result.duration_ms = 1000
+            prepared.append(result)
+            return result
+
+        for brand, mime in ((b"mp42", "application/octet-stream"), (b"qt  ", "video/quicktime"),
+                            (b"qt  ", "image/jpeg"), (b"qt  ", "video/mov")):
+            with self.subTest(brand=brand, mime=mime), patch(
+                "mediafiles.video_normalization.normalize_video_upload", side_effect=convert,
+            ):
                 response = self.client.post(
                     "/api/v1/media/provider-videos/",
                     {
                         "file": SimpleUploadedFile(
-                            "clip.bin", video_container(brand), "application/octet-stream"
+                            "clip.bin", video_container(brand), mime
                         )
                     },
                     format="multipart",
@@ -66,16 +78,19 @@ class ProviderVideoTests(TestCase):
                 self.assertEqual(asset.category, "provider_video")
                 self.assertEqual(asset.status, "uploaded")
                 self.assertEqual(asset.owner, self.user)
-                self.assertEqual(asset.content_type, expected_type)
-                self.assertEqual(upload.call_args.kwargs["content_type"], expected_type)
+                self.assertEqual(asset.content_type, "video/mp4")
+                self.assertEqual(asset.duration_ms, 1000)
+                self.assertEqual(asset.size_bytes, len(b"normalized-mp4"))
+                self.assertTrue(asset.object_key.endswith(".mp4"))
+                self.assertTrue(prepared[-1].closed)
+                self.assertEqual(upload.call_args.kwargs["content_type"], "video/mp4")
 
     @patch("mediafiles.views.upload_public_stream")
-    def test_rejects_fake_truncated_audio_only_or_wrong_mime(self, upload):
+    def test_rejects_fake_truncated_or_audio_only_container(self, upload):
         for payload, mime in (
             (b"not a video", "video/mp4"),
             (video_container()[:-2], "video/mp4"),
             (video_container(handler=b"soun"), "video/mp4"),
-            (video_container(), "image/jpeg"),
         ):
             response = self.client.post(
                 "/api/v1/media/provider-videos/",

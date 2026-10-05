@@ -8,7 +8,8 @@ from mediafiles.services import build_media_url
 from .models import ProviderProfileMedia, ProviderProfileRevisionMedia
 
 MAX_MEDIA = 9
-MAX_VIDEOS = 3
+MAX_VIDEOS = 2
+MAX_VIDEO_DURATION_MS = 10_000
 
 
 def gallery_assets(profile_or_revision):
@@ -27,6 +28,7 @@ def gallery_payload(profile_or_revision):
             "id": str(asset.pk),
             "type": "video" if asset.category == MediaAsset.Category.PROVIDER_VIDEO else "image",
             "url": build_media_url(asset.object_key),
+            "duration_ms": asset.duration_ms,
         }
         for asset in gallery_assets(profile_or_revision)
     ]
@@ -61,7 +63,13 @@ def resolve_gallery(provider, data):
     if assets[0].category != MediaAsset.Category.PROVIDER_PHOTO:
         raise ValidationError({"media_ids": "第一张必须是照片，将作为列表封面。"})
     if sum(asset.category == MediaAsset.Category.PROVIDER_VIDEO for asset in assets) > MAX_VIDEOS:
-        raise ValidationError({"media_ids": "最多上传3个视频。"})
+        raise ValidationError({"media_ids": "最多上传2个视频。"})
+    for asset in assets:
+        if asset.category == MediaAsset.Category.PROVIDER_VIDEO:
+            if asset.duration_ms is None:
+                raise ValidationError({"media_ids": "旧视频时长尚未核验，请移除并重新上传不超过10秒的视频。"})
+            if not 0 < asset.duration_ms <= MAX_VIDEO_DURATION_MS:
+                raise ValidationError({"media_ids": "每个视频时长不能超过10秒，请裁剪后重新上传。"})
     return assets
 
 

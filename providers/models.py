@@ -186,6 +186,8 @@ class ProviderProfile(models.Model):
     )
     onboarding_rejection_reason = models.CharField("开通审核驳回原因", max_length=500, blank=True)
     is_accepting_orders = models.BooleanField("已开启接单", default=False)
+    training_exempt = models.BooleanField("历史已接单达人免首次学习", default=False, editable=False)
+    training_passed_at = models.DateTimeField("首次接单考核通过时间", null=True, blank=True, editable=False)
     admin_order_restricted = models.BooleanField("后台限制接单", default=False)
     admin_restriction_reason = models.CharField("后台限制原因", max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -224,6 +226,52 @@ class ProviderProfile(models.Model):
     @property
     def public_display_name(self) -> str:
         return self.display_name.strip() or self.user.nickname
+
+
+class ProviderTrainingVersion(models.Model):
+    """Published immutable curriculum, including server-only marking answers."""
+
+    payload = models.JSONField()
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "provider_training_version"
+
+
+class ProviderTrainingConfig(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    draft = models.JSONField(default=dict)
+    revision = models.PositiveIntegerField(default=0)
+    active_version = models.ForeignKey(ProviderTrainingVersion, null=True, blank=True, on_delete=models.PROTECT)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_training_config"
+
+
+class ProviderTrainingProgress(models.Model):
+    provider = models.ForeignKey(ProviderProfile, on_delete=models.CASCADE, related_name="training_progress")
+    version = models.ForeignKey(ProviderTrainingVersion, on_delete=models.PROTECT)
+    completed_lesson_ids = models.JSONField(default=list)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_training_progress"
+        constraints = [models.UniqueConstraint(fields=("provider", "version"), name="uniq_provider_training_progress")]
+
+
+class ProviderTrainingAttempt(models.Model):
+    provider = models.ForeignKey(ProviderProfile, on_delete=models.PROTECT, related_name="training_attempts")
+    version = models.ForeignKey(ProviderTrainingVersion, on_delete=models.PROTECT)
+    answers = models.JSONField()
+    score = models.PositiveSmallIntegerField()
+    passed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "provider_training_attempt"
+        ordering = ("-id",)
 
 
 class ProviderReceivingAccount(models.Model):

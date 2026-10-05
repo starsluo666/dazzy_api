@@ -55,6 +55,8 @@ class ProviderGalleryTests(TestCase):
             object_key=f"test/gallery/{key}",
         )
         fields.update(kwargs)
+        if fields["category"] == "provider_video":
+            fields.setdefault("duration_ms", 1000)
         return MediaAsset.objects.create(**fields)
 
     def setUp(self):
@@ -195,16 +197,40 @@ class ProviderGalleryTests(TestCase):
     def test_enforces_gallery_and_video_limits(self):
         photos = [self.asset(f"limit-photo-{i}") for i in range(10)]
         self.assertEqual(self.submit([item.pk for item in photos]).status_code, 400)
-        videos = [self.asset(f"limit-video-{i}", category="provider_video") for i in range(4)]
+        videos = [self.asset(f"limit-video-{i}", category="provider_video") for i in range(3)]
         self.assertEqual(
             self.submit([self.photo.pk] + [item.pk for item in videos]).status_code, 400
         )
         self.assertEqual(
             self.submit(
-                [item.pk for item in photos[:6]] + [item.pk for item in videos[:3]]
+                [item.pk for item in photos[:7]] + [item.pk for item in videos[:2]]
             ).status_code,
             200,
         )
+
+    def test_video_requires_verified_duration_no_longer_than_ten_seconds(self):
+        for duration in (None, 0, 10001):
+            with self.subTest(duration=duration):
+                video = self.asset(f"duration-{duration}", category="provider_video", duration_ms=duration)
+                self.assertEqual(self.submit([self.photo.pk, video.pk]).status_code, 400)
+        video = self.asset("ten-seconds", category="provider_video", duration_ms=10000)
+        response = self.submit([self.photo.pk, video.pk])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["data"]["media"][1]["duration_ms"], 10000)
+
+    def test_approval_rechecks_duration(self):
+        self.assertEqual(self.submit([self.photo.pk, self.video.pk]).status_code, 200)
+        self.video.duration_ms = 11000
+        self.video.save(update_fields=("duration_ms",))
+        self.client.force_authenticate(self.admin)
+        revision = self.profile.profile_revisions.get(status="pending")
+        response = self.client.post(
+            reverse("backoffice-provider-change-review-action", args=("profile", revision.pk)),
+            {"decision": "approve"}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        revision.refresh_from_db()
+        self.assertEqual(revision.status, "pending")
 
     def test_legacy_edit_keeps_additional_media(self):
         for position, asset in enumerate([self.photo, self.video]):
