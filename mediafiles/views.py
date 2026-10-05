@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from .models import MediaAsset
 from .identity_watermark import WatermarkFontUnavailable, add_identity_watermark
+from .images import normalize_heif_upload
 from .services import (
     build_home_card_assets,
     build_media_url,
@@ -45,14 +46,16 @@ class PublicImageUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     allowed_types = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
     max_pixels = 25_000_000
-    image_formats = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
+    image_formats = {
+        "JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp", "HEIF": "image/heif",
+    }
     max_size = 10 * 1024 * 1024
     folder = "images"
     category = MediaAsset.Category.OTHER
     scope = MediaAsset.Scope.PUBLIC
     prefix_setting = "COS_PUBLIC_PREFIX"
     field_label = "图片"
-    supported_formats = "JPG、PNG 或 WebP"
+    supported_formats = "JPG、PNG、WebP 或 HEIC/HEIF"
 
     def upload_stream(self, *, body, object_key: str, content_type: str) -> str:
         return upload_public_stream(body=body, object_key=object_key, content_type=content_type)
@@ -61,26 +64,29 @@ class PublicImageUploadView(APIView):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
-                image = Image.open(uploaded)
-                width, height = image.size
-                content_type = self.image_formats.get(image.format)
-                if not content_type:
-                    raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
-                if width <= 0 or height <= 0 or width * height > self.max_pixels:
-                    raise ValidationError({"file": "图片像素尺寸过大。"})
-                image.verify()
+                with Image.open(uploaded) as image:
+                    width, height = image.size
+                    content_type = self.image_formats.get(image.format)
+                    if not content_type:
+                        raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
+                    if width <= 0 or height <= 0 or width * height > self.max_pixels:
+                        raise ValidationError({"file": "图片像素尺寸过大。"})
+                    image.verify()
                 # Mobile browsers may report a different MIME type for a valid image.
                 # Use the verified format for both the COS object and database record.
                 uploaded.content_type = content_type
         except ValidationError:
             raise
-        except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        except (
+            UnidentifiedImageError, OSError, SyntaxError, ValueError, EOFError, RuntimeError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning,
+        ) as exc:
             raise ValidationError({"file": "图片文件已损坏或格式无效。"}) from exc
         finally:
             uploaded.seek(0)
 
     def prepare_upload(self, request, uploaded):
-        return uploaded
+        return normalize_heif_upload(uploaded, max_size=self.max_size)
 
     def create_asset(self, request):
         uploaded = request.FILES.get("file")
@@ -194,13 +200,13 @@ class ProviderIdentityPhotoUploadView(PublicImageUploadView):
         if kind not in ("identity_front_photo", "identity_back_photo", "identity_face_photo"):
             raise ValidationError({"kind": "认证照片类型无效，请重新选择照片。"})
         if kind == "identity_face_photo":
-            return uploaded
+            return super().prepare_upload(request, uploaded)
         try:
             return add_identity_watermark(uploaded, max_size=self.max_size)
         except WatermarkFontUnavailable as exc:
             logger.error("Identity watermark font unavailable; upload refused")
             raise IdentityWatermarkUnavailable() from exc
-        except (OSError, SyntaxError, ValueError) as exc:
+        except (OSError, SyntaxError, ValueError, EOFError, RuntimeError) as exc:
             raise ValidationError({"file": "图片处理失败，请重新选择清晰的身份证照片。"}) from exc
 
     def upload_stream(self, *, body, object_key: str, content_type: str) -> str:

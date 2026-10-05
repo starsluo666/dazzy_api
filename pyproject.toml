@@ -14,6 +14,7 @@ dependencies = [
   "drf-spectacular>=0.28,<0.29",
   "gunicorn>=26.2.0",
   "pillow>=11,<12",
+  "pillow-heif>=1.8,<1.9",
   "pycryptodome>=3.20,<4",
   "psycopg[binary]>=3.2,<3.3",
   "redis>=6,<7",

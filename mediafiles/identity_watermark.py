@@ -6,8 +6,10 @@ from pathlib import Path
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 from rest_framework.exceptions import ValidationError
+
+from .images import oriented_rgb_image
 
 
 WATERMARK_TEXT = "仅用于达人验证"
@@ -61,16 +63,11 @@ def add_identity_watermark(uploaded, *, max_size):
     EXIF rotation is applied before re-encoding, preserving display orientation.
     """
     with Image.open(uploaded) as source:
-        if getattr(source, "is_animated", False):
+        # HEIF multi-image containers (e.g. phone portraits) are not necessarily
+        # animations. The plugin selects the primary still, which we watermark.
+        if source.format != "HEIF" and getattr(source, "is_animated", False):
             raise ValidationError({"file": "身份证照片不支持动图，请上传静态图片。"})
-        with ImageOps.exif_transpose(source) as oriented:
-            if oriented.mode in ("RGBA", "LA") or "transparency" in oriented.info:
-                with oriented.convert("RGBA") as rgba:
-                    image = Image.new("RGB", rgba.size, "white")
-                    with rgba.getchannel("A") as alpha:
-                        image.paste(rgba, mask=alpha)
-            else:
-                image = oriented.convert("RGB")
+        image = oriented_rgb_image(source)
 
     with image:
         image.info.clear()  # Do not retain EXIF/GPS, comments or embedded thumbnails.

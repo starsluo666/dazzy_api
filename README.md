@@ -39,7 +39,7 @@ Redis 只承担 Celery 消息传递。
 
 `POST /api/v1/media/provider-identities/` 接收 `file` 和可选 `kind`：
 `identity_front_photo` / `identity_back_photo` 会在服务端添加“仅用于达人验证”浅色斜向水印；
-`identity_face_photo` 保持原样。旧版客户端不传 `kind` 时，默认加水印（包括旧版上传的核验照）。
+`identity_face_photo` 不加水印。旧版客户端不传 `kind` 时，默认加水印（包括旧版上传的核验照）。
 仅影响新上传文件，历史照片不回写；生活照、头像和履约照片不受影响。
 
 身份证图片在上传私有 COS 前处理，只存带水印的 JPEG，不额外保存无水印原件；
@@ -54,5 +54,19 @@ TTF/TTC/OTF 字体。Windows 开发环境可使用系统微软雅黑，不分发
 离线回归（不会连接业务数据库或 COS）：
 
 ```bash
-uv run python scripts/check_wechat_auth.py mediafiles.tests mediafiles.test_identity_watermark providers.tests.ProviderSelfManagementTests
+uv run python scripts/check_wechat_auth.py mediafiles.tests mediafiles.test_identity_watermark mediafiles.test_heif_uploads providers.tests.ProviderSelfManagementTests
 ```
+
+## 苹果手机 HEIC / HEIF 照片
+
+图片上传接口按文件内容识别 JPG、PNG、WebP、HEIC/HEIF，不依赖客户端文件名或 MIME。
+HEIC/HEIF 通过 `pillow-heif` 解码主照片并转为 JPEG；不把原始 HEIF 容器存到 COS，
+避免上传后在后台或其他设备上无法预览。身份证正反面直接在解码后的照片上加水印，
+只编码一次；本人核验照、生活照和履约照片转换格式但不加身份证水印。
+处理时保留方向并移除 EXIF/GPS/XMP，普通照片保留其 ICC 色彩配置（如有）。原有文件大小、2500 万像素
+及访问权限限制继续生效，转换结果也校验大小；损坏或无法解码的文件仍拒绝上传。
+
+部署需要重新构建后端镜像（锁文件增加 HEIF 解码依赖），无需修改小程序选图流程或数据库。
+非 Docker 环境执行 `uv sync --locked` 后重启 API；Python 3.12 的 Linux/Windows 使用预编译轮子。
+仍需用真实 iPhone/微信版本做上线验收；自动化用例使用合成 HEIF，覆盖旋转、网格分块、
+多图主照片、文件类型误报、损坏内容和水印流程，不包含真实证件资料。
