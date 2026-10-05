@@ -33,6 +33,8 @@ def main():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     os.environ["DJANGO_SETTINGS_MODULE"] = "config.settings.test"
     # Required only to import base settings. These services are not contacted.
+    # COS validates the bucket syntax even when only signing a URL locally.
+    os.environ.setdefault("COS_BUCKET", "offline-test-1250000000")
     for name in (
         "POSTGRES_HOST",
         "POSTGRES_DB",
@@ -40,7 +42,6 @@ def main():
         "POSTGRES_PASSWORD",
         "REDIS_HOST",
         "COS_REGION",
-        "COS_BUCKET",
         "COS_BASE_URL",
         "TENCENT_CLOUD_SECRET_ID",
         "TENCENT_CLOUD_SECRET_KEY",

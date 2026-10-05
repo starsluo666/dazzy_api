@@ -6,13 +6,14 @@ import warnings
 from django.conf import settings
 from django.utils import timezone
 from PIL import Image, UnidentifiedImageError
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import MediaAsset
+from .identity_watermark import WatermarkFontUnavailable, add_identity_watermark
 from .services import (
     build_home_card_assets,
     build_media_url,
@@ -23,6 +24,12 @@ from .services import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class IdentityWatermarkUnavailable(APIException):
+    status_code = 503
+    default_detail = "认证照片水印服务暂不可用，请稍后重试或联系客服。"
+    default_code = "identity_watermark_unavailable"
 
 
 class HomeCardAssetView(APIView):
@@ -67,10 +74,13 @@ class PublicImageUploadView(APIView):
                 uploaded.content_type = content_type
         except ValidationError:
             raise
-        except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
+        except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
             raise ValidationError({"file": "图片文件已损坏或格式无效。"}) from exc
         finally:
             uploaded.seek(0)
+
+    def prepare_upload(self, request, uploaded):
+        return uploaded
 
     def create_asset(self, request):
         uploaded = request.FILES.get("file")
@@ -80,6 +90,7 @@ class PublicImageUploadView(APIView):
             size_mb = self.max_size // (1024 * 1024)
             raise ValidationError({"file": f"{self.field_label}大小不能超过{size_mb}MB。"})
         self.validate_image_content(uploaded)
+        uploaded = self.prepare_upload(request, uploaded)
         extension = self.allowed_types.get(uploaded.content_type)
         if not extension:
             raise ValidationError({"file": f"{self.field_label}仅支持 {self.supported_formats}。"})
@@ -176,6 +187,21 @@ class ProviderIdentityPhotoUploadView(PublicImageUploadView):
     scope = MediaAsset.Scope.PRIVATE
     prefix_setting = "COS_PRIVATE_PREFIX"
     field_label = "认证照片"
+
+    def prepare_upload(self, request, uploaded):
+        # Older clients do not send a kind: protect their uploads by default.
+        kind = request.data.get("kind", "identity_front_photo")
+        if kind not in ("identity_front_photo", "identity_back_photo", "identity_face_photo"):
+            raise ValidationError({"kind": "认证照片类型无效，请重新选择照片。"})
+        if kind == "identity_face_photo":
+            return uploaded
+        try:
+            return add_identity_watermark(uploaded, max_size=self.max_size)
+        except WatermarkFontUnavailable as exc:
+            logger.error("Identity watermark font unavailable; upload refused")
+            raise IdentityWatermarkUnavailable() from exc
+        except (OSError, SyntaxError, ValueError) as exc:
+            raise ValidationError({"file": "图片处理失败，请重新选择清晰的身份证照片。"}) from exc
 
     def upload_stream(self, *, body, object_key: str, content_type: str) -> str:
         return upload_private_stream(body=body, object_key=object_key, content_type=content_type)

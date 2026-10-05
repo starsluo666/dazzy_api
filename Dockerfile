@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     DJANGO_SETTINGS_MODULE=config.settings.production
 # GeoDjango needs GDAL/GEOS/PROJ even though PostgreSQL itself is external.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgdal32 libgeos-c1v5 libproj25 ca-certificates \
+    && apt-get install -y --no-install-recommends libgdal32 libgeos-c1v5 libproj25 ca-certificates fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 dazzy \
     && useradd --uid 10001 --gid dazzy --no-create-home dazzy
