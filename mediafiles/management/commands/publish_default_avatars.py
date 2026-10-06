@@ -7,10 +7,14 @@ from uuid import UUID
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from PIL import Image
+from rest_framework.exceptions import PermissionDenied
 
 from accounts.models import User
+from backoffice.access import resolve_admin_access
+from backoffice.models import Organization
 from mediafiles.default_avatars import DEFAULT_AVATAR_NAMES, default_avatar_keys
 from mediafiles.models import MediaAsset
 from mediafiles.services import upload_public_file
@@ -20,17 +24,47 @@ class Command(BaseCommand):
     help = "发布 6 张默认头像至 COS 和资源素材库，仅供之后注册的新用户随机使用。"
 
     def add_arguments(self, parser):
-        parser.add_argument("--owner", type=UUID, help="素材归属的有效超级管理员 public_id；默认最早创建者。")
+        parser.add_argument(
+            "--owner", type=UUID,
+            help="素材归属账号 public_id：有效超级管理员或有素材管理权限的平台后台成员。",
+        )
         parser.add_argument("--dry-run", action="store_true", help="仅校验和预览，不上传、不写数据库。")
 
-    def handle(self, *args, **options):
-        owners = User.objects.filter(is_superuser=True, is_active=True)
-        if options["owner"]:
-            owners = owners.filter(public_id=options["owner"])
-        owner = owners.order_by("pk").first()
-        if owner is None:
-            raise CommandError("请先创建有效超级管理员，或用 --owner 指定其 public_id。")
+    @staticmethod
+    def find_owner(owner_id):
+        owners = User.objects.filter(
+            is_active=True, account_status=User.AccountStatus.ACTIVE,
+        )
+        if owner_id:
+            owners = owners.filter(public_id=owner_id)
+        else:
+            owners = owners.filter(
+                Q(is_superuser=True) | Q(
+                    backoffice_memberships__is_active=True,
+                    backoffice_memberships__organization__status=Organization.Status.ACTIVE,
+                    backoffice_memberships__organization__organization_type=Organization.Type.PLATFORM,
+                )
+            )
+        for owner in owners.distinct().order_by("-is_superuser", "pk").iterator():
+            # Reuse the same effective membership/role as the admin asset library.
+            # CLI ownership selection must not grant or change account permissions.
+            try:
+                access = resolve_admin_access(owner)
+                access.require("asset.manage")
+            except PermissionDenied:
+                continue
+            if access.member and access.member.organization.organization_type != Organization.Type.PLATFORM:
+                continue
+            return owner
+        target = "指定的素材归属账号不可用" if owner_id else "未找到可用的素材归属账号"
+        raise CommandError(
+            f"{target}：需正常启用的超级管理员，或拥有 asset.manage 权限的平台后台成员。"
+            "可用 --owner <后台用户 public_id> 指定；无需将平台后台成员提升为超级管理员。"
+        )
 
+    def handle(self, *args, **options):
+        owner = self.find_owner(options["owner"])
+        self.stdout.write(f"素材归属账号：{owner.public_id}")
         root = Path(settings.BASE_DIR) / "assets" / "default-avatars" / "v1"
         prepared = []
         # Validate the entire collection before any external writes.

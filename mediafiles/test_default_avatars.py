@@ -113,6 +113,120 @@ class DefaultAvatarTests(TestCase):
             self.publish()
         upload.assert_not_called()
 
+    def platform_owner(self, permissions=("asset.manage",)):
+        from backoffice.models import AdminRole, Organization, OrganizationMember
+
+        index = User.objects.count()
+        user = User.objects.create_user(phone=f"139770057{index:02d}", avatar_object_key="")
+        organization = Organization.objects.create(
+            name="默认头像测试平台", code=f"avatar-test-{index}",
+            organization_type=Organization.Type.PLATFORM,
+        )
+        role = AdminRole.objects.create(
+            organization=organization, name="素材运营", code="avatar-manager",
+            data_scope=AdminRole.DataScope.ALL, permissions=list(permissions),
+        )
+        member = OrganizationMember.objects.create(user=user, organization=organization, role=role)
+        return user, member
+
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file", return_value="etag")
+    def test_granted_platform_admin_can_publish_without_django_superuser(self, upload):
+        # Reproduce the production setup: grant_platform_admin sets an RBAC role,
+        # not Django is_staff / is_superuser flags.
+        self.owner.is_superuser = False
+        self.owner.is_staff = False
+        self.owner.save(update_fields=("is_superuser", "is_staff"))
+        call_command("grant_platform_admin", self.owner.phone, stdout=StringIO())
+        self.publish()
+        self.assertEqual(upload.call_count, 6)
+        self.assertEqual(MediaAsset.objects.filter(owner=self.owner).count(), 6)
+        self.owner.refresh_from_db()
+        self.assertFalse(self.owner.is_superuser)
+        self.assertFalse(self.owner.is_staff)
+
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file", return_value="etag")
+    def test_explicit_owner_supports_platform_asset_manager(self, upload):
+        user, _member = self.platform_owner()
+        self.publish(owner=str(user.public_id))
+        self.assertEqual(upload.call_count, 6)
+        self.assertEqual(MediaAsset.objects.filter(owner=user).count(), 6)
+        user.refresh_from_db()
+        self.assertFalse(user.is_superuser)
+
+    def test_default_owner_prefers_superuser_then_valid_platform_member(self):
+        from mediafiles.management.commands.publish_default_avatars import Command
+
+        self.platform_owner(permissions=("asset.view",))
+        valid, _member = self.platform_owner()
+        self.assertEqual(Command.find_owner(None), self.owner)
+        self.owner.is_active = False
+        self.owner.save(update_fields=("is_active",))
+        self.assertEqual(Command.find_owner(None), valid)
+
+    def test_platform_wildcard_role_is_supported(self):
+        from mediafiles.management.commands.publish_default_avatars import Command
+
+        user, _member = self.platform_owner(permissions=("*",))
+        self.assertEqual(Command.find_owner(user.public_id), user)
+
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file")
+    def test_invalid_explicit_owner_never_uploads_or_falls_back(self, upload):
+        from backoffice.models import Organization
+
+        for kind in (
+            "view_only", "inactive_user", "suspended_user", "inactive_membership",
+            "disabled_organization", "city_organization", "city_wildcard",
+        ):
+            with self.subTest(kind=kind):
+                user, member = self.platform_owner()
+                if kind == "view_only":
+                    member.role.permissions = ["asset.view"]
+                    member.role.save(update_fields=("permissions",))
+                elif kind == "inactive_user":
+                    user.is_active = False
+                    user.save(update_fields=("is_active",))
+                elif kind == "suspended_user":
+                    user.account_status = User.AccountStatus.SUSPENDED
+                    user.save(update_fields=("account_status",))
+                elif kind == "inactive_membership":
+                    member.is_active = False
+                    member.save(update_fields=("is_active",))
+                elif kind == "disabled_organization":
+                    member.organization.status = Organization.Status.DISABLED
+                    member.organization.save(update_fields=("status",))
+                else:
+                    member.organization.organization_type = Organization.Type.CITY_AGENT
+                    member.organization.save(update_fields=("organization_type",))
+                    if kind == "city_wildcard":
+                        member.role.permissions = ["*"]
+                        member.role.save(update_fields=("permissions",))
+                with self.assertRaisesMessage(CommandError, "指定的素材归属账号不可用"):
+                    self.publish(owner=str(user.public_id))
+        plain = User.objects.create_user(phone="13977005799", avatar_object_key="")
+        with self.assertRaisesMessage(CommandError, "指定的素材归属账号不可用"):
+            self.publish(owner=str(plain.public_id))
+        upload.assert_not_called()
+        self.assertEqual(MediaAsset.objects.count(), 0)
+
+    def test_selection_uses_effective_first_membership_like_admin_api(self):
+        from backoffice.models import OrganizationMember
+        from mediafiles.management.commands.publish_default_avatars import Command
+
+        user, _member = self.platform_owner(permissions=("asset.view",))
+        _other, writable = self.platform_owner()
+        OrganizationMember.objects.create(
+            user=user, organization=writable.organization, role=writable.role,
+        )
+        with self.assertRaises(CommandError):
+            Command.find_owner(user.public_id)
+
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file")
+    def test_platform_owner_dry_run_does_not_write(self, upload):
+        user, _member = self.platform_owner()
+        self.publish(owner=str(user.public_id), dry_run=True)
+        upload.assert_not_called()
+        self.assertEqual(MediaAsset.objects.count(), 0)
+
     def test_system_assets_are_protected_in_library(self):
         from backoffice.asset_views import asset_references
 
