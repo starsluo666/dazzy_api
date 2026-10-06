@@ -1,3 +1,4 @@
+from django.apps import apps
 from django.contrib.auth.base_user import BaseUserManager
 
 
@@ -7,6 +8,12 @@ class UserManager(BaseUserManager):
     def create_user(self, phone: str, password: str | None = None, **extra_fields):
         if not phone:
             raise ValueError("手机号不能为空")
+        # Historical migration models must not query today's media schema.
+        # Explicit avatar values (including an intentionally empty one) are preserved.
+        if "avatar_object_key" not in extra_fields and self.model._meta.apps is apps:
+            from mediafiles.default_avatars import choose_default_avatar
+
+            extra_fields["avatar_object_key"] = choose_default_avatar(using=self.db)
         user = self.model(phone=phone, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)

@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from activities.models import ActivityCategory
+from mediafiles.default_avatars import is_default_avatar
 from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 from mediafiles.views import PublicImageUploadView
@@ -39,6 +40,9 @@ class AssetIdsSerializer(serializers.Serializer):
 
 
 def asset_references(asset):
+    # Shared system assets must not be removed through the operations library.
+    if is_default_avatar(asset.object_key):
+        return [{"type": "default_avatar", "id": str(asset.pk), "name": "注册默认头像（系统共用）"}]
     services = ServiceCategory.objects.filter(
         Q(icon_asset=asset) | Q(icon_object_key=asset.object_key)
     ).values("id", "name")

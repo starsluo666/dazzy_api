@@ -316,8 +316,10 @@ class AvatarUploadView(PublicImageUploadView):
     field_label = "头像"
 
     def post(self, request):
+        from .default_avatars import is_default_avatar
+
         old_asset = None
-        if request.user.avatar_object_key:
+        if request.user.avatar_object_key and not is_default_avatar(request.user.avatar_object_key):
             old_asset = (
                 MediaAsset.objects.filter(
                     owner=request.user,
