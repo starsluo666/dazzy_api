@@ -10,6 +10,54 @@ H5 与管理端仍使用各自的静态部署脚本。所有以下命令在服�
 宿主机不再需要 Python、uv 或 GDAL；镜像包含 Python 3.12、锁定的 Python 依赖和地理库。
 首次构建需要能够访问 Docker Hub、GHCR、Debian 软件源及 PyPI。
 
+### 构建下载慢时的软件源与缓存配置
+
+`Dockerfile` 分别缓存 Debian 包、APT 索引与 uv 下载，并按架构隔离缓存。
+缓存挂载不进入最终镜像；业务代码变化不会单独触发依赖重装。
+构建失败重试可以复用已下载的完整包，首次构建仍需下载缺失内容。
+不要为解决下载慢运行 `docker builder prune` 或 `--no-cache`，否则会失去可复用缓存。
+
+默认使用 Debian 官方 HTTPS 源。如果服务器访问较慢，可以在已有 `.env.docker`
+**追加或修改**下面配置（不要覆盖原来的网络、端口等配置）：
+
+```dotenv
+DAZZY_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+# 安全更新优先使用官方源；若同样无法访问，再取消下一行的注释。
+# DAZZY_DEBIAN_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
+```
+
+源地址需按部署机网络实测选择；此处是可选示例，不承诺所有网络都更快。
+主仓库和安全更新源单独配置；不填写则各自沿用官方源。使用受信镜像并关注安全更新同步延迟，
+这也是[镜像站建议优先保留官方安全源](https://mirrors.tuna.tsinghua.edu.cn/help/debian/)的原因。
+仅替换 Debian deb822 配置中的 URI，保留 bookworm 发行版、安全更新和 Debian 签名密钥；
+不关闭 HTTPS 或包签名校验，不允许在源地址中写凭证、查询串等秘密。
+参数只用于镜像构建，不是 `.env.online` 中的业务配置；调整后必须重新构建镜像。
+
+APT 下载连接/读超时 30 秒、失败最多重试 3 次；uv 连接超时 10 秒、读超时 30 秒、重试 3 次。
+此外，APT 更新及安装整个步骤、Python 依赖安装整个步骤，**各自默认限制 1200 秒**。
+超时先终止，30 秒内未退出则强制结束，构建失败并给出提示；不会继续发布不完整镜像。
+这个限制不包括基础镜像拉取、等待缓存锁和后续发布检查，不是整个部署的总时限。
+如果下载链路正常、机器较慢，可在 `.env.docker` 设置：
+
+```dotenv
+DAZZY_BUILD_DEPENDENCY_TIMEOUT=1800
+```
+
+允许范围 60–7200 秒，不允许设为 0 取消限制。Python 仍执行
+`uv sync --locked --no-dev --no-install-project`，不重写锁文件、不升级依赖、不自动改 PyPI 源；
+锁文件包含下载地址，仅更改 index 参数不能可靠地加速锁定包下载。
+FFmpeg/FFprobe、地理库、中文字体及 HEIF 支持保持不变。
+
+配置后仍按原命令发布（有迁移前先备份）：
+
+```bash
+sudo bash ./deploy-docker.sh deploy --migrate
+```
+
+如需保留完整构建日志，使用 `sudo env BUILDKIT_PROGRESS=plain bash ./deploy-docker.sh deploy --migrate`。
+这次优化首次重建会使依赖层失效一次，后续相同配置可复用。构建阶段失败不会停止现有服务，
+也不会执行数据库迁移；可用 `sudo bash ./deploy-docker.sh status` 核对旧服务状态。
+
 ```bash
 cd /home/ubuntu/dazzy_api
 docker version
@@ -216,7 +264,7 @@ bash ./deploy-docker.sh rollback dazzy-api:实际旧版本标签
 安装开发依赖后，可运行以下检查；测试使用模拟 Docker 和隔离配置，不连接业务数据库：
 
 ```bash
-uv run python -m unittest deploy.test_runtime deploy.test_release_script -v
+uv run python -m unittest deploy.test_build_dependencies deploy.test_runtime deploy.test_release_script -v
 uv run ruff check config/settings/production.py deploy
 bash -n deploy-docker.sh
 sh -n deploy/entrypoint.sh
@@ -229,5 +277,7 @@ sh -n deploy/entrypoint.sh
 
 - [Docker Compose 生产部署](https://docs.docker.com/compose/how-tos/production/)
 - [uv 镜像构建与锁文件](https://docs.astral.sh/uv/guides/integration/docker/)
+- [Docker 构建下载缓存](https://docs.docker.com/build/cache/optimize/)
+- [清华 Debian 镜像配置说明](https://mirrors.tuna.tsinghua.edu.cn/help/debian/)
 - [WhiteNoise 与 Django](https://whitenoise.readthedocs.io/en/stable/django.html)
 - [Celery Beat 单实例要求](https://docs.celeryq.dev/en/stable/userguide/periodic-tasks.html)

@@ -33,6 +33,10 @@ services:
     build:
       context: .
       target: runtime
+      args:
+        DEBIAN_MIRROR: ${DAZZY_DEBIAN_MIRROR:-https://deb.debian.org/debian}
+        DEBIAN_SECURITY_MIRROR: ${DAZZY_DEBIAN_SECURITY_MIRROR:-https://deb.debian.org/debian-security}
+        BUILD_DEPENDENCY_TIMEOUT: ${DAZZY_BUILD_DEPENDENCY_TIMEOUT:-1200}
     command: [api]
     networks:
       backend:
