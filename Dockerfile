@@ -4,6 +4,7 @@ FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
 FROM python:3.12-slim-bookworm AS dependencies
 ARG TARGETARCH
 ARG BUILD_DEPENDENCY_TIMEOUT=1200
+ARG PYTHON_PACKAGE_INDEX=
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_DOWNLOADS=0 UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
 WORKDIR /app

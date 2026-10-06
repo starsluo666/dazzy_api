@@ -8,7 +8,7 @@ H5 与管理端仍使用各自的静态部署脚本。所有以下命令在服�
 
 需要 Linux Docker Engine 和 Docker Compose v2.24+，以及 `flock`（Ubuntu 的 util-linux）。
 宿主机不再需要 Python、uv 或 GDAL；镜像包含 Python 3.12、锁定的 Python 依赖和地理库。
-首次构建需要能够访问 Docker Hub、GHCR、Debian 软件源及 PyPI。
+首次构建需要能够访问 Docker Hub、GHCR、Debian 软件源及 PyPI（或配置的镜像）。
 
 ### 构建下载慢时的软件源与缓存配置
 
@@ -33,6 +33,28 @@ DAZZY_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
 不关闭 HTTPS 或包签名校验，不允许在源地址中写凭证、查询串等秘密。
 参数只用于镜像构建，不是 `.env.online` 中的业务配置；调整后必须重新构建镜像。
 
+如果日志停留在 `dependencies ... build_dependencies.py python`，慢的是 Python 依赖下载/构建，
+和 APT 是两个独立步骤。在已有 `.env.docker` 追加或修改 Python 镜像配置：
+
+```dotenv
+DAZZY_PYTHON_PACKAGE_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+```
+
+上面使用[清华 PyPI 镜像文档](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)公布的地址；
+也可换成部署机实测可达的受信 HTTPS simple-index，不支持含凭证、查询串的地址。
+留空时仍执行 `uv sync --locked --no-dev --no-install-project`，沿用锁文件中的源。
+启用镜像时，不直接修改 `uv.lock` 中的索引或下载 URL，而是执行：
+
+- `uv export --locked --offline --no-dev --no-emit-project`：从现有锁文件临时导出版本、平台条件和哈希；锁文件与项目不一致时直接失败。
+- `uv venv`：创建镜像内部的 `.venv`，使用基础镜像的 Python。
+- `uv pip sync --require-hashes --default-index ...`：从选定镜像查找并安装锁定版本，每个依赖的下载内容必须匹配锁文件中的哈希。
+
+临时清单构建后删除，不维护第二份依赖清单、不升级运行依赖，也不把镜像配置写入项目。
+源码包仍使用隔离构建，其构建工具依赖也从选定镜像获取；构建工具版本不在项目运行依赖锁定范围内（与原流程相同）。
+镜像未同步锁定版本或哈希不符时会停止，不会自动降级、回退其他源或关闭 TLS/哈希校验；
+可以等待镜像同步、改用另一受信镜像，或清空该配置回到原始锁文件安装流程。
+不同源的缓存不保证完全复用，切换后首次安装仍可能需要下载。
+
 APT 下载连接/读超时 30 秒、失败最多重试 3 次；uv 连接超时 10 秒、读超时 30 秒、重试 3 次。
 此外，APT 更新及安装整个步骤、Python 依赖安装整个步骤，**各自默认限制 1200 秒**。
 超时先终止，30 秒内未退出则强制结束，构建失败并给出提示；不会继续发布不完整镜像。
@@ -43,9 +65,7 @@ APT 下载连接/读超时 30 秒、失败最多重试 3 次；uv 连接超时 1
 DAZZY_BUILD_DEPENDENCY_TIMEOUT=1800
 ```
 
-允许范围 60–7200 秒，不允许设为 0 取消限制。Python 仍执行
-`uv sync --locked --no-dev --no-install-project`，不重写锁文件、不升级依赖、不自动改 PyPI 源；
-锁文件包含下载地址，仅更改 index 参数不能可靠地加速锁定包下载。
+允许范围 60–7200 秒，不允许设为 0 取消限制；启用 Python 镜像时，总时限包含导出、创建环境及安装三个步骤。
 FFmpeg/FFprobe、地理库、中文字体及 HEIF 支持保持不变。
 
 配置后仍按原命令发布（有迁移前先备份）：
@@ -264,12 +284,13 @@ bash ./deploy-docker.sh rollback dazzy-api:实际旧版本标签
 安装开发依赖后，可运行以下检查；测试使用模拟 Docker 和隔离配置，不连接业务数据库：
 
 ```bash
-uv run python -m unittest deploy.test_build_dependencies deploy.test_runtime deploy.test_release_script -v
+uv run python -m unittest deploy.test_build_dependencies deploy.test_python_mirror deploy.test_runtime deploy.test_release_script -v
 uv run ruff check config/settings/production.py deploy
 bash -n deploy-docker.sh
 sh -n deploy/entrypoint.sh
 ```
 
+镜像测试使用本机 uv、临时虚拟环境和回环测试索引，验证镜像实际供包、哈希拒绝及锁文件一致性，不访问外部包仓库。
 这些测试不能替代实际 Linux 镜像构建、外部网络连通性和容器持久卷权限验证。
 首次上线应预留维护窗口，在服务器完成前述健康检查和关键业务验收。
 

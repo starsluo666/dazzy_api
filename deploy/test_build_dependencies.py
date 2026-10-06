@@ -3,12 +3,15 @@
 import contextlib
 import io
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from deploy.build_dependencies import SYSTEM_PACKAGES, configure_apt, install, mirror_url
+from deploy.build_dependencies import (
+    SYSTEM_PACKAGES, configure_apt, install, mirror_url, python_mirror_commands,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +102,59 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertNotIn("UV_DEFAULT_INDEX", env)
 
     @patch("deploy.build_dependencies.subprocess.run")
+    def test_python_mirror_preserves_lock_checks_hashes_and_one_total_timeout(self, run):
+        requirements_files = []
+
+        def during_build(command, *, env, check):
+            self.assertEqual(command[:5], ["timeout", "--kill-after=30s", "1800s", "sh", "-ec"])
+            steps = [shlex.split(step) for step in command[-1].split(" && ")]
+            requirements = Path(steps[0][steps[0].index("--output-file") + 1])
+            self.assertTrue(requirements.parent.is_dir())
+            requirements_files.append(requirements)
+            self.assertEqual(steps, python_mirror_commands(index, requirements))
+            self.assertNotIn("UV_DEFAULT_INDEX", env)  # Do not invalidate the original lock at export.
+            self.assertEqual(env["UV_HTTP_TIMEOUT"], "30")
+            return subprocess.CompletedProcess(command, 0)
+
+        index = "https://mirror.example.test/simple/"
+        run.side_effect = during_build
+        self.assertEqual(install("python", env={
+            "PYTHON_PACKAGE_INDEX": index, "BUILD_DEPENDENCY_TIMEOUT": "1800",
+        }), 0)
+        self.assertFalse(requirements_files[0].parent.exists())
+        steps = python_mirror_commands(index, "requirements.txt")
+        self.assertIn("--locked", steps[0])
+        self.assertIn("--offline", steps[0])
+        self.assertIn("--no-dev", steps[0])
+        self.assertIn("--no-emit-project", steps[0])
+        self.assertNotIn("--no-hashes", steps[0])
+        self.assertIn("--require-hashes", steps[2])
+        self.assertIn(index.rstrip("/"), steps[2])
+
+    @patch("deploy.build_dependencies.subprocess.run")
+    def test_python_mirror_invalid_urls_fail_without_running_or_leaking_credentials(self, run):
+        for index in (
+            "http://example.test/simple", "file:///tmp/wheels", "https://",
+            "https://user:secret@example.test/simple", "https://example.test/simple?token=secret",
+            "https://example.test/simple\n--no-verify-hashes", "https://example.test:bad/simple",
+        ):
+            with self.subTest(index=index), self.assertRaises(ValueError) as error:
+                install("python", env={"PYTHON_PACKAGE_INDEX": index})
+            self.assertNotIn("secret", str(error.exception))
+        run.assert_not_called()
+
+    @patch("deploy.build_dependencies.subprocess.run")
+    def test_python_mirror_failure_keeps_exit_code_and_cleans_temporary_requirements(self, run):
+        for code in (1, 124, 137):
+            run.return_value = subprocess.CompletedProcess([], code)
+            with self.subTest(code=code), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(install("python", env={
+                    "PYTHON_PACKAGE_INDEX": "https://mirror.example.test/simple",
+                }), code)
+            export = shlex.split(run.call_args.args[0][-1].split(" && ")[0])
+            self.assertFalse(Path(export[export.index("--output-file") + 1]).parent.exists())
+
+    @patch("deploy.build_dependencies.subprocess.run")
     def test_apt_keeps_all_runtime_dependencies_and_fails_on_partial_update(self, run):
         run.return_value = subprocess.CompletedProcess([], 0)
         self.assertEqual(install("apt", env={"BUILD_DEPENDENCY_TIMEOUT": "1800"},
@@ -139,7 +195,10 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertLess(dockerfile.index("build_dependencies.py python"), dockerfile.index("COPY . ."))
         self.assertIn("USER dazzy", dockerfile)
         compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
-        for name in ("DEBIAN_MIRROR", "DEBIAN_SECURITY_MIRROR", "BUILD_DEPENDENCY_TIMEOUT"):
+        for name in (
+            "DEBIAN_MIRROR", "DEBIAN_SECURITY_MIRROR", "BUILD_DEPENDENCY_TIMEOUT",
+            "PYTHON_PACKAGE_INDEX",
+        ):
             self.assertIn(f"{name}: ${{DAZZY_{name}:-", compose)
             self.assertIn(f"ARG {name}=", dockerfile)
 
