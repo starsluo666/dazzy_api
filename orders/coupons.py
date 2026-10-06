@@ -10,23 +10,34 @@ from backoffice.operation_settings import platform_operation_rules
 from .models import UserCoupon
 
 
-def issue_coupon(*, owner, source="manual", issued_by=None, template=None, now=None, notify=True):
+def issue_coupon(*, owner, source="manual", issued_by=None, template=None, now=None, notify=True,
+                 issue_request_id=None, template_snapshot=None):
     now = now or timezone.now()
-    if template is not None and not template.is_active:
+    if template_snapshot is None and template is not None and not template.is_active:
         raise ValidationError({"template_public_id": "该优惠券模板已停用。"})
-    rules = platform_operation_rules() if template is None else None
+    if template_snapshot is not None:
+        snapshot = template_snapshot
+    elif template is not None:
+        snapshot = {
+            "name": template.name, "face_amount": template.face_amount,
+            "min_order_amount": template.min_order_amount, "valid_days": template.valid_days,
+        }
+    else:
+        rules = platform_operation_rules()
+        snapshot = {
+            "name": "优惠券", "face_amount": rules["report_coupon_amount"],
+            "min_order_amount": rules["report_coupon_min_order_amount"],
+            "valid_days": rules["report_coupon_valid_days"],
+        }
     coupon = UserCoupon.objects.create(
+        issue_request_id=issue_request_id,
         owner=owner,
         template=template,
         source=source,
         issued_by=issued_by,
-        face_amount=template.face_amount if template else rules["report_coupon_amount"],
-        min_order_amount=(
-            template.min_order_amount if template else rules["report_coupon_min_order_amount"]
-        ),
-        expires_at=now + timedelta(
-            days=template.valid_days if template else rules["report_coupon_valid_days"]
-        ),
+        face_amount=snapshot["face_amount"],
+        min_order_amount=snapshot["min_order_amount"],
+        expires_at=now + timedelta(days=snapshot["valid_days"]),
     )
     if notify:
         from notifications.models import UserNotification
@@ -35,7 +46,7 @@ def issue_coupon(*, owner, source="manual", issued_by=None, template=None, now=N
         create_notification(
             recipient=owner, category=UserNotification.Category.SYSTEM,
             event_type=UserNotification.EventType.COUPON_ISSUED,
-            title=f"收到一张{template.name}" if template else "收到一张优惠券",
+            title=f"收到一张{snapshot['name']}",
             content=(f"已收到 ¥{coupon.face_amount / 100:.2f} 优惠券，"
                      f"达人服务订单金额大于 ¥{coupon.min_order_amount / 100:.2f} 可用。"),
             target_type="coupon", target_id=str(coupon.public_id),

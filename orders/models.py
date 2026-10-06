@@ -200,6 +200,7 @@ class CouponTemplate(models.Model):
 
 
 class UserCoupon(models.Model):
+    issue_request_id = models.UUIDField(null=True, blank=True, unique=True, editable=False)
     class Status(models.TextChoices):
         AVAILABLE = "available", "可使用"
         RESERVED = "reserved", "订单占用中"
@@ -240,6 +241,35 @@ class UserCoupon(models.Model):
         db_table = "user_coupon"
         ordering = ("-created_at", "-id")
         indexes = [models.Index(fields=("owner", "status", "expires_at"))]
+
+
+class CouponIssueBatch(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    request_id = models.UUIDField(unique=True, editable=False)
+    template = models.ForeignKey(CouponTemplate, on_delete=models.PROTECT, related_name="issue_batches")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    template_snapshot = models.JSONField(default=dict)
+    status = models.CharField(max_length=16, default="preview", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "coupon_issue_batch"
+        ordering = ("-id",)
+
+
+class CouponIssueRecipient(models.Model):
+    batch = models.ForeignKey(CouponIssueBatch, on_delete=models.CASCADE, related_name="recipients")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    status = models.CharField(max_length=16, default="pending")
+    coupon = models.OneToOneField(UserCoupon, on_delete=models.PROTECT, null=True, blank=True)
+    error = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        db_table = "coupon_issue_recipient"
+        constraints = [models.UniqueConstraint(fields=("batch", "user"), name="unique_coupon_batch_user")]
+        indexes = [models.Index(fields=("batch", "status", "id"), name="coupon_batch_pending_idx")]
 
 
 class ProviderOrderPaymentOrder(models.Model):

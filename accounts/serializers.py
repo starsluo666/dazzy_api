@@ -45,6 +45,11 @@ def validate_password(value: str) -> str:
 class UserSerializer(serializers.ModelSerializer):
     avatar_url = serializers.SerializerMethodField()
 
+    def validate_gender(self, value):
+        if value not in (User.Gender.MALE, User.Gender.FEMALE):
+            raise serializers.ValidationError("请选择男或女。")
+        return value
+
     class Meta:
         model = User
         fields = (

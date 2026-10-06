@@ -108,6 +108,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ("json",)
 CELERY_TIMEZONE = "Asia/Shanghai"
 CELERY_BEAT_SCHEDULE = {
+    "process-coupon-issue-batches": {
+        "task": "orders.process_coupon_issue_batches",
+        "schedule": 10.0,
+    },
     "process-provider-income-transfers": {
         "task": "providers.process_income_transfers",
         "schedule": 60.0,

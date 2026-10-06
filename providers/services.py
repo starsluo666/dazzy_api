@@ -50,6 +50,8 @@ def submit_provider_application(*, user) -> ProviderProfile:
     if profile.status not in (ProviderProfile.Status.DRAFT, ProviderProfile.Status.REJECTED):
         raise ValidationError("当前申请状态不可重复提交。")
     missing = []
+    if user.gender not in ("male", "female"):
+        missing.append("性别")
     if not profile.application_real_name.strip():
         missing.append("真实姓名")
     if not profile.application_birth_date:

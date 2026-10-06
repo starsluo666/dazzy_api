@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import CharField, Count, Prefetch, Q, Sum
 from django.db.models.functions import Cast, TruncDate
 from django.shortcuts import get_object_or_404
@@ -2754,7 +2754,10 @@ class AdminCouponTemplateListCreateView(APIView):
         access = resolve_admin_access(request.user)
         access.require("coupon.view")
         templates = CouponTemplate.objects.annotate(issued_count=Count("coupons"))
-        return Response({"data": {"items": AdminCouponTemplateSerializer(templates, many=True).data}})
+        return Response({"data": {
+            "items": AdminCouponTemplateSerializer(templates, many=True).data,
+            "can_issue_all": access.all_data and can_access(access, "coupon.issue"),
+        }})
 
     @transaction.atomic
     def post(self, request):
@@ -2810,8 +2813,8 @@ class AdminCouponTemplateDetailView(APIView):
             public_id=template_id,
         )
         template.issued_count = template.coupons.count()
-        if template.issued_count:
-            raise ValidationError({"detail": "该模板已有发放记录，不能删除，请改为停用。"})
+        if template.issued_count or template.issue_batches.exists():
+            raise ValidationError({"detail": "该模板已有发放记录或批次预览，不能删除，请改为停用。"})
         if (
             template.newcomer_gift_items.exists()
             or template.growth_registration_reward_configs.exists()
@@ -2856,7 +2859,7 @@ class AdminCouponListIssueView(APIView):
         from supportcases.models import SupportCase
 
         if access.all_data:
-            return scoped_users(access)
+            return scoped_users(access).filter(is_staff=False)
         case_reporters = SupportCase.objects.filter(
             city_code__in=access.city_codes
         ).values("reporter_id")
@@ -2946,15 +2949,32 @@ class AdminCouponListIssueView(APIView):
             template = get_object_or_404(
                 CouponTemplate.objects.select_for_update(),
                 public_id=template_public_id,
-                is_active=True,
             )
         scoped_owner = get_object_or_404(self.scoped_coupon_users(access), public_id=public_id)
         owner = User.objects.select_for_update().get(pk=scoped_owner.pk)
-        if owner.account_status != User.AccountStatus.ACTIVE:
+        request_id = serializer.validated_data.get("request_id")
+        if request_id:
+            # Replay an already-issued coupon even if its template was later
+            # disabled. New issuance still validates activity in issue_coupon.
+            existing = UserCoupon.objects.select_related("owner", "issued_by", "template", "revoked_by").filter(
+                issue_request_id=request_id
+            ).first()
+            if existing:
+                if existing.owner_id != owner.pk or existing.template_id != (template.pk if template else None) or existing.issued_by_id != request.user.pk:
+                    raise ValidationError({"request_id": "请求标识已用于其他发券操作，请重新确认。"})
+                return Response({"data": admin_coupon_payload(existing)})
+        if not owner.is_active or owner.account_status != User.AccountStatus.ACTIVE:
             raise ValidationError({"user_public_id": "仅可向正常状态的用户发放优惠券。"})
-        coupon = issue_coupon(
-            owner=owner, source="manual", issued_by=request.user, template=template,
-        )
+        try:
+            with transaction.atomic():
+                coupon = issue_coupon(
+                    owner=owner, source="manual", issued_by=request.user, template=template,
+                    issue_request_id=request_id,
+                )
+        except IntegrityError:
+            if not request_id:
+                raise
+            raise ValidationError({"request_id": "请求标识已被使用，请刷新记录核对本次发放。"})
         AdminAuditLog.objects.create(
             actor=request.user,
             organization=access.member.organization if access.member else None,

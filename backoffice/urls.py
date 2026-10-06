@@ -1,4 +1,5 @@
 from django.urls import path
+from .coupon_batch_views import CouponBatchListView, CouponBatchDetailView
 from .training_views import AdminProviderTrainingView, AdminProviderTrainingPublishView
 
 from .asset_views import AdminAssetBatchDeleteView, AdminAssetListUploadView, AdminAssetRestoreView
@@ -76,6 +77,8 @@ urlpatterns = [
     path("coupon-templates/", AdminCouponTemplateListCreateView.as_view(), name="backoffice-coupon-templates"),
     path("coupon-templates/<uuid:template_id>/", AdminCouponTemplateDetailView.as_view(), name="backoffice-coupon-template-detail"),
     path("coupons/", AdminCouponListIssueView.as_view(), name="backoffice-coupons"),
+    path("coupon-batches/", CouponBatchListView.as_view(), name="backoffice-coupon-batches"),
+    path("coupon-batches/<uuid:batch_id>/", CouponBatchDetailView.as_view(), name="backoffice-coupon-batch"),
     path("coupons/<uuid:coupon_id>/revoke/", AdminCouponRevokeView.as_view(), name="backoffice-coupon-revoke"),
     path("providers/<int:profile_id>/commission-override/", ProviderCommissionOverrideView.as_view(), name="backoffice-provider-commission-override"),
     path("auth/login/", AdminPasswordLoginView.as_view(), name="backoffice-auth-login"),

@@ -55,7 +55,7 @@ def turnover_period_start(period, now):
     return timezone.make_aware(datetime(local.year, month, 1), local.tzinfo)
 
 
-def commission_snapshot(provider, category_rate, *, now=None):
+def provider_commission_context(provider, *, now=None):
     from backoffice.operation_settings import platform_operation_rules
     from .models import ProviderOrderSettlement
 
@@ -79,15 +79,59 @@ def commission_snapshot(provider, category_rate, *, now=None):
     for tier in tiers:
         if turnover >= tier["threshold_amount"]:
             bonus = Decimal(str(tier["bonus_rate"]))
-    category_rate = Decimal(str(category_rate))
-    applied_bonus = min(category_rate, bonus)
     return {
-        "platform_commission_rate": str(category_rate - applied_bonus),
-        "category_platform_commission_rate": str(category_rate),
-        "provider_bonus_rate": str(applied_bonus),
+        "tiers": tiers,
+        "tiers_source": "provider" if provider.commission_tiers_override is not None else "platform",
+        "period_source": "provider" if provider.commission_reset_period_override else "platform",
         "provider_bonus_configured_rate": str(bonus),
         "provider_bonus_turnover_amount": turnover,
         "provider_bonus_period": period,
         "provider_bonus_period_start": period_start.isoformat() if period_start else None,
         "provider_bonus_snapshot_at": now.isoformat(),
     }
+
+
+def category_commission_rates(category_rate, bonus):
+    category_rate, bonus = Decimal(str(category_rate)), Decimal(str(bonus))
+    applied_bonus = min(category_rate, bonus)
+    return {
+        "platform_commission_rate": str(category_rate - applied_bonus),
+        "category_platform_commission_rate": str(category_rate),
+        "provider_bonus_rate": str(applied_bonus),
+    }
+
+
+def commission_snapshot(provider, category_rate, *, now=None):
+    context = provider_commission_context(provider, now=now)
+    return {
+        **{key: value for key, value in context.items() if key.startswith("provider_bonus_")},
+        **category_commission_rates(category_rate, context["provider_bonus_configured_rate"]),
+    }
+
+
+def provider_commission_overview(provider):
+    from django.db.models import Q
+    from providers.models import ServiceCategory
+
+    context = provider_commission_context(provider)
+    turnover = context["provider_bonus_turnover_amount"]
+    tiers = context["tiers"]
+    current = next((i for i in range(len(tiers) - 1, -1, -1)
+                    if turnover >= tiers[i]["threshold_amount"]), None)
+    next_tier = next((tier for tier in tiers if tier["threshold_amount"] > turnover), None)
+    categories = ServiceCategory.objects.filter(
+        Q(provider_grants__provider=provider, provider_grants__is_active=True)
+        | Q(provider_services__provider=provider)
+    ).distinct().order_by("sort_order", "id")
+    rows = []
+    for category in categories:
+        rates = category_commission_rates(category.platform_commission_rate,
+                                          context["provider_bonus_configured_rate"])
+        rows.append({
+            "category_id": category.pk, "category_name": category.name,
+            "base_provider_rate": str(100 - category.platform_commission_rate),
+            "provider_rate": str(100 - Decimal(rates["platform_commission_rate"])),
+            **rates,
+        })
+    return {**context, "current_tier_index": current, "categories": rows,
+            "next_tier_remaining_amount": next_tier["threshold_amount"] - turnover if next_tier else None}

@@ -281,6 +281,11 @@ class SimplifiedApplicationTests(TestCase):
         provider = ProviderProfile.objects.get(user=user)
         self.assertEqual(provider.bio, "")
         self.assertEqual(provider.max_service_radius_km, 10)
+        missing_gender = client.post("/api/v1/providers/me/application/submit/", {"agreement_accepted": True}, format="json")
+        self.assertEqual(missing_gender.status_code, 400)
+        self.assertIn("性别", str(missing_gender.data))
+        user.gender = "female"
+        user.save(update_fields=("gender",))
         submitted = client.post("/api/v1/providers/me/application/submit/", {"agreement_accepted": True}, format="json")
         self.assertEqual(submitted.status_code, 200, submitted.data)
         self.assertFalse(provider.is_profile_complete)

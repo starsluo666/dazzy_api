@@ -936,7 +936,7 @@ class AdminCouponListQuerySerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         choices=(
-            "manual", "report_reward", "customer_service",
+            "manual", "bulk_manual", "report_reward", "customer_service",
             "newcomer_gift", "invite_registration", "invite_first_order",
         ),
     )
@@ -981,6 +981,7 @@ class AdminCouponTemplateSerializer(serializers.ModelSerializer):
 
 
 class AdminCouponIssueSerializer(serializers.Serializer):
+    request_id = serializers.UUIDField(required=False)
     user_public_id = serializers.UUIDField()
     template_public_id = serializers.UUIDField(required=False)
 
@@ -1019,6 +1020,14 @@ class ProviderCreditAdjustmentSerializer(serializers.ModelSerializer):
 
 
 class ProviderAdminSerializer(serializers.ModelSerializer):
+    commission_overview = serializers.SerializerMethodField()
+
+    def get_commission_overview(self, obj):
+        if not self.context.get("include_detail", False):
+            return None
+        from orders.commission import provider_commission_overview
+        return provider_commission_overview(obj)
+
     public_id = serializers.UUIDField(source="user.public_id")
     nickname = serializers.CharField(source="public_display_name")
     phone_masked = serializers.SerializerMethodField()
@@ -1064,7 +1073,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "location_expires_at",
             "max_service_radius_km", "rating", "service_count",
             "order_count", "credit_score", "is_accepting_orders", "admin_order_restricted",
-            "commission_reset_period_override", "commission_tiers_override",
+            "commission_reset_period_override", "commission_tiers_override", "commission_overview",
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
             "credit_adjustments", "submitted_at", "reviewed_at", "rejection_reason",
             "application_real_name", "identity_real_name", "identity_number_masked",
