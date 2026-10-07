@@ -6,6 +6,10 @@ from django.db import models
 
 class ScheduledTask(models.Model):
     class Type(models.TextChoices):
+        PROVIDER_DEPARTURE_REMINDER = "provider_departure_reminder", "达人出发提醒"
+        PROVIDER_DEPARTURE_TIMEOUT = "provider_departure_timeout", "达人未出发超时"
+        PROVIDER_START_TIMEOUT = "provider_start_timeout", "达人未开始服务核查"
+        PROVIDER_COMPLETION_TIMEOUT = "provider_completion_timeout", "达人未提交完成核查"
         PROVIDER_ORDER_PAYMENT_EXPIRY = (
             "provider_order_payment_expiry",
             "达人订单支付超时",

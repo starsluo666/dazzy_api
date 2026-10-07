@@ -538,16 +538,23 @@ def order_anomaly_query(code):
     )
     confirmation_overdue &= Q(fulfillment_review_required=False)
     fulfillment_review = Q(fulfillment_review_required=True)
+    from orders.timeouts import legacy_overdue_query, refund_attention_query
+    legacy_overdue = legacy_overdue_query()
+    departure_timeout = Q(departure_timed_out_at__isnull=False)
+    refund_failed = refund_attention_query()
     mapping = {
         "missing_evidence": missing_evidence,
         "timeline_gap": timeline_gap,
         "confirmation_overdue": confirmation_overdue,
         "support_contact_overdue": support_contact_overdue,
         "fulfillment_review": fulfillment_review,
+        "legacy_overdue": legacy_overdue,
+        "departure_timeout": departure_timeout,
+        "refund_failed": refund_failed,
         "fulfillment_resolved": Q(fulfillment_review_required=False, fulfillment_revision__gt=0),
     }
     if code == "all":
-        return missing_evidence | timeline_gap | confirmation_overdue | support_contact_overdue | fulfillment_review
+        return missing_evidence | timeline_gap | confirmation_overdue | support_contact_overdue | fulfillment_review | legacy_overdue | refund_failed
     return mapping[code]
 
 
@@ -2249,6 +2256,32 @@ class ProviderOrderFulfillmentReviewView(APIView):
                 before={"fulfillment_review_required": True, "revision": order.fulfillment_revision},
                 after={"fulfillment_review_required": False, "reason": serializer.validated_data["reason"],
                        "confirmation_expires_at": order.confirmation_expires_at.isoformat() if order.confirmation_expires_at else None},
+                request_id=request.headers.get("X-Request-ID", ""), ip_address=client_ip(request),
+            )
+        return Response({"data": ProviderOrderAdminSerializer(order).data})
+
+
+class ProviderOrderTimeoutAppealView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, order_no):
+        from orders.timeouts import reverse_departure_penalty
+        from .serializers import ProviderOrderTimeoutAppealSerializer
+        access = resolve_admin_access(request.user)
+        access.require("order.fulfillment.review")
+        access.require("provider.credit.adjust")
+        serializer = ProviderOrderTimeoutAppealSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = get_object_or_404(provider_order_queryset(access).select_for_update(of=("self",)), order_no=order_no)
+        organization = access.member.organization if access.member else None
+        reason = serializer.validated_data["reason"]
+        if reverse_departure_penalty(order, actor=request.user, reason=reason, organization=organization):
+            AdminAuditLog.objects.create(
+                actor=request.user, organization=organization, action="provider.credit.adjust",
+                target_type="provider_order", target_id=order.order_no,
+                before={"timeout_credit_points": order.timeout_credit_points},
+                after={"penalty_reversed": True, "reason": reason, "order_and_refund_unchanged": True},
                 request_id=request.headers.get("X-Request-ID", ""), ip_address=client_ip(request),
             )
         return Response({"data": ProviderOrderAdminSerializer(order).data})

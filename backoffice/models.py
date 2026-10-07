@@ -165,6 +165,8 @@ class PlatformOperationSetting(models.Model):
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
     provider_order_early_tolerance_minutes = models.PositiveSmallIntegerField(default=30)
     provider_order_late_tolerance_minutes = models.PositiveSmallIntegerField(default=30)
+    provider_order_departure_grace_minutes = models.PositiveSmallIntegerField(default=30)
+    provider_order_no_departure_credit_penalty = models.PositiveSmallIntegerField(default=2)
     provider_order_review_timeout_days = models.PositiveSmallIntegerField(default=7)
     provider_order_settlement_freeze_days = models.PositiveSmallIntegerField(default=1)
     provider_commission_reset_period = models.CharField(max_length=16, default="month")
@@ -398,6 +400,14 @@ class UserRiskFlag(models.Model):
 
 
 class ProviderCreditAdjustment(models.Model):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "人工调整"
+        NO_DEPARTURE = "no_departure", "未出发超时"
+        NO_DEPARTURE_REVERSAL = "no_departure_reversal", "未出发超时申诉撤销"
+
+    source = models.CharField(max_length=32, choices=Source, default=Source.MANUAL)
+    order = models.ForeignKey("orders.ProviderOrder", on_delete=models.PROTECT,
+                              related_name="credit_adjustments", null=True, blank=True)
     provider = models.ForeignKey(
         "providers.ProviderProfile",
         on_delete=models.PROTECT,
@@ -409,6 +419,8 @@ class ProviderCreditAdjustment(models.Model):
         on_delete=models.PROTECT,
         related_name="provider_credit_adjustments",
         verbose_name="操作人",
+        null=True,
+        blank=True,
     )
     organization = models.ForeignKey(
         Organization,
@@ -428,6 +440,8 @@ class ProviderCreditAdjustment(models.Model):
 
     class Meta:
         db_table = "backoffice_provider_credit_adjustment"
+        constraints = [models.UniqueConstraint(fields=("order", "source"),
+            condition=~models.Q(source="manual"), name="credit_order_system_event_unique")]
         ordering = ("-created_at", "-id")
         indexes = [models.Index(fields=("provider", "-created_at"))]
         verbose_name = "达人信用分调整"

@@ -82,6 +82,13 @@ class ProviderOrder(models.Model):
     paid_at = models.DateTimeField("支付时间", null=True, blank=True)
     acceptance_expires_at = models.DateTimeField("达人接单截止时间", null=True, blank=True)
     accepted_at = models.DateTimeField("达人接单时间", null=True, blank=True)
+    # Nullable deadlines deliberately leave pre-rollout orders out of automatic penalties.
+    departure_deadline_at = models.DateTimeField("未出发自动取消截止时间", null=True, blank=True)
+    start_deadline_at = models.DateTimeField("未开始服务核查时间", null=True, blank=True)
+    completion_deadline_at = models.DateTimeField("未提交完成核查时间", null=True, blank=True)
+    departure_timed_out_at = models.DateTimeField("未出发超时取消时间", null=True, blank=True)
+    timeout_credit_points = models.PositiveSmallIntegerField("超时实际扣分", default=0)
+    timeout_credit_reversed_at = models.DateTimeField("超时扣分申诉撤销时间", null=True, blank=True)
     provider_rejected_at = models.DateTimeField("达人拒单时间", null=True, blank=True)
     provider_rejection_reason = models.CharField("达人拒单原因", max_length=200, blank=True)
     support_contact_deadline_at = models.DateTimeField(
@@ -144,6 +151,7 @@ class ProviderOrder(models.Model):
             models.Index(fields=("provider", "starts_at", "ends_at")),
             models.Index(fields=("status", "payment_expires_at")),
             models.Index(fields=("status", "confirmation_expires_at")),
+            models.Index(fields=("status", "departure_deadline_at"), name="order_departure_deadline_idx"),
             models.Index(
                 fields=("status", "support_contact_deadline_at"),
                 name="provider_order_support_due_idx",

@@ -287,6 +287,11 @@ class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
 
 
 class ProviderOrderSerializer(serializers.ModelSerializer):
+    timeout = serializers.SerializerMethodField()
+
+    def get_timeout(self, obj):
+        from .timeouts import timeout_summary
+        return timeout_summary(obj)
     provider_public_id = serializers.UUIDField(source="provider.user.public_id")
     provider_name = serializers.CharField(source="provider_name_snapshot")
     provider_avatar_url = serializers.SerializerMethodField()
@@ -320,6 +325,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "review_expires_at",
             "fulfillment_review_required",
             "refund_orders", "settlement", "after_sales",
+            "timeout",
         )
 
     def get_provider_avatar_url(self, obj):

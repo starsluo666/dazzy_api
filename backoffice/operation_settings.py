@@ -8,6 +8,8 @@ DEFAULT_PLATFORM_OPERATION_RULES = {
     "provider_order_confirmation_timeout_days": 3,
     "provider_order_early_tolerance_minutes": 30,
     "provider_order_late_tolerance_minutes": 30,
+    "provider_order_departure_grace_minutes": 30,
+    "provider_order_no_departure_credit_penalty": 2,
     "provider_order_review_timeout_days": 7,
     "provider_order_settlement_freeze_days": 1,
     "provider_commission_reset_period": "month",

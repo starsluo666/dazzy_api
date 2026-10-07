@@ -1008,7 +1008,8 @@ class ProviderCommissionOverrideSerializer(serializers.Serializer):
 
 
 class ProviderCreditAdjustmentSerializer(serializers.ModelSerializer):
-    operator_name = serializers.CharField(source="operator.nickname")
+    operator_name = serializers.CharField(source="operator.nickname", default="系统")
+    order_no = serializers.CharField(source="order.order_no", default=None)
     organization_name = serializers.CharField(source="organization.name", allow_null=True)
 
     class Meta:
@@ -1016,6 +1017,7 @@ class ProviderCreditAdjustmentSerializer(serializers.ModelSerializer):
         fields = (
             "id", "delta", "before_score", "after_score", "reason",
             "operator_name", "organization_name", "created_at",
+            "source", "order_no",
         )
 
 
@@ -1212,6 +1214,13 @@ CUSTOMER_CONFIRMATION_REQUIRED_STATUSES = frozenset(
 
 def provider_order_anomalies(order):
     anomalies = []
+    from orders.timeouts import is_legacy_overdue, refund_needs_attention
+    if is_legacy_overdue(order):
+        anomalies.append({"code": "legacy_overdue", "label": "历史超时订单待核查（不自动扣分）"})
+    if order.departure_timed_out_at:
+        anomalies.append({"code": "departure_timeout", "label": "达人超时未出发"})
+    if refund_needs_attention(order):
+        anomalies.append({"code": "refund_failed", "label": "退款异常待核实"})
     if order.fulfillment_review_required:
         anomalies.append({"code": "fulfillment_review", "label": "履约异常待审核"})
     if order.status in EVIDENCE_REQUIRED_STATUSES and not order.arrival_photo_id:
@@ -1273,6 +1282,7 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
             "all", "any", "missing_evidence", "timeline_gap", "confirmation_overdue",
             "support_contact_overdue",
             "fulfillment_review", "fulfillment_resolved",
+            "legacy_overdue", "departure_timeout", "refund_failed",
         ),
     )
     city_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
@@ -1301,6 +1311,10 @@ class ProviderOrderSupportNoteInputSerializer(serializers.Serializer):
 class ProviderOrderFulfillmentReviewInputSerializer(serializers.Serializer):
     revision = serializers.IntegerField(min_value=1)
     reason = serializers.CharField(min_length=2, max_length=1000, trim_whitespace=True)
+
+
+class ProviderOrderTimeoutAppealSerializer(serializers.Serializer):
+    reason = serializers.CharField(min_length=2, max_length=500, trim_whitespace=True)
 
 
 class ProviderOrderSupportNoteSerializer(serializers.ModelSerializer):
@@ -1541,6 +1555,11 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
 
 
 class ProviderOrderAdminSerializer(serializers.ModelSerializer):
+    timeout = serializers.SerializerMethodField()
+
+    def get_timeout(self, obj):
+        from orders.timeouts import timeout_summary
+        return timeout_summary(obj)
     status_label = serializers.CharField(source="get_status_display")
     customer_public_id = serializers.UUIDField(source="customer.public_id")
     customer_name = serializers.CharField(source="customer.nickname")
@@ -1586,7 +1605,7 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "provider_contact_initiated_at", "departure_contact_confirmed_at",
             "completion_location", "fulfillment_policy", "fulfillment_review_required",
             "fulfillment_revision", "fulfillment_issues", "fulfillment_reviews",
-            "confirmation_remaining_seconds",
+            "confirmation_remaining_seconds", "timeout",
         )
 
     @staticmethod
@@ -1929,6 +1948,8 @@ class DiscoveryCitySerializer(serializers.Serializer):
 
 
 class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    provider_order_departure_grace_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)
+    provider_order_no_departure_credit_penalty = serializers.IntegerField(min_value=0, max_value=100, required=False)
     provider_order_early_tolerance_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)
     provider_order_late_tolerance_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)
     discovery_cities = DiscoveryCitySerializer(many=True, required=False, allow_empty=False)

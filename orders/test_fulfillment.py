@@ -117,6 +117,10 @@ class FulfillmentControlsTests(TestCase):
 
     def test_policy_is_snapshotted_and_no_historical_reclassification(self):
         order, now = self.in_service_order()
+        # Legacy orders retain first-action snapshots; new orders snapshot at booking.
+        order.fulfillment_policy = {}
+        order.departure_deadline_at = None
+        order.save()
         setting = PlatformOperationSetting.current()
         setting.provider_order_early_tolerance_minutes = 10
         setting.provider_order_late_tolerance_minutes = 20

@@ -31,6 +31,8 @@ DEFAULT_LABELS = [
     "orders.test_huifu",
     "orders.test_huifu_gateway",
     "orders.test_payment_recovery",
+    "orders.test_fulfillment",
+    "orders.test_timeouts",
     "providers.test_withdrawals",
     "providers.test_receiving_onboarding",
     "providers.test_income_concurrency",

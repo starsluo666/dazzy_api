@@ -101,6 +101,43 @@ def register_provider_acceptance_timeout(order):
     )
 
 
+def register_provider_fulfillment_timeouts(order):
+    if not order.departure_deadline_at:
+        return 0
+    specs = []
+    if order.status == "pending_service" and order.accepted_at:
+        specs = [(ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT, order.departure_deadline_at),
+                 (ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER, order.starts_at - timedelta(minutes=30))]
+    elif order.status == "departed":
+        specs = [(ScheduledTask.Type.PROVIDER_START_TIMEOUT, order.start_deadline_at)]
+    elif order.status == "in_service":
+        specs = [(ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT, order.completion_deadline_at)]
+    created_count = 0
+    for task_type, deadline in specs:
+        if deadline:
+            _, created = _register_task(task_type=task_type, business_type="provider_order",
+                business_key=order.order_no, scheduled_at=deadline, payload={"order_no": order.order_no})
+            created_count += int(created)
+    return created_count
+
+
+def synchronize_provider_fulfillment_timeouts(*, batch_size):
+    from orders.models import ProviderOrder
+    created = 0
+    # Missing-task queries (not a scan of the first N active orders) avoid
+    # starvation of later orders. Terminal tasks never silently replay.
+    for status, task_type in (("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT),
+                             ("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER),
+                             ("departed", ScheduledTask.Type.PROVIDER_START_TIMEOUT),
+                             ("in_service", ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT)):
+        existing = ScheduledTask.objects.filter(business_type="provider_order", business_key=OuterRef("order_no"), task_type=task_type)
+        orders = ProviderOrder.objects.filter(status=status, departure_deadline_at__isnull=False,
+            accepted_at__isnull=False).annotate(_has_watchdog=Exists(existing)).filter(_has_watchdog=False).order_by("id")[:batch_size]
+        for order in orders:
+            created += register_provider_fulfillment_timeouts(order)
+    return created
+
+
 def register_provider_rejection_support_timeout(order):
     if not order.support_contact_deadline_at:
         raise ValueError("客服有效联系截止时间不能为空。")
@@ -791,6 +828,7 @@ def synchronize_provider_order_tasks(*, batch_size=TASK_SYNC_BATCH_SIZE) -> dict
         "settlement_task_created": settlement_task_created,
         "refund_task_created": refund_task_created,
         "cancel_compensation_created": cancel_compensation_created,
+        "fulfillment_timeout_created": synchronize_provider_fulfillment_timeouts(batch_size=batch_size),
     }
 
 
@@ -1671,7 +1709,30 @@ def _execute_activity_settlement(task, now):
     )
 
 
+def _execute_provider_fulfillment_timeout(task, now):
+    from orders.timeouts import expire_provider_departure, inspect_idle_fulfillment
+    if task.task_type == ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT:
+        outcome = expire_provider_departure(task.business_key, now=now)
+    else:
+        stage = {
+            ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER: "reminder",
+            ScheduledTask.Type.PROVIDER_START_TIMEOUT: "start",
+            ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT: "completion",
+        }[task.task_type]
+        outcome = inspect_idle_fulfillment(task.business_key, stage=stage, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome["deadline"]
+        return TaskExecutionOutcome(status=ScheduledTask.Status.PENDING,
+            result={**outcome, "deadline": deadline.isoformat()}, available_at=deadline)
+    status = ScheduledTask.Status.CANCELLED if outcome["state"] in ("not_enrolled", "not_applicable") else ScheduledTask.Status.SUCCEEDED
+    return TaskExecutionOutcome(status=status, result=outcome)
+
+
 TASK_HANDLERS = {
+    ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER: _execute_provider_fulfillment_timeout,
+    ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT: _execute_provider_fulfillment_timeout,
+    ScheduledTask.Type.PROVIDER_START_TIMEOUT: _execute_provider_fulfillment_timeout,
+    ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT: _execute_provider_fulfillment_timeout,
     ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY: (_execute_provider_order_payment_expiry),
     ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT: (_execute_provider_acceptance_timeout),
     ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT: (

@@ -199,6 +199,8 @@ class ProviderOrderListCreateView(APIView):
                     ]
                 ),
             )
+            from .timeouts import enroll_fulfillment_timeouts
+            enroll_fulfillment_timeouts(order)
             create_provider_order_payment_order(order)
             if coupon:
                 reserve_coupon(coupon=coupon, order=order)
@@ -543,7 +545,8 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
         deadline = order.acceptance_expires_at or (
             order.paid_at + timedelta(minutes=timeout) if order.paid_at else None
         )
-        if not deadline or deadline <= timezone.now():
+        departure_expired = order.departure_deadline_at and order.departure_deadline_at <= timezone.now()
+        if not deadline or deadline <= timezone.now() or departure_expired:
             order.status = ProviderOrder.Status.PENDING_SUPPORT
             order.save(update_fields=("status", "updated_at"))
             mark_provider_acceptance_expired(order_no, source="provider_action_guard")
@@ -551,10 +554,10 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
                 order=order,
                 event_type=UserNotification.EventType.ORDER_PENDING_SUPPORT,
                 title="订单已转客服处理",
-                content="达人未在时限内接单，平台客服将继续协助处理。",
+                content="订单已超过可接单或出发时限，平台客服将继续协助处理。",
             )
             return Response(
-                {"error": {"status": f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
+                {"error": {"status": "已超过出发时限，不能再接单，请联系客服。" if departure_expired else f"订单已超过{timeout}分钟接单时限，请联系客服。"}},
                 status=409,
             )
         from providers.training import require_training
@@ -564,6 +567,8 @@ class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
         order.accepted_at = timezone.now()
         order.save(update_fields=("status", "accepted_at", "updated_at"))
         cancel_provider_acceptance_timeout(order_no, "provider_accepted")
+        from taskcenter.services import register_provider_fulfillment_timeouts
+        register_provider_fulfillment_timeouts(order)
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_ACCEPTED,
@@ -669,6 +674,12 @@ class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_SERVICE:
             raise ValidationError({"status": "订单不在待服务状态。"})
+        if order.departure_deadline_at and timezone.now() >= order.departure_deadline_at:
+            from .timeouts import expire_provider_departure
+            outcome = expire_provider_departure(order_no)
+            # Return rather than raise: raising would roll back the timeout/refund.
+            message = "订单已超时取消，请查看订单处理结果。" if outcome["state"] in ("expired", "already_expired") else "订单已超过出发时限，请联系客服核实。"
+            return Response({"error": {"status": message}}, status=409)
         if not order.provider_contact_initiated_at:
             raise ValidationError({"contact": "请先点击联系用户，确认订单情况。"})
         serializer = ProviderOrderDepartInputSerializer(data=request.data)
@@ -677,6 +688,8 @@ class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
         order.departed_at = timezone.now()
         order.departure_contact_confirmed_at = order.departed_at
         order.save(update_fields=("status", "departed_at", "departure_contact_confirmed_at", "updated_at"))
+        from taskcenter.services import register_provider_fulfillment_timeouts
+        register_provider_fulfillment_timeouts(order)
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_DEPARTED,
@@ -738,6 +751,8 @@ class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
         order.service_started_at = timezone.now()
         assess_timing(order, stage="start", now=order.service_started_at)
         order.save()
+        from taskcenter.services import register_provider_fulfillment_timeouts
+        register_provider_fulfillment_timeouts(order)
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_STARTED,

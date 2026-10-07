@@ -20,6 +20,9 @@ class UserNotification(models.Model):
 
         ORDER_PAYMENT_SUCCESS = "order_payment_success", "订单支付成功"
         ORDER_ACCEPTED = "order_accepted", "达人已接单"
+        ORDER_DEPARTURE_REMINDER = "order_departure_reminder", "订单出发提醒"
+        ORDER_DEPARTURE_TIMEOUT = "order_departure_timeout", "订单未出发超时"
+        ORDER_FULFILLMENT_HELD = "order_fulfillment_held", "订单履约待核查"
         ORDER_PENDING_SUPPORT = "order_pending_support", "订单转客服处理"
         ORDER_DEPARTED = "order_departed", "达人已出发"
         ORDER_STARTED = "order_started", "服务已开始"
