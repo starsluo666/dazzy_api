@@ -69,7 +69,13 @@ from .views import (
     ScheduledTaskRetryView,
 )
 
+from .operations_views import AdminWorkItemsView, AdminWorkSummaryView, AdminFinanceWorkView, AdminNotificationChannelsView
+
 urlpatterns = [
+    path("work/summary/", AdminWorkSummaryView.as_view(), name="admin-work-summary"),
+    path("work/items/", AdminWorkItemsView.as_view(), name="admin-work-items"),
+    path("work/finance/", AdminFinanceWorkView.as_view(), name="admin-finance-work"),
+    path("work/channels/", AdminNotificationChannelsView.as_view(), name="admin-notification-channels"),
     path("provider-training/", AdminProviderTrainingView.as_view()),
     path("provider-training/publish/", AdminProviderTrainingPublishView.as_view()),
     path("assets/", AdminAssetListUploadView.as_view(), name="backoffice-assets"),

@@ -53,6 +53,22 @@ def create_order_notification(
     )
 
 
+def create_fulfillment_review_notification(order, *, resolved=False):
+    # Same event family, separate revisions/results. Internal audit notes stay private.
+    suffix = "resolved" if resolved else "held"
+    for recipient, parameter in ((order.customer, "orderNo"), (order.provider.user, "order_no")):
+        create_notification(
+            recipient=recipient, category=UserNotification.Category.ORDER,
+            event_type=UserNotification.EventType.ORDER_FULFILLMENT_HELD,
+            title="订单履约核查已完成" if resolved else "订单履约需客服核实",
+            content=("客服已完成核查，订单恢复正常处理流程，请查看订单最新状态。" if resolved
+                     else "本次履约时间需客服核实，自动确认与分账已暂停，请查看订单或联系客服。"),
+            target_type="provider_order", target_id=order.order_no,
+            action_text="查看订单", action_url=f"/pages/orders/detail?{parameter}={order.order_no}",
+            dedupe_key=f"fulfillment-review:{order.order_no}:{order.fulfillment_revision}:{suffix}:{recipient.pk}",
+        )
+
+
 def create_provider_new_order_notification(*, order):
     service_name = getattr(order, "service_name_snapshot", "")
     return create_notification(

@@ -74,6 +74,9 @@ def assess_timing(order, *, stage, now):
     if order.fulfillment_review_required:
         pause_confirmation(order, now=now)
         suspend_fulfillment_tasks(order)
+    if issues:
+        from notifications.services import create_fulfillment_review_notification
+        create_fulfillment_review_notification(order)
 
 
 def resolve_fulfillment_review(order, *, revision, reason, actor, now=None):
@@ -117,4 +120,6 @@ def resolve_fulfillment_review(order, *, revision, reason, actor, now=None):
         sync_provider_settlement_plan(order_no=order.order_no, now=now)
         if settlement.status in (settlement.Status.RISK_FROZEN, settlement.Status.DISPUTE_FROZEN):
             reopen_provider_order_settlement(settlement)
+    from notifications.services import create_fulfillment_review_notification
+    create_fulfillment_review_notification(order, resolved=True)
     return True

@@ -2,8 +2,8 @@ from datetime import datetime, time, timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import CharField, Count, Prefetch, Q, Sum
-from django.db.models.functions import Cast, TruncDate
+from django.db.models import Count, Prefetch, Q, Sum
+from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -65,6 +65,8 @@ from .models import (
     PlatformOperationSetting,
 )
 from .operation_settings import platform_operation_rules
+from .operations_queue import filter_work_queue, work_summary
+from .task_scope import scoped_scheduled_tasks
 from .serializers import (
     AdminActivityQuerySerializer,
     AdminActivityActionSerializer,
@@ -686,7 +688,8 @@ class AdminOverviewView(APIView):
             orders = orders.filter(provider__service_city_code__in=access.city_codes)
             activities = activities.filter(city_code__in=access.city_codes)
         trend = build_order_trend(orders, days=days)
-        provider_reviews = provider_review_summary(access)
+        work = work_summary(access, request.user)
+        pending_providers = sum(item["count"] for item in work["todos"] if item["key"].startswith("provider_") and item["group"] == "review")
         week_transaction_amount = sum(
             point["transaction_amount"] for point in trend["points"][-7:]
         )
@@ -696,7 +699,7 @@ class AdminOverviewView(APIView):
                     "metrics": {
                         "today_new_users": User.objects.filter(date_joined__date=today).count()
                         if access.all_data else None,
-                        "pending_providers": provider_reviews["total"],
+                        "pending_providers": pending_providers,
                         "active_orders": orders.filter(
                             status__in=(
                                 ProviderOrder.Status.PENDING_ACCEPTANCE,
@@ -709,38 +712,8 @@ class AdminOverviewView(APIView):
                         "week_transaction_amount": week_transaction_amount,
                     },
                     "trend": trend,
-                    "todos": [
-                        {
-                            "key": "provider_application_review",
-                            "label": "达人入驻初审",
-                            "count": provider_reviews["applications"],
-                            "priority": "high",
-                        },
-                        {
-                            "key": "provider_onboarding_review",
-                            "label": "达人开通审核",
-                            "count": provider_reviews["onboarding"],
-                            "priority": "high",
-                        },
-                        {
-                            "key": "provider_profile_review",
-                            "label": "达人资料变更审核",
-                            "count": provider_reviews["profile_changes"],
-                            "priority": "high",
-                        },
-                        {
-                            "key": "provider_service_review",
-                            "label": "达人服务变更审核",
-                            "count": provider_reviews["service_changes"],
-                            "priority": "high",
-                        },
-                        {
-                            "key": "activity_review",
-                            "label": "活动发布审核",
-                            "count": activities.filter(status=Activity.Status.PENDING_REVIEW).count(),
-                            "priority": "medium",
-                        },
-                    ],
+                    "todos": work["todos"],
+                    "work": work,
                 }
             }
         )
@@ -867,6 +840,7 @@ class AdminActivityListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = activity_admin_queryset(access)
+        queryset = filter_work_queue(queryset, access, request.query_params, ("activity_review",))
         if keyword := params.get("search", "").strip():
             queryset = queryset.filter(
                 Q(title__icontains=keyword)
@@ -1097,6 +1071,7 @@ class AdminActivityReportListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = activity_report_admin_queryset(access)
+        queryset = filter_work_queue(queryset, access, request.query_params, ("activity_reports",))
         if keyword := params.get("search", "").strip():
             queryset = queryset.filter(
                 Q(case_no__icontains=keyword)
@@ -1262,6 +1237,7 @@ class AdminActivityFinanceListView(APIView):
                     | Q(beneficiary__nickname__icontains=keyword)
                 )
             serializer_class = AdminActivitySettlementSerializer
+        queryset = filter_work_queue(queryset, access, request.query_params, ("activity_after_sales", "activity_refund_attention"))
         if status_value := params.get("status", "").strip():
             queryset = queryset.filter(status=status_value)
         page = params["page"]
@@ -1364,6 +1340,7 @@ class ProviderOrderFinanceListView(APIView):
                     | Q(order__order_no__icontains=search)
                     | Q(order__provider_name_snapshot__icontains=search)
                 )
+        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_refund_attention",))
         if status_value and record_type != "exception":
             queryset = queryset.filter(status=status_value)
         page = params["page"]
@@ -1548,6 +1525,7 @@ class ProviderApplicationListView(APIView):
         queryset = scoped_providers(access).select_related("user", "lifestyle_photo").prefetch_related(
             "services__category", "category_grants__category"
         )
+        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_application_review",))
         queryset = queryset.filter(status=params["status"])
         if city_code := params.get("city_code"):
             queryset = queryset.filter(service_city_code=city_code)
@@ -1751,6 +1729,8 @@ class ProviderChangeReviewListView(APIView):
             if not access.all_data:
                 queryset = queryset.filter(provider__service_city_code__in=access.city_codes)
             queryset = queryset.order_by("-submitted_at", "-id")
+        queryset = filter_work_queue(queryset, access, request.query_params,
+                                     ("provider_onboarding_review", "provider_profile_review", "provider_service_review"))
         page = params["page"]
         page_size = params["page_size"]
         total = queryset.count()
@@ -2164,6 +2144,7 @@ class ProviderOrderAdminListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = provider_order_queryset(access)
+        queryset = filter_work_queue(queryset, access, request.query_params, ("fulfillment_review", "legacy_overdue", "order_support"))
         if city_code := params.get("city_code"):
             queryset = queryset.filter(provider__service_city_code=city_code)
         if keyword := params.get("search", "").strip():
@@ -2420,6 +2401,7 @@ class ProviderOrderAfterSalesListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = provider_order_after_sales_queryset(access)
+        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_after_sales",))
         if city_code := params.get("city_code"):
             queryset = queryset.filter(order__provider__service_city_code=city_code)
         if keyword := params.get("search", "").strip():
@@ -3266,53 +3248,6 @@ class AuditLogListView(APIView):
         return Response({"data": {"items": AuditLogSerializer(items, many=True).data, "pagination": {"page": page, "page_size": page_size, "total": total}}})
 
 
-def scoped_scheduled_tasks(access):
-    queryset = ScheduledTask.objects.all()
-    if access.all_data:
-        return queryset
-    visible_order_nos = scoped_provider_orders(access).values("order_no")
-    visible_provider_refund_nos = ProviderOrderRefundOrder.objects.filter(
-        order__in=scoped_provider_orders(access)
-    ).values("refund_no")
-    visible_activities = scoped_activities(access)
-    visible_activity_ids = visible_activities.annotate(
-        task_business_key=Cast("id", output_field=CharField())
-    ).values("task_business_key")
-    visible_participation_order_nos = ActivityParticipationPaymentOrder.objects.filter(
-        participation__activity__in=visible_activities,
-    ).values("order_no")
-    visible_publish_order_nos = ActivityPublishOrder.objects.filter(
-        activity__in=visible_activities
-    ).values("order_no")
-    visible_participation_refund_nos = ActivityParticipationRefundOrder.objects.filter(
-        activity__in=visible_activities
-    ).values("refund_no")
-    return queryset.filter(
-        Q(
-            business_type="provider_order",
-            business_key__in=visible_order_nos,
-        )
-        | Q(
-            business_type="provider_order_refund",
-            business_key__in=visible_provider_refund_nos,
-        )
-        | Q(
-            business_type="activity",
-            business_key__in=visible_activity_ids,
-        )
-        | Q(
-            business_type="activity_participation",
-            business_key__in=visible_participation_order_nos,
-        )
-        | Q(
-            business_type="activity_publish_payment",
-            business_key__in=visible_publish_order_nos,
-        )
-        | Q(
-            business_type="activity_participation_refund",
-            business_key__in=visible_participation_refund_nos,
-        )
-    )
 
 
 class ScheduledTaskListView(APIView):
@@ -3347,7 +3282,7 @@ class ScheduledTaskListView(APIView):
                 )
             ).count(),
         }
-        queryset = scoped
+        queryset = filter_work_queue(scoped, access, request.query_params, ("critical_tasks",))
         if task_type := data.get("task_type"):
             queryset = queryset.filter(task_type=task_type)
         if task_status := data.get("status"):

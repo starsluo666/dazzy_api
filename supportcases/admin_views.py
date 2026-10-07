@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from backoffice.access import resolve_admin_access
+from backoffice.operations_queue import filter_work_queue
 
 from .admin_services import (
     add_operator_reply,
@@ -30,6 +31,7 @@ class AdminSupportCaseListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = admin_support_case_queryset(access)
+        queryset = filter_work_queue(queryset, access, request.query_params, ("support_cases",))
         if city_code := params.get("city_code"):
             queryset = queryset.filter(city_code=city_code)
         if keyword := params.get("search", "").strip():

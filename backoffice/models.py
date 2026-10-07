@@ -399,6 +399,18 @@ class UserRiskFlag(models.Model):
         return f"{self.user} / {self.get_level_display()}"
 
 
+class AdminWorkReadReceipt(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="admin_work_reads")
+    queue_key = models.CharField(max_length=64)
+    object_id = models.CharField(max_length=40)
+    event_version = models.CharField(max_length=160)
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("user", "queue_key", "object_id", "event_version"),
+                                               name="admin_work_read_unique")]
+
+
 class ProviderCreditAdjustment(models.Model):
     class Source(models.TextChoices):
         MANUAL = "manual", "人工调整"
