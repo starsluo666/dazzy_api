@@ -254,7 +254,19 @@ class ProviderOrderAfterSalesInputSerializer(serializers.Serializer):
             raise serializers.ValidationError("证明材料不存在或无权使用。")
         return value
 
+class ProviderOrderTerminationInputSerializer(ProviderOrderAfterSalesInputSerializer):
+    case_type = None
+    requested_amount = None
+    ended_at = serializers.DateTimeField()
+
+
 class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
+    termination = serializers.SerializerMethodField()
+
+    def get_termination(self, obj):
+        from .termination import termination_payload
+        return termination_payload(obj)
+
     status_label = serializers.CharField(source="get_status_display")
     case_type_label = serializers.CharField(source="get_case_type_display")
     evidence_urls = serializers.SerializerMethodField()
@@ -265,7 +277,7 @@ class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
         fields = (
             "case_no", "case_type", "case_type_label", "status", "status_label",
             "requested_amount", "approved_amount", "reason", "evidence_urls",
-            "result_note", "reviewed_at", "refund_order", "created_at", "updated_at",
+            "result_note", "reviewed_at", "refund_order", "created_at", "updated_at", "termination",
         )
 
     def get_evidence_urls(self, obj):
@@ -357,6 +369,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
         )
         return {
             "case_no": case.case_no,
+            "termination": ProviderOrderAfterSalesSerializer().get_termination(case),
             "case_type": case.case_type,
             "case_type_label": case.get_case_type_display(),
             "status": case.status,

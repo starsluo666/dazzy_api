@@ -225,6 +225,24 @@ class ProviderOrderDetailView(APIView):
         return Response({"data": ProviderOrderSerializer(self.get_object(request, order_no)).data})
 
 
+class ProviderOrderTerminationView(APIView):
+    permission_classes = [IsAuthenticated]
+    role = "customer"
+
+    def post(self, request, order_no):
+        from .serializers import ProviderOrderTerminationInputSerializer
+        from .termination import request_termination
+        serializer = ProviderOrderTerminationInputSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        case, created = request_termination(
+            order_no=order_no, actor=request.user, role=self.role,
+            ended_at=data["ended_at"], reason=data["reason"],
+            evidence_object_keys=[asset.object_key for asset in data.get("evidence_asset_ids", [])],
+        )
+        return Response({"data": ProviderOrderAfterSalesSerializer(case).data}, status=201 if created else 200)
+
+
 class ProviderOrderAfterSalesView(APIView):
     permission_classes = [IsAuthenticated]
 

@@ -1308,6 +1308,8 @@ def create_provider_order_after_sales_case(
     )
     if not order.paid_at:
         raise ValidationError("未支付订单不能登记退款或售后。")
+    if order.status == ProviderOrder.Status.TERMINATED:
+        raise ValidationError("提前终止订单已裁定，请通过原工单进行人工复核，不得改回普通售后。")
     from orders.distributions import assert_refund_not_distributed
     assert_refund_not_distributed(order)
     if order.status == ProviderOrder.Status.REFUNDED:
@@ -1388,13 +1390,20 @@ def create_provider_order_after_sales_case(
 
 @transaction.atomic
 def review_provider_order_after_sales_case(
-    *, case_no, action, approved_amount, result_note, actor, access, request
+    *, case_no, action, approved_amount, result_note, actor, access, request, termination_data=None
 ):
-    queryset = ProviderOrderAfterSalesCase.objects.select_for_update().select_related("order")
+    if action == "resolve_termination":
+        from orders.termination import resolve_termination
+        return resolve_termination(case_no=case_no, result_note=result_note, actor=actor,
+                                   access=access, request=request, **(termination_data or {}))
+    queryset = ProviderOrderAfterSalesCase.objects.select_related("order")
     if not access.all_data:
         queryset = queryset.filter(order__provider__service_city_code__in=access.city_codes)
     case = get_object_or_404(queryset, case_no=case_no)
     order = ProviderOrder.objects.select_for_update().get(pk=case.order_id)
+    case = ProviderOrderAfterSalesCase.objects.select_for_update().get(pk=case.pk)
+    if case.case_type == ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION and action == "approve":
+        raise ValidationError("提前终止申请须核定实际结束时间、责任和各项退款明细。")
     if action == "escalate":
         if case.status not in ("pending", "processing"):
             raise ValidationError("仅待处理或处理中的售后单可以转主管。")
@@ -1477,6 +1486,15 @@ def review_provider_order_after_sales_case(
         case.reviewed_at = timezone.now()
         if order.status == ProviderOrder.Status.AFTER_SALES:
             order.status = case.original_order_status
+            if (case.case_type == ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION
+                    and order.status == ProviderOrder.Status.PENDING_CONFIRMATION
+                    and not order.fulfillment_review_required):
+                from datetime import timedelta
+                remaining = order.confirmation_remaining_seconds
+                if remaining is not None:
+                    order.confirmation_expires_at = timezone.now() + timedelta(seconds=remaining)
+                    order.confirmation_remaining_seconds = None
+                    order.save(update_fields=("confirmation_expires_at", "confirmation_remaining_seconds"))
             order.save(update_fields=("status", "updated_at"))
             if order.status == ProviderOrder.Status.PENDING_CONFIRMATION:
                 reopen_provider_order_confirmation_timeout(order)
@@ -1506,6 +1524,9 @@ def review_provider_order_after_sales_case(
         ip_address=client_ip(request),
     )
     if action in ("approve", "reject"):
+        if case.case_type == ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION:
+            from orders.termination import notify_provider
+            notify_provider(case, decided=True)
         create_order_notification(
             order=order,
             event_type=UserNotification.EventType.ORDER_AFTER_SALES_RESULT,

@@ -19,6 +19,7 @@ class ProviderOrder(models.Model):
         PENDING_CONFIRMATION = "pending_confirmation", "待确认"
         PENDING_REVIEW = "pending_review", "待评价"
         COMPLETED = "completed", "已完成"
+        TERMINATED = "terminated", "已提前终止"
         CANCELLED = "cancelled", "已取消"
         AFTER_SALES = "after_sales", "售后中"
         REFUNDED = "refunded", "已退款"

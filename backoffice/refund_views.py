@@ -73,6 +73,8 @@ def refund_context(source, kind):
         ).first()
         if not source.paid_at:
             blocked = "订单尚未支付。"
+        elif source.status == ProviderOrder.Status.TERMINATED:
+            blocked = "提前终止订单已裁定，如需复核请联系财务处理原工单。"
         elif ProviderOrderDistribution.objects.filter(settlement__order=source).exists():
             blocked = "订单已进入渠道分账流程，请转财务核查；本入口不能回退分账。"
         elif ProviderOrderSettlement.objects.filter(order=source, status="settled").exists():

@@ -1370,27 +1370,43 @@ class ProviderOrderFinanceQuerySerializer(serializers.Serializer):
 
 class ProviderOrderAfterSalesCaseCreateSerializer(serializers.Serializer):
     order_no = serializers.CharField(max_length=32)
-    case_type = serializers.ChoiceField(choices=ProviderOrderAfterSalesCase.CaseType.choices)
+    case_type = serializers.ChoiceField(choices=[choice for choice in ProviderOrderAfterSalesCase.CaseType.choices if choice[0] != "early_termination"])
     requested_amount = serializers.IntegerField(min_value=0)
     reason = serializers.CharField(min_length=5, max_length=1000, trim_whitespace=True)
 
 
 class ProviderOrderAfterSalesCaseActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(
-        choices=("start_review", "approve", "reject", "retry_refund", "escalate")
+        choices=("start_review", "approve", "reject", "retry_refund", "escalate", "resolve_termination")
     )
     approved_amount = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     result_note = serializers.CharField(
         required=False, allow_blank=True, max_length=1000, trim_whitespace=True
     )
 
+    ended_at = serializers.DateTimeField(required=False)
+    responsibility = serializers.ChoiceField(choices=("provider", "customer", "both", "neither"), required=False)
+    component_refunds = serializers.DictField(child=serializers.IntegerField(min_value=0), required=False)
+
     def validate(self, attrs):
-        if attrs["action"] in ("approve", "reject", "escalate") and len(attrs.get("result_note", "")) < 5:
+        if attrs["action"] in ("approve", "reject", "escalate", "resolve_termination") and len(attrs.get("result_note", "")) < 5:
             raise serializers.ValidationError({"result_note": "审核结论至少填写 5 个字。"})
+        if attrs["action"] == "resolve_termination":
+            for field in ("ended_at", "responsibility", "component_refunds"):
+                if field not in attrs:
+                    raise serializers.ValidationError({field: "请完整填写终止裁定信息。"})
+            if set(attrs["component_refunds"]) != {"service", "transport", "other"}:
+                raise serializers.ValidationError({"component_refunds": "请分别填写服务费、交通费和其他费用退款金额。"})
         return attrs
 
 
 class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
+    termination = serializers.SerializerMethodField()
+
+    def get_termination(self, obj):
+        from orders.termination import termination_payload
+        return termination_payload(obj)
+
     status_label = serializers.SerializerMethodField()
     def get_status_label(self, obj):
         return "待主管审核" if obj.requires_supervisor and obj.status in ("pending", "processing") else obj.get_status_display()
@@ -1423,7 +1439,7 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
             "service_city_code", "service_city_name", "requested_amount",
             "approved_amount", "reason", "evidence_urls", "result_note", "creator_name",
             "organization_name", "reviewed_by_name", "reviewed_at", "created_at",
-            "updated_at", "refund_order",
+            "updated_at", "refund_order", "termination",
         )
 
     def get_refund_order(self, obj):

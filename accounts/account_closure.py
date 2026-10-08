@@ -158,6 +158,7 @@ def account_closure_blockers(user) -> list[dict[str, object]]:
             ).exclude(
                 status__in=(
                     ProviderOrder.Status.COMPLETED,
+                    ProviderOrder.Status.TERMINATED,
                     ProviderOrder.Status.CANCELLED,
                     ProviderOrder.Status.REFUNDED,
                 )

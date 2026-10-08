@@ -269,6 +269,7 @@ class ProviderOrderAfterSalesCase(models.Model):
     escalation_reason = models.CharField(max_length=200, blank=True)
     class CaseType(models.TextChoices):
         REFUND = "refund", "退款申请"
+        EARLY_TERMINATION = "early_termination", "提前终止服务"
         SERVICE_DISPUTE = "service_dispute", "服务争议"
         PROVIDER_CANCEL = "provider_cancel", "达人取消"
         OTHER = "other", "其他售后"
@@ -279,6 +280,7 @@ class ProviderOrderAfterSalesCase(models.Model):
         APPROVED = "approved", "已同意·待退款"
         REFUNDED = "refunded", "退款成功"
         REJECTED = "rejected", "已驳回"
+        RESOLVED = "resolved", "已处理·无需退款"
 
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     case_no = models.CharField(
@@ -311,6 +313,7 @@ class ProviderOrderAfterSalesCase(models.Model):
     )
     reason = models.CharField("申请原因", max_length=1000)
     evidence_object_keys = models.JSONField("凭证对象键", default=list, blank=True)
+    termination_snapshot = models.JSONField("提前终止申请及裁定快照", default=dict, blank=True)
     result_note = models.CharField("审核结论", max_length=1000, blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

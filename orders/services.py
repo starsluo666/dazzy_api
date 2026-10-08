@@ -1212,7 +1212,7 @@ def _discounted_order_components(order: ProviderOrder) -> dict[str, int]:
         "transport": transport_amount,
         "other": other_amount,
     }
-def _refund_allocation(order: ProviderOrder, amount: int) -> dict[str, int]:
+def _refund_allocation(order: ProviderOrder, amount: int, *, components_override=None) -> dict[str, int]:
     # Failed refunds remain retryable, so their amount must stay reserved to avoid
     # issuing another refund against the same paid balance.
     reserved = order.refund_orders.aggregate(
@@ -1226,6 +1226,16 @@ def _refund_allocation(order: ProviderOrder, amount: int) -> dict[str, int]:
         raise ValidationError({"approved_amount": "核准退款金额必须大于 0。"})
     if amount > order.payable_amount - (reserved["total"] or 0):
         raise ValidationError({"approved_amount": "核准退款金额超过当前可退金额。"})
+
+    if components_override is not None:
+        if (set(components_override) != {"service", "transport", "other"}
+                or any(type(value) is not int or value < 0 for value in components_override.values())
+                or sum(components_override.values()) != amount):
+            raise ValidationError("退款费用明细与退款总额不一致。")
+        for key, value in components_override.items():
+            if value > max(components[key] - (reserved[key] or 0), 0):
+                raise ValidationError(f"{key} 退款超过该项费用剩余可退金额。")
+        return dict(components_override)
 
     remaining = amount
     allocation = {"service": 0, "transport": 0, "other": 0}
@@ -1258,6 +1268,8 @@ def create_customer_provider_order_after_sales_case(
         raise ValidationError("订单不存在或无权操作。")
     if not order.paid_at:
         raise ValidationError("未支付订单不能申请退款或售后。")
+    if order.status == ProviderOrder.Status.TERMINATED:
+        raise ValidationError("提前终止订单已裁定，如需复核请联系客服，不能重新进入普通售后。")
     if order.status == ProviderOrder.Status.REFUNDED:
         raise ValidationError("该订单已经全额退款。")
 
@@ -1333,6 +1345,7 @@ def create_provider_order_refund(
     idempotency_key: str,
     reason: str,
     operator=None,
+    components_override=None,
 ):
     from taskcenter.services import cancel_provider_order_settlement
 
@@ -1345,6 +1358,12 @@ def create_provider_order_refund(
     if existing:
         if existing.order_id != order.id or existing.refund_amount != amount:
             raise ValidationError("退款幂等键对应的业务参数不一致。")
+        if components_override is not None and components_override != {
+            "service": existing.service_fee_refund_amount,
+            "transport": existing.transport_fee_refund_amount,
+            "other": existing.other_fee_refund_amount,
+        }:
+            raise ValidationError("退款幂等键对应的费用明细不一致。")
         return existing, False
     from .distributions import assert_refund_not_distributed
 
@@ -1358,7 +1377,7 @@ def create_provider_order_refund(
     settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
     if settlement and settlement.status == ProviderOrderSettlement.Status.SETTLED:
         raise ValidationError("订单资金已经结算，不能直接退款，请转异常交易处理。")
-    allocation = _refund_allocation(order, amount)
+    allocation = _refund_allocation(order, amount, components_override=components_override)
     from wallets.models import WalletPaymentAllocation
 
     payment_allocation = WalletPaymentAllocation.objects.select_for_update().filter(
@@ -1402,7 +1421,8 @@ def create_provider_order_refund(
                 external_refund_amount=external_refund_amount,
                 allocation_snapshot={
                     "version": "provider-refund-allocation-v1",
-                    "priority": ["service", "other", "transport"],
+                    "priority": [] if components_override is not None else ["service", "other", "transport"],
+                    "allocation_basis": "support_adjudication" if components_override is not None else "default_priority",
                     "service_fee_refund_amount": allocation["service"],
                     "transport_fee_refund_amount": allocation["transport"],
                     "other_fee_refund_amount": allocation["other"],
@@ -1551,6 +1571,9 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     ).first()
     if not settlement:
         return {"state": "missing", "order_no": order_no}
+    if order.status == ProviderOrder.Status.TERMINATED:
+        sync_provider_settlement_plan(order_no=order_no, now=now)
+        return {"state": "termination_reconciliation", "order_no": order_no}
     if order.fulfillment_review_required:
         from .fulfillment import suspend_fulfillment_tasks
         suspend_fulfillment_tasks(order)
@@ -1711,18 +1734,30 @@ def _complete_provider_order_refund(
         if case:
             case.status = ProviderOrderAfterSalesCase.Status.REFUNDED
             case.save(update_fields=("status", "updated_at"))
+        terminated = order.status == ProviderOrder.Status.TERMINATED or bool(
+            case and case.case_type == ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION
+            and case.termination_snapshot.get("decision")
+        ) or order.after_sales_cases.filter(
+            case_type=ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION,
+            status__in=("approved", "refunded", "resolved"),
+        ).exists()
         if payment.status == ProviderOrderPaymentOrder.Status.REFUNDED:
-            order.status = ProviderOrder.Status.REFUNDED
+            order.status = ProviderOrder.Status.TERMINATED if terminated else ProviderOrder.Status.REFUNDED
             from .coupons import release_coupon
             release_coupon(order, refunded=True)
+        elif terminated:
+            order.status = ProviderOrder.Status.TERMINATED
         elif case and order.status == ProviderOrder.Status.AFTER_SALES:
             order.status = case.original_order_status
         order.save(update_fields=("status", "updated_at"))
 
+        if terminated:
+            from .termination import reconcile_termination_settlement
+            reconcile_termination_settlement(order)
         settlement = ProviderOrderSettlement.objects.select_for_update().filter(
             order=order
         ).first()
-        if settlement:
+        if settlement and not terminated:
             amounts = _settlement_amounts(order, settlement.platform_commission_rate)
             _apply_settlement_amounts(settlement, amounts)
             if settlement.refunded_amount >= settlement.paid_amount:

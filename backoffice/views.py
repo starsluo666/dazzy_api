@@ -2179,6 +2179,7 @@ class ProviderOrderAdminListView(APIView):
             "ended": (
                 ProviderOrder.Status.PENDING_REVIEW,
                 ProviderOrder.Status.COMPLETED,
+                ProviderOrder.Status.TERMINATED,
                 ProviderOrder.Status.CANCELLED,
                 ProviderOrder.Status.AFTER_SALES,
                 ProviderOrder.Status.REFUNDED,
@@ -2403,7 +2404,7 @@ class ProviderOrderAfterSalesListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = provider_order_after_sales_queryset(access)
-        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_after_sales", "provider_refund_escalated"))
+        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_after_sales", "provider_refund_escalated", "termination_reconciliation"))
         if city_code := params.get("city_code"):
             queryset = queryset.filter(order__provider__service_city_code=city_code)
         if keyword := params.get("search", "").strip():
@@ -2495,6 +2496,7 @@ class ProviderOrderAfterSalesActionView(APIView):
             approved_amount=serializer.validated_data.get("approved_amount"),
             result_note=serializer.validated_data.get("result_note", ""),
             action=serializer.validated_data["action"],
+            termination_data={key: serializer.validated_data[key] for key in ("ended_at", "responsibility", "component_refunds") if key in serializer.validated_data},
         )
         if serializer.validated_data["action"] == "retry_refund":
             from orders.models import ProviderOrderRefundOrder

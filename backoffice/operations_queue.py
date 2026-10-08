@@ -81,7 +81,7 @@ def queues(access, *, now=None):
         result.append(Queue("activity_review", "活动发布审核", "review", activities.filter(status="pending_review"),
                             "activities", "title", version=Cast("updated_at", CharField()), query={"activity_status": "pending_review"}))
     if permitted(access, "order.fulfillment.view", "order.fulfillment.review"):
-        active = orders.exclude(status__in=("cancelled", "refunded"))
+        active = orders.exclude(status__in=("cancelled", "refunded", "terminated"))
         result.append(Queue("fulfillment_review", "履约异常待核查", "urgent", active.filter(fulfillment_review_required=True),
                             "orders", "order_no", Coalesce("completion_submitted_at", "service_started_at", "start_deadline_at", "starts_at"),
                             Cast("fulfillment_revision", CharField()), hours=1))
@@ -104,6 +104,12 @@ def queues(access, *, now=None):
         if permitted(access, "refund.supervise"):
             result.append(Queue("provider_refund_escalated", "达人退款待主管审核", "urgent",
                 cases.filter(requires_supervisor=True), "after_sales", "case_no", hours=1))
+    if permitted(access, "order.after_sales.view", "order.finance.view"):
+        result.append(Queue("termination_reconciliation", "提前终止剩余款待核账", "finance",
+            ProviderOrderAfterSalesCase.objects.filter(order__in=orders, case_type="early_termination",
+                status__in=("refunded", "resolved"), order__status="terminated").filter(
+                    Q(order__settlement__status="dispute_frozen") | Q(order__settlement__isnull=True)),
+            "after_sales", "case_no", hours=24))
     if permitted(access, "support.case.view", "support.case.manage"):
         # Replies and review requests must alert even if the number of cases is unchanged.
         latest = SupportCaseRecord.objects.filter(case_id=OuterRef("pk"),
