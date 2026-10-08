@@ -70,8 +70,12 @@ from .views import (
 )
 
 from .operations_views import AdminWorkItemsView, AdminWorkSummaryView, AdminFinanceWorkView, AdminNotificationChannelsView
+from .refund_views import StaffRefundContextView, StaffActivityRefundCreateView, StaffRefundPolicyView
 
 urlpatterns = [
+    path("refund-policy/", StaffRefundPolicyView.as_view(), name="admin-refund-policy"),
+    path("refund-context/<str:kind>/<str:reference>/", StaffRefundContextView.as_view(), name="admin-refund-context"),
+    path("activity-payments/<str:reference>/after-sales/", StaffActivityRefundCreateView.as_view(), name="admin-activity-refund-create"),
     path("work/summary/", AdminWorkSummaryView.as_view(), name="admin-work-summary"),
     path("work/items/", AdminWorkItemsView.as_view(), name="admin-work-items"),
     path("work/finance/", AdminFinanceWorkView.as_view(), name="admin-finance-work"),

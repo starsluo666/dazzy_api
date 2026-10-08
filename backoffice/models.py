@@ -161,6 +161,8 @@ class PlatformOperationSetting(models.Model):
     discovery_cities = models.JSONField("发现页开通城市", default=default_discovery_cities)
     singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
     customer_service_phone = models.CharField(max_length=32, blank=True, default="")
+    support_refund_single_limit = models.PositiveBigIntegerField("客服单订单退款上限（分）", default=0)
+    support_refund_daily_limit = models.PositiveBigIntegerField("客服每日退款审批上限（分）", default=0)
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
     provider_order_early_tolerance_minutes = models.PositiveSmallIntegerField(default=30)
@@ -263,6 +265,8 @@ class ProviderOrderSupportNote(models.Model):
 
 
 class ProviderOrderAfterSalesCase(models.Model):
+    requires_supervisor = models.BooleanField(default=False)
+    escalation_reason = models.CharField(max_length=200, blank=True)
     class CaseType(models.TextChoices):
         REFUND = "refund", "退款申请"
         SERVICE_DISPUTE = "service_dispute", "服务争议"

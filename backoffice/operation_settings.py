@@ -4,6 +4,8 @@ from decimal import Decimal
 
 DEFAULT_PLATFORM_OPERATION_RULES = {
     "customer_service_phone": "",
+    "support_refund_single_limit": 0,
+    "support_refund_daily_limit": 0,
     "provider_order_payment_timeout_minutes": 15,
     "provider_order_confirmation_timeout_days": 3,
     "provider_order_early_tolerance_minutes": 30,

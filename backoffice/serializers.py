@@ -415,8 +415,10 @@ class AdminActivityParticipationRefundSerializer(serializers.ModelSerializer):
 
 
 class AdminActivityAfterSalesSerializer(serializers.ModelSerializer):
+    payment_order_no = serializers.SerializerMethodField()
+    created_by_operator_name = serializers.CharField(source="created_by_operator.nickname", allow_null=True, read_only=True)
     reason_label = serializers.CharField(source="get_reason_display")
-    status_label = serializers.CharField(source="get_status_display")
+    status_label = serializers.SerializerMethodField()
     activity_id = serializers.IntegerField(source="participation.activity_id")
     activity_title = serializers.CharField(source="participation.activity.title")
     city_code = serializers.CharField(source="participation.activity.city_code")
@@ -431,6 +433,7 @@ class AdminActivityAfterSalesSerializer(serializers.ModelSerializer):
         model = ActivityAfterSalesCase
         fields = (
             "case_no", "activity_id", "activity_title", "city_code", "city_name",
+            "requires_supervisor", "escalation_reason", "created_by_operator_name", "payment_order_no",
             "applicant_name", "applicant_phone_masked", "reason", "reason_label",
             "description", "evidence_count", "status", "status_label",
             "requested_principal_amount", "requested_service_fee_amount",
@@ -442,12 +445,21 @@ class AdminActivityAfterSalesSerializer(serializers.ModelSerializer):
     def get_applicant_phone_masked(self, obj):
         return mask_phone(obj.applicant.phone)
 
+    def get_payment_order_no(self, obj):
+        if obj.refund_order_id:
+            return obj.refund_order.payment_order.order_no
+        payment = next((item for item in obj.participation.payment_orders.all() if item.status in ("paid", "partially_refunded")), None)
+        return payment.order_no if payment else ""
+
+    def get_status_label(self, obj):
+        return "待主管审核" if obj.requires_supervisor and obj.status in ("pending", "processing") else obj.get_status_display()
+
     def get_evidence_count(self, obj):
         return len(obj.evidence_object_keys)
 
 
 class AdminActivityAfterSalesActionSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=("start_review", "approve", "reject"))
+    action = serializers.ChoiceField(choices=("start_review", "approve", "reject", "escalate"))
     approved_principal_amount = serializers.IntegerField(
         required=False, allow_null=True, min_value=0
     )
@@ -459,7 +471,7 @@ class AdminActivityAfterSalesActionSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
-        if attrs["action"] in ("approve", "reject") and len(
+        if attrs["action"] in ("approve", "reject", "escalate") and len(
             attrs.get("result_note", "")
         ) < 5:
             raise serializers.ValidationError({"result_note": "处理结论至少填写5个字。"})
@@ -1365,7 +1377,7 @@ class ProviderOrderAfterSalesCaseCreateSerializer(serializers.Serializer):
 
 class ProviderOrderAfterSalesCaseActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(
-        choices=("start_review", "approve", "reject", "retry_refund")
+        choices=("start_review", "approve", "reject", "retry_refund", "escalate")
     )
     approved_amount = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     result_note = serializers.CharField(
@@ -1373,13 +1385,16 @@ class ProviderOrderAfterSalesCaseActionSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
-        if attrs["action"] in ("approve", "reject") and len(attrs.get("result_note", "")) < 5:
+        if attrs["action"] in ("approve", "reject", "escalate") and len(attrs.get("result_note", "")) < 5:
             raise serializers.ValidationError({"result_note": "审核结论至少填写 5 个字。"})
         return attrs
 
 
 class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
-    status_label = serializers.CharField(source="get_status_display")
+    status_label = serializers.SerializerMethodField()
+    def get_status_label(self, obj):
+        return "待主管审核" if obj.requires_supervisor and obj.status in ("pending", "processing") else obj.get_status_display()
+
     case_type_label = serializers.CharField(source="get_case_type_display")
     order_no = serializers.CharField(source="order.order_no")
     order_status = serializers.CharField(source="order.status")
@@ -1402,6 +1417,7 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
         model = ProviderOrderAfterSalesCase
         fields = (
             "public_id", "case_no", "case_type", "case_type_label", "status",
+            "requires_supervisor", "escalation_reason",
             "status_label", "order_no", "order_status", "order_status_label",
             "order_payable_amount", "customer_name", "provider_name", "service_name",
             "service_city_code", "service_city_name", "requested_amount",
@@ -1948,6 +1964,8 @@ class DiscoveryCitySerializer(serializers.Serializer):
 
 
 class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    support_refund_single_limit = serializers.IntegerField(min_value=0, max_value=10_000_000, required=False)
+    support_refund_daily_limit = serializers.IntegerField(min_value=0, max_value=100_000_000, required=False)
     provider_order_departure_grace_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)
     provider_order_no_departure_credit_penalty = serializers.IntegerField(min_value=0, max_value=100, required=False)
     provider_order_early_tolerance_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)

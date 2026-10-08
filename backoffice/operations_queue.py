@@ -98,9 +98,12 @@ def queues(access, *, now=None):
         result.append(Queue("provider_refund_attention", "达人订单退款异常", "urgent", refunds,
                             "settlements", "refund_no", version=F("_refund_event"), hours=1, query={"record_type": "refund"}))
     if permitted(access, "order.after_sales.view", "order.after_sales.review"):
+        cases = ProviderOrderAfterSalesCase.objects.filter(order__in=orders, status__in=("pending", "processing"))
         result.append(Queue("provider_after_sales", "达人订单售后待处理", "support",
-                            ProviderOrderAfterSalesCase.objects.filter(order__in=orders, status__in=("pending", "processing")),
-                            "after_sales", "case_no", hours=4))
+                            cases.filter(requires_supervisor=False), "after_sales", "case_no", hours=4))
+        if permitted(access, "refund.supervise"):
+            result.append(Queue("provider_refund_escalated", "达人退款待主管审核", "urgent",
+                cases.filter(requires_supervisor=True), "after_sales", "case_no", hours=1))
     if permitted(access, "support.case.view", "support.case.manage"):
         # Replies and review requests must alert even if the number of cases is unchanged.
         latest = SupportCaseRecord.objects.filter(case_id=OuterRef("pk"),
@@ -114,9 +117,13 @@ def queues(access, *, now=None):
                             ActivityReport.objects.filter(activity__in=activities, status__in=("pending", "processing")),
                             "activity_reports", "case_no", hours=4))
     if permitted(access, "activity_finance.view", "activity_after_sales.manage"):
+        cases = ActivityAfterSalesCase.objects.filter(participation__activity__in=activities, status__in=("pending", "processing"))
         result.append(Queue("activity_after_sales", "活动售后待处理", "support",
-                            ActivityAfterSalesCase.objects.filter(participation__activity__in=activities, status__in=("pending", "processing")),
+                            cases.filter(requires_supervisor=False),
                             "activity_finance", "case_no", hours=4, query={"record_type": "after_sales"}))
+        if permitted(access, "refund.supervise"):
+            result.append(Queue("activity_refund_escalated", "活动退款待主管审核", "urgent",
+                cases.filter(requires_supervisor=True), "activity_finance", "case_no", hours=1, query={"record_type": "after_sales"}))
         refunds = refund_attention(ActivityParticipationRefundOrder.objects.filter(activity__in=activities),
                                    ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND, now)
         result.append(Queue("activity_refund_attention", "活动报名退款异常", "urgent", refunds,

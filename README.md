@@ -241,3 +241,69 @@ uv run python scripts/check_wechat_auth.py backoffice.test_operations_queue back
 `copilot-troubleshooting-playbooks` 四份规范。现有官方 Python SDK、请求/验签/查单补偿、
 幂等键、终态保护及账务更新责任均保留；本次不调用渠道、不修改传输或调试日志配置。
 真实到账、长期对账及隔离 PostgreSQL 并发仍需人工/授权环境验收，离线测试不证明渠道生产可用。
+
+## 客服人工退款：登记、审批及主管复核
+
+后台「订单管理 → 履约详情」增加登记退款；活动详情的报名用户，以及活动账务的参与支付记录，
+可按报名支付单登记退款。弹窗读取服务端实付、已退款、仍占用和剩余可退金额，必须填写原因并二次确认。
+登记只创建售后申请，不发起渠道退款；沿用售后冻结自动确认/结算流程，人工退款本身不扣达人信用分。
+本次仅覆盖达人订单和活动参与报名，不新增活动发布费退款或整场活动取消入口。
+
+### 发布与授权
+
+先执行 `activities.0016_staff_refund_review`、`backoffice.0035_staff_refund_controls` 迁移，再发布 API、后台和 Worker。
+迁移不自动授予现有角色新权限，两个额度默认均为 0；超级管理员及已有通配权限角色仍具有全部权限。
+`grant_platform_admin` 是管理员显式执行的授权命令，本次未运行；执行它会给目标平台管理员包括下列新权限。
+
+| 操作 | 必需权限 |
+| --- | --- |
+| 登记达人订单售后 | `order.after_sales.view` + `order.after_sales.create` |
+| 登记活动报名退款 | `activity_finance.view` + `activity_after_sales.create` |
+| 领取、驳回、转主管 | 对应业务原售后处理权限；已转主管的驳回还须 `refund.supervise` |
+| 限额内批准退款 | 对应业务原售后处理权限 + `refund.approve` |
+| 主管审批 | 对应业务原售后处理权限 + `refund.supervise`；城市数据范围不放宽 |
+| 核实后重试原退款 | 原退款重试入口权限 + `refund.retry`；任务中心退款重试同样要求该权限 |
+
+运营配置的「平台运营参数 → 客服退款审批额度」以元填写，服务端以整数分保存。
+`support_refund_single_limit` 是同一订单累计退款上限，不是本次申请上限；包含其他审批人及历史退款，不能拆申请绕过。
+`support_refund_daily_limit` 是每名审批人按北京时间自然日的两类退款合计，包含已生成但未成功及失败待重试的退款。
+额度不因失败、重试或跨页面处理而释放，重试沿用原退款单，不新增占用。
+任一额度为 0、超额或已经转主管时，普通审批只保留申请并标记待主管，不创建退款单。
+登记人员不自动获得批准权限；额度配置也不自动赋权。角色配置应分别授予登记、审批和重试权限。
+
+审批与退款记录创建在同一事务内；订单/支付行锁保护可退金额，审批人行锁串行化两类订单的每日额度判断。
+审批时再次校验金额和资金状态，界面预览不是授权依据。重复批准同一申请不会生成第二笔退款。
+转主管、登记、批准/驳回与原退款重试均有审计；超额记录保留拟批准金额、核实说明及当时额度。
+主管待办按城市、查看和处理权限过滤，进入实时待办与站内铃铛；不新增微信或短信发送。
+
+### 保留的业务与资金边界
+
+- 达人订单部分退款仍依次分配服务费、其他费、路费；全额包含剩余路费，不按新比例重算历史订单。
+- 活动报名可分别核准 AA 本金与平台服务费，批准后会取消该用户报名，**部分退款也取消报名**，不会取消整场活动。
+- 已结算、已进入渠道分账（包括失败/待核实记录）不能从本入口退款；主管不绕过该保护。分账回退仍须单独实现和核验。
+- 存在处理中、失败待核实的原退款时不创建新退款；应核查并使用原单恢复入口。
+- 原路退款继续使用原有余额/渠道分配、官方 SDK、请求流水、通知验签、查询补偿和成功后的账务更新。
+  审批通过或请求受理不等于资金已退回，不在前端修改成功状态。
+- 此额度只控制新人工售后审批；原有用户取消、系统超时退款、整场活动取消仍执行各自业务规则和权限。
+  不要为普通客服额外授予整场活动取消等管理权限来替代售后审批。
+
+### 回归与上线验收
+
+```bash
+uv run python scripts/check_wechat_auth.py backoffice.test_staff_refunds backoffice.test_staff_refund_concurrency backoffice.tests backoffice.test_operations_queue backoffice.test_finance_work activities.tests.ActivityModelTests
+```
+
+此内存库命令验证迁移、权限、金额、重复请求和待办；明确跳过 3 项新增 PostgreSQL 行锁并发用例。
+`activities.tests.ActivityRefundConcurrencyTests` 也必须在隔离 PostgreSQL 上运行，不在内存 SQLite 上验证。
+用 `scripts/check_postgres_regression.py` 及经本次授权的隔离测试连接，补跑
+`backoffice.test_staff_refund_concurrency`、`activities.tests.ActivityRefundConcurrencyTests`、
+`providers.test_income_concurrency`；该脚本要求创建专用临时库，不能对业务库迁移或清空。
+后台运行 `npm run build` 与 `npm run test:staff-refunds:browser`，后者所有接口均模拟；
+现有 `test:operations-work:browser`、`test:finance-work:browser` 同时回归。
+部署后先保持普通审批额度为 0，核对角色及主管接单人，再用获授权测试账号完成退款结果、通知及账务验收。
+
+本次为存量 Python/Django 汇付聚合支付系统的本地权限/界面增量，未新增或更改汇付接口合同。
+按 `huifu-pay-integration` 的 `copilot-existing-system`、`copilot-solution-selection`、
+`shared-async-notify` 三份参考检查：保留请求、SDK 传输和调试配置、通知验签、幂等和终态责任；
+没有真实渠道调用或密钥写入。界面依照 `emil-design-eng` 使用清晰金额分组、权限可见性和二次确认。
+真实渠道退款、隔离 PostgreSQL 并发、分账后退款回退不因离线回归通过而视为验收完成。

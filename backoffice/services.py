@@ -56,6 +56,7 @@ from taskcenter.services import (
 )
 
 from .access import client_ip
+from .refund_authorization import authorize_approval, escalate, require_approval, require_supervisor_for_escalated
 from .models import (
     AdminAuditLog,
     ProviderCreditAdjustment,
@@ -275,6 +276,12 @@ def review_activity_after_sales_case(
             participation__activity__city_code__in=access.city_codes
         )
     case = get_object_or_404(queryset, case_no=case_no)
+    if action == "escalate":
+        if case.status not in ("pending", "processing"):
+            raise ValidationError("仅待处理或处理中的售后单可以转主管。")
+        return escalate(case, reason=result_note, actor=actor, access=access, request=request)
+    if action == "reject":
+        require_supervisor_for_escalated(case, access)
     transitions = {
         "start_review": (
             (ActivityAfterSalesCase.Status.PENDING,),
@@ -301,6 +308,7 @@ def review_activity_after_sales_case(
     before = {"status": case.status, "result_note": case.result_note}
     refund = None
     if action == "approve":
+        require_approval(access)
         settlement = ActivitySettlement.objects.select_for_update().filter(
             activity=case.participation.activity
         ).first()
@@ -328,6 +336,18 @@ def review_activity_after_sales_case(
         ).first()
         if not payment_order:
             raise ValidationError("售后单缺少可退款支付单。")
+        from activities.services import _reserved_refund_totals
+        reserved_principal, reserved_fee, _ = _reserved_refund_totals(payment_order)
+        if principal_amount < 0 or service_fee_amount < 0 or principal_amount + service_fee_amount <= 0:
+            raise ValidationError("核准退款金额必须大于 0，且各项不能为负数。")
+        if (principal_amount > payment_order.aa_principal_amount - reserved_principal
+                or service_fee_amount > payment_order.platform_service_fee_amount - reserved_fee):
+            raise ValidationError("核准退款金额超过当前可退金额。")
+        if payment_order.refund_orders.exclude(status="succeeded").exists():
+            raise ValidationError("已有处理中或异常退款，请先核实原退款单。")
+        if not authorize_approval(case, amount=principal_amount + service_fee_amount,
+                refunds=payment_order.refund_orders.all(), actor=actor, access=access, request=request, result_note=result_note):
+            return case
         refund, _ = create_activity_participation_refund(
             participation=case.participation,
             payment_order=payment_order,
@@ -1288,6 +1308,8 @@ def create_provider_order_after_sales_case(
     )
     if not order.paid_at:
         raise ValidationError("未支付订单不能登记退款或售后。")
+    from orders.distributions import assert_refund_not_distributed
+    assert_refund_not_distributed(order)
     if order.status == ProviderOrder.Status.REFUNDED:
         raise ValidationError("该订单已经退款，不能重复登记售后。")
     settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
@@ -1297,6 +1319,12 @@ def create_provider_order_after_sales_case(
         raise ValidationError({"requested_amount": "退款申请金额必须大于 0。"})
     if requested_amount > order.payable_amount:
         raise ValidationError({"requested_amount": "申请金额不能超过订单实付金额。"})
+    from django.db.models import Sum
+    reserved = order.refund_orders.aggregate(total=Sum("refund_amount"))["total"] or 0
+    if requested_amount > order.payable_amount - reserved:
+        raise ValidationError({"requested_amount": "申请金额超过当前可退金额。"})
+    if order.refund_orders.exclude(status="succeeded").exists():
+        raise ValidationError("已有处理中或异常退款，请核实原退款单。")
     if order.after_sales_cases.filter(
         status__in=(
             ProviderOrderAfterSalesCase.Status.PENDING,
@@ -1367,6 +1395,10 @@ def review_provider_order_after_sales_case(
         queryset = queryset.filter(order__provider__service_city_code__in=access.city_codes)
     case = get_object_or_404(queryset, case_no=case_no)
     order = ProviderOrder.objects.select_for_update().get(pk=case.order_id)
+    if action == "escalate":
+        if case.status not in ("pending", "processing"):
+            raise ValidationError("仅待处理或处理中的售后单可以转主管。")
+        return escalate(case, reason=result_note, actor=actor, access=access, request=request)
     before = {
         "case_status": case.status,
         "order_status": order.status,
@@ -1378,6 +1410,7 @@ def review_provider_order_after_sales_case(
         case.status = ProviderOrderAfterSalesCase.Status.PROCESSING
         audit_action = "order.after_sales.start_review"
     elif action == "retry_refund":
+        access.require("refund.retry")
         if case.status != ProviderOrderAfterSalesCase.Status.APPROVED:
             raise ValidationError("仅退款失败或待退款的售后单可以重试。")
         refund = ProviderOrderRefundOrder.objects.filter(
@@ -1389,6 +1422,7 @@ def review_provider_order_after_sales_case(
             raise ValidationError("当前退款单不需要重试。")
         audit_action = "order.after_sales.retry_refund"
     elif action == "approve":
+        require_approval(access)
         if case.status not in (
             ProviderOrderAfterSalesCase.Status.PENDING,
             ProviderOrderAfterSalesCase.Status.PROCESSING,
@@ -1400,6 +1434,18 @@ def review_provider_order_after_sales_case(
             raise ValidationError({"approved_amount": "审核通过时核准退款金额必须大于 0。"})
         if approved_amount > case.requested_amount:
             raise ValidationError({"approved_amount": "核准金额不能超过申请金额。"})
+        from orders.distributions import assert_refund_not_distributed
+        assert_refund_not_distributed(order)
+        from orders.services import _refund_allocation
+        settlement = ProviderOrderSettlement.objects.select_for_update().filter(order=order).first()
+        if settlement and settlement.status == ProviderOrderSettlement.Status.SETTLED:
+            raise ValidationError("订单已结算，请转财务核查，不能直接批准退款。")
+        _refund_allocation(order, approved_amount)
+        if order.refund_orders.exclude(status="succeeded").exists():
+            raise ValidationError("已有处理中或异常退款，请先核实原退款单。")
+        if not authorize_approval(case, amount=approved_amount, refunds=order.refund_orders.all(),
+                actor=actor, access=access, request=request, result_note=result_note):
+            return case
         case.status = ProviderOrderAfterSalesCase.Status.APPROVED
         case.approved_amount = approved_amount
         case.result_note = result_note
@@ -1418,6 +1464,7 @@ def review_provider_order_after_sales_case(
         )
         audit_action = "order.after_sales.approve"
     else:
+        require_supervisor_for_escalated(case, access)
         if case.status not in (
             ProviderOrderAfterSalesCase.Status.PENDING,
             ProviderOrderAfterSalesCase.Status.PROCESSING,

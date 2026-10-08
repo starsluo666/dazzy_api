@@ -460,6 +460,12 @@ def generate_activity_after_sales_case_no():
 
 
 class ActivityAfterSalesCase(models.Model):
+    requires_supervisor = models.BooleanField(default=False)
+    escalation_reason = models.CharField(max_length=200, blank=True)
+    created_by_operator = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="registered_activity_after_sales_cases",
+    )
     class Reason(models.TextChoices):
         FORCE_MAJEURE = "force_majeure", "不可抗力"
         ILLNESS_OR_ACCIDENT = "illness_or_accident", "疾病或事故"

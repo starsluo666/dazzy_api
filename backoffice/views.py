@@ -1138,8 +1138,8 @@ class AdminActivityFinanceListView(APIView):
             "activity", "beneficiary", "payment_order", "operator"
         )
         after_sales = ActivityAfterSalesCase.objects.select_related(
-            "participation__activity", "applicant", "reviewed_by", "refund_order"
-        )
+            "participation__activity", "applicant", "reviewed_by", "created_by_operator", "refund_order__payment_order"
+        ).prefetch_related("participation__payment_orders")
         settlements = ActivitySettlement.objects.select_related(
             "activity", "beneficiary"
         )
@@ -1237,7 +1237,7 @@ class AdminActivityFinanceListView(APIView):
                     | Q(beneficiary__nickname__icontains=keyword)
                 )
             serializer_class = AdminActivitySettlementSerializer
-        queryset = filter_work_queue(queryset, access, request.query_params, ("activity_after_sales", "activity_refund_attention"))
+        queryset = filter_work_queue(queryset, access, request.query_params, ("activity_after_sales", "activity_refund_attention", "activity_refund_escalated"))
         if status_value := params.get("status", "").strip():
             queryset = queryset.filter(status=status_value)
         page = params["page"]
@@ -1360,6 +1360,7 @@ class ProviderOrderRefundRetryView(APIView):
     def post(self, request, refund_no):
         access = resolve_admin_access(request.user)
         access.require("order.finance.manage")
+        access.require("refund.retry")
         queryset = ProviderOrderRefundOrder.objects.select_related("order__provider")
         if not access.all_data:
             queryset = queryset.filter(
@@ -1410,6 +1411,7 @@ class ActivityParticipationRefundRetryView(APIView):
     def post(self, request, refund_no):
         access = resolve_admin_access(request.user)
         access.require("activity_after_sales.manage")
+        access.require("refund.retry")
         queryset = ActivityParticipationRefundOrder.objects.select_related("activity")
         if not access.all_data:
             queryset = queryset.filter(activity__city_code__in=access.city_codes)
@@ -2401,7 +2403,7 @@ class ProviderOrderAfterSalesListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = provider_order_after_sales_queryset(access)
-        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_after_sales",))
+        queryset = filter_work_queue(queryset, access, request.query_params, ("provider_after_sales", "provider_refund_escalated"))
         if city_code := params.get("city_code"):
             queryset = queryset.filter(order__provider__service_city_code=city_code)
         if keyword := params.get("search", "").strip():
@@ -2451,7 +2453,8 @@ class ProviderOrderAfterSalesListView(APIView):
 
     def post(self, request):
         access = resolve_admin_access(request.user)
-        access.require("order.after_sales.review")
+        access.require("order.after_sales.create")
+        access.require("order.after_sales.view")
         serializer = ProviderOrderAfterSalesCaseCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         case = create_provider_order_after_sales_case(
@@ -3346,6 +3349,8 @@ class ScheduledTaskRetryView(APIView):
             scoped_scheduled_tasks(access).select_for_update(),
             public_id=public_id,
         )
+        if task.task_type in (ScheduledTask.Type.PROVIDER_ORDER_REFUND, ScheduledTask.Type.ACTIVITY_PARTICIPATION_REFUND):
+            access.require("refund.retry")
         before = ScheduledTaskSerializer(task).data
         try:
             retry_failed_task(task)
