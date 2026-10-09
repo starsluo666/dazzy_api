@@ -76,6 +76,14 @@ class ProviderOrder(models.Model):
     discount_amount = models.PositiveBigIntegerField("优惠金额（分）", default=0)
     payable_amount = models.PositiveBigIntegerField("应付金额（分）")
     pricing_snapshot = models.JSONField("计价规则快照", default=dict)
+    transport_mode = models.CharField("下单出行方式", max_length=16, blank=True, default="")
+    cancellation_policy = models.JSONField("下单取消规则及同意记录", default=dict, blank=True)
+    cancellation_record = models.JSONField("取消费用裁定快照", default=dict, blank=True)
+    arrived_at = models.DateTimeField("首次有效到场时间", null=True, blank=True)
+    arrival_confirmation = models.JSONField("首次到场证据快照", default=dict, blank=True)
+    provider_last_contact_at = models.DateTimeField("最近发起联系时间", null=True, blank=True)
+    customer_wait_deadline_at = models.DateTimeField("用户失联等待截止", null=True, blank=True, db_index=True)
+    customer_wait = models.JSONField("失联等待记录", default=dict, blank=True)
     status = models.CharField(
         "订单状态", max_length=24, choices=Status, default=Status.PENDING_PAYMENT
     )

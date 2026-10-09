@@ -180,6 +180,9 @@ def inspect_idle_fulfillment(order_no, *, stage, now=None):
     elif stage == "start":
         expected = order.start_deadline_at
         applicable = order.status == ProviderOrder.Status.DEPARTED and not order.service_started_at
+        if (applicable and order.customer_wait.get("state") == "waiting"
+                and order.customer_wait_deadline_at):
+            return {"state": "not_due", "deadline": max(now, order.customer_wait_deadline_at) + timedelta(seconds=30)}
     else:
         expected = order.completion_deadline_at
         applicable = order.status == ProviderOrder.Status.IN_SERVICE and not order.completion_submitted_at

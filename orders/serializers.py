@@ -33,6 +33,8 @@ def public_pricing_snapshot(snapshot: dict) -> dict:
 
 
 class ProviderOrderInputSerializer(serializers.Serializer):
+    transport_mode = serializers.ChoiceField(choices=("taxi", "ride_hailing", "bus", "subway"), required=False)
+    cancellation_policy_version = serializers.CharField(required=False, allow_blank=True, max_length=100)
     service_id = serializers.IntegerField(min_value=1)
     starts_at = serializers.DateTimeField()
     duration_minutes = serializers.IntegerField(min_value=30, max_value=480)
@@ -299,6 +301,11 @@ class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
 
 
 class ProviderOrderSerializer(serializers.ModelSerializer):
+    cancellation = serializers.SerializerMethodField()
+
+    def get_cancellation(self, obj):
+        from .cancellations import payload
+        return payload(obj)
     timeout = serializers.SerializerMethodField()
 
     def get_timeout(self, obj):
@@ -322,7 +329,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProviderOrder
         fields = (
-            "public_id", "order_no", "status", "status_label", "provider_public_id",
+            "public_id", "order_no", "status", "status_label", "provider_public_id", "cancellation",
             "provider_name", "provider_avatar_url", "service_name", "billing_type_snapshot",
             "unit_price_amount", "starts_at", "ends_at", "duration_minutes",
             "meeting_location_name", "meeting_address", "contact_name", "contact_gender",
@@ -470,6 +477,7 @@ class ProviderOrderManageSerializer(ProviderOrderSerializer):
 
 
 def quote_payload(validated_data):
+    from .cancellations import current_policy
     service = validated_data["service"]
     quote = validated_data["quote"]
     return {
@@ -499,4 +507,5 @@ def quote_payload(validated_data):
         "discount_amount": quote.discount_amount,
         "payable_amount": quote.payable_amount,
         "pricing_snapshot": public_pricing_snapshot(quote.snapshot),
+        "cancellation_policy": current_policy(),
     }

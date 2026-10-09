@@ -97,6 +97,10 @@ def queues(access, *, now=None):
                                    ScheduledTask.Type.PROVIDER_ORDER_REFUND, now)
         result.append(Queue("provider_refund_attention", "达人订单退款异常", "urgent", refunds,
                             "settlements", "refund_no", version=F("_refund_event"), hours=1, query={"record_type": "refund"}))
+    if permitted(access, "order.finance.view", "order.fulfillment.view"):
+        result.append(Queue("cancellation_reconciliation", "取消订单剩余款待核账", "finance",
+            orders.filter(cancellation_record__retained_amount__gt=0).exclude(settlement__status__in=("settled", "cancelled")),
+            "orders", "order_no", "cancelled_at", version=Cast("cancelled_at", CharField())))
     if permitted(access, "order.after_sales.view", "order.after_sales.review"):
         cases = ProviderOrderAfterSalesCase.objects.filter(order__in=orders, status__in=("pending", "processing"))
         result.append(Queue("provider_after_sales", "达人订单售后待处理", "support",

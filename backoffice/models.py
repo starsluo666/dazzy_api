@@ -158,6 +158,8 @@ class ProviderOrderingSetting(models.Model):
 
 
 class PlatformOperationSetting(models.Model):
+    provider_cancellation_enabled = models.BooleanField("新订单取消规则开关", default=False)
+    provider_cancellation_config = models.JSONField("取消规则参数", default=dict, blank=True)
     discovery_cities = models.JSONField("发现页开通城市", default=default_discovery_cities)
     singleton_key = models.CharField(max_length=20, default="default", unique=True, editable=False)
     customer_service_phone = models.CharField(max_length=32, blank=True, default="")

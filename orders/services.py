@@ -1268,6 +1268,8 @@ def create_customer_provider_order_after_sales_case(
         raise ValidationError("订单不存在或无权操作。")
     if not order.paid_at:
         raise ValidationError("未支付订单不能申请退款或售后。")
+    if order.cancellation_record:
+        raise ValidationError("本单已按取消规则处理，费用争议请提交客服工单，由财务核查。")
     if order.status == ProviderOrder.Status.TERMINATED:
         raise ValidationError("提前终止订单已裁定，如需复核请联系客服，不能重新进入普通售后。")
     if order.status == ProviderOrder.Status.REFUNDED:
@@ -1314,7 +1316,14 @@ def create_customer_provider_order_after_sales_case(
         raise ValidationError("该订单已有未结束的退款或售后单。") from error
 
     order.status = ProviderOrder.Status.AFTER_SALES
-    order.save(update_fields=("status", "updated_at"))
+    if order.customer_wait.get("state") == "waiting":
+        # A dispute interrupts the no-show clock permanently. Rejection or a
+        # partial refund must not revive a stale automatic no-show charge.
+        order.customer_wait = {
+            **order.customer_wait, "state": "review",
+            "interrupted_at": timezone.now().isoformat(), "case_no": case.case_no,
+        }
+    order.save(update_fields=("status", "customer_wait", "updated_at"))
     if settlement and settlement.status == ProviderOrderSettlement.Status.RISK_FROZEN:
         settlement.status = ProviderOrderSettlement.Status.DISPUTE_FROZEN
         settlement.dispute_reason = f"存在待处理退款售后：{case.case_no}"
@@ -1571,6 +1580,9 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     ).first()
     if not settlement:
         return {"state": "missing", "order_no": order_no}
+    if order.cancellation_record:
+        sync_provider_settlement_plan(order_no=order.order_no)
+        return {"state": "cancellation_reconciliation"}
     if order.status == ProviderOrder.Status.TERMINATED:
         sync_provider_settlement_plan(order_no=order_no, now=now)
         return {"state": "termination_reconciliation", "order_no": order_no}
@@ -1749,15 +1761,20 @@ def _complete_provider_order_refund(
             order.status = ProviderOrder.Status.TERMINATED
         elif case and order.status == ProviderOrder.Status.AFTER_SALES:
             order.status = case.original_order_status
+        if order.cancellation_record:
+            order.status = ProviderOrder.Status.TERMINATED if order.service_started_at else ProviderOrder.Status.CANCELLED
         order.save(update_fields=("status", "updated_at"))
 
-        if terminated:
+        if order.cancellation_record:
+            from .cancellations import reconcile
+            reconcile(order)
+        elif terminated:
             from .termination import reconcile_termination_settlement
             reconcile_termination_settlement(order)
         settlement = ProviderOrderSettlement.objects.select_for_update().filter(
             order=order
         ).first()
-        if settlement and not terminated:
+        if settlement and not terminated and not order.cancellation_record:
             amounts = _settlement_amounts(order, settlement.platform_commission_rate)
             _apply_settlement_amounts(settlement, amounts)
             if settlement.refunded_amount >= settlement.paid_amount:

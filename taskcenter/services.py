@@ -121,9 +121,19 @@ def register_provider_fulfillment_timeouts(order):
     return created_count
 
 
+def register_provider_customer_wait(order):
+    return _register_task(task_type=ScheduledTask.Type.PROVIDER_CUSTOMER_WAIT,
+        business_type="provider_order", business_key=order.order_no,
+        scheduled_at=order.customer_wait_deadline_at, payload={"order_no": order.order_no})
+
+
 def synchronize_provider_fulfillment_timeouts(*, batch_size):
     from orders.models import ProviderOrder
     created = 0
+    wait_tasks = ScheduledTask.objects.filter(business_type="provider_order", business_key=OuterRef("order_no"), task_type=ScheduledTask.Type.PROVIDER_CUSTOMER_WAIT)
+    for order in ProviderOrder.objects.filter(status="departed", customer_wait__state="waiting", customer_wait_deadline_at__isnull=False).annotate(_wait_exists=Exists(wait_tasks)).filter(_wait_exists=False).order_by("id")[:batch_size]:
+        _, added = register_provider_customer_wait(order)
+        created += int(added)
     # Missing-task queries (not a scan of the first N active orders) avoid
     # starvation of later orders. Terminal tasks never silently replay.
     for status, task_type in (("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT),
@@ -1728,7 +1738,17 @@ def _execute_provider_fulfillment_timeout(task, now):
     return TaskExecutionOutcome(status=status, result=outcome)
 
 
+def _execute_provider_customer_wait(task, now):
+    from orders.cancellations import expire_wait
+    outcome = expire_wait(task.business_key, now=now)
+    if outcome["state"] == "not_due":
+        deadline = outcome.pop("deadline")
+        return TaskExecutionOutcome(status=ScheduledTask.Status.PENDING, result=outcome, available_at=deadline)
+    return TaskExecutionOutcome(status=ScheduledTask.Status.SUCCEEDED, result=outcome)
+
+
 TASK_HANDLERS = {
+    ScheduledTask.Type.PROVIDER_CUSTOMER_WAIT: _execute_provider_customer_wait,
     ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER: _execute_provider_fulfillment_timeout,
     ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT: _execute_provider_fulfillment_timeout,
     ScheduledTask.Type.PROVIDER_START_TIMEOUT: _execute_provider_fulfillment_timeout,

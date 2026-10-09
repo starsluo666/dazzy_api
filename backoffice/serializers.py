@@ -1587,6 +1587,12 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
 
 
 class ProviderOrderAdminSerializer(serializers.ModelSerializer):
+    cancellation = serializers.SerializerMethodField()
+
+    def get_cancellation(self, obj):
+        from orders.cancellations import payload
+        return payload(obj)
+
     timeout = serializers.SerializerMethodField()
 
     def get_timeout(self, obj):
@@ -1637,7 +1643,7 @@ class ProviderOrderAdminSerializer(serializers.ModelSerializer):
             "provider_contact_initiated_at", "departure_contact_confirmed_at",
             "completion_location", "fulfillment_policy", "fulfillment_review_required",
             "fulfillment_revision", "fulfillment_issues", "fulfillment_reviews",
-            "confirmation_remaining_seconds", "timeout",
+            "confirmation_remaining_seconds", "timeout", "cancellation",
         )
 
     @staticmethod
@@ -1980,6 +1986,10 @@ class DiscoveryCitySerializer(serializers.Serializer):
 
 
 class PlatformOperationSettingSerializer(serializers.ModelSerializer):
+    def validate_provider_cancellation_config(self, value):
+        from orders.cancellations import validate_config
+        return validate_config(value)
+
     support_refund_single_limit = serializers.IntegerField(min_value=0, max_value=10_000_000, required=False)
     support_refund_daily_limit = serializers.IntegerField(min_value=0, max_value=100_000_000, required=False)
     provider_order_departure_grace_minutes = serializers.IntegerField(min_value=0, max_value=180, required=False)

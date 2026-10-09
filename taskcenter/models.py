@@ -6,6 +6,7 @@ from django.db import models
 
 class ScheduledTask(models.Model):
     class Type(models.TextChoices):
+        PROVIDER_CUSTOMER_WAIT = "provider_customer_wait", "达人到场用户失联等待"
         PROVIDER_DEPARTURE_REMINDER = "provider_departure_reminder", "达人出发提醒"
         PROVIDER_DEPARTURE_TIMEOUT = "provider_departure_timeout", "达人未出发超时"
         PROVIDER_START_TIMEOUT = "provider_start_timeout", "达人未开始服务核查"

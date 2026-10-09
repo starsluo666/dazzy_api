@@ -164,7 +164,11 @@ class ProviderOrderListCreateView(APIView):
                     service, data["duration_minutes"], data["route"].distance_km,
                     coupon=coupon,
                 )
+            from .cancellations import booking_policy
+            policy = booking_policy(data)
             order = ProviderOrder.objects.create(
+                transport_mode=data.get("transport_mode", "") if policy else "",
+                cancellation_policy=policy,
                 order_no=make_order_no(),
                 customer=customer,
                 provider=provider,
@@ -293,6 +297,35 @@ class ProviderOrderCancelView(ProviderOrderDetailView):
             customer_id=request.user.pk,
         )
         return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class ProviderOrderPolicyCancelView(ProviderOrderDetailView):
+    def get(self, request, order_no):
+        from .cancellations import preview
+        return Response({"data": preview(order_no=order_no, customer=request.user)})
+
+    def post(self, request, order_no):
+        from .cancellations import cancel
+        order = cancel(order_no=order_no, customer=request.user, token=request.data.get("token", ""),
+                       personal_reason_confirmed=request.data.get("personal_reason_confirmed"))
+        return Response({"data": ProviderOrderSerializer(order).data})
+
+
+class ProviderOrderWaitView(APIView):
+    permission_classes = [IsAuthenticated]
+    role = "customer"
+
+    def post(self, request, order_no):
+        from .cancellations import start_wait, respond_wait
+        action = request.data.get("action")
+        if action == "start" and self.role == "provider":
+            order = start_wait(order_no=order_no, provider_user=request.user, confirmed=request.data.get("unreachable_confirmed"))
+        elif action == "respond":
+            order = respond_wait(order_no=order_no, actor=request.user, role=self.role)
+        else:
+            raise ValidationError("无效等待操作。")
+        serializer = ProviderOrderManageSerializer if self.role == "provider" else ProviderOrderSerializer
+        return Response({"data": serializer(order).data})
 
 
 class ProviderOrderSimulatePaymentView(ProviderOrderDetailView):
@@ -678,9 +711,10 @@ class CurrentProviderOrderContactView(CurrentProviderOrderDetailView):
             raise ValidationError({"status": "仅已接单且尚未确认完成的订单可以联系用户。"})
         # An initiated call is not evidence the user answered. Departure requires
         # a separate, explicit attestation and never relies on device storage.
+        order.provider_last_contact_at = timezone.now()
         if not order.provider_contact_initiated_at:
-            order.provider_contact_initiated_at = timezone.now()
-            order.save(update_fields=("provider_contact_initiated_at", "updated_at"))
+            order.provider_contact_initiated_at = order.provider_last_contact_at
+        order.save(update_fields=("provider_contact_initiated_at", "provider_last_contact_at", "updated_at"))
         return Response({"data": ProviderOrderManageSerializer(order).data})
 
 
@@ -737,6 +771,11 @@ class CurrentProviderOrderArrivalEvidenceView(CurrentProviderOrderDetailView):
             raise ValidationError({"photo_id": "集合照不存在或不可用。"}) from exc
         if ProviderOrder.objects.exclude(pk=order.pk).filter(arrival_photo=photo).exists():
             raise ValidationError({"photo_id": "该照片已绑定其他订单。"})
+        from .cancellations import confirm_arrival
+        already_arrived = bool(order.cancellation_policy and order.arrived_at)
+        confirm_arrival(order, data, photo, now=timezone.now())
+        if already_arrived:
+            return Response({"data": ProviderOrderManageSerializer(order).data})
         order.arrival_photo = photo
         order.arrival_photo_uploaded_at = timezone.now()
         order.arrival_longitude = data["longitude"]
@@ -749,6 +788,7 @@ class CurrentProviderOrderArrivalEvidenceView(CurrentProviderOrderDetailView):
                 "arrival_longitude",
                 "arrival_latitude",
                 "arrival_location_accuracy_m",
+                "arrived_at", "arrival_confirmation",
                 "updated_at",
             )
         )
@@ -765,6 +805,8 @@ class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
             raise ValidationError({"status": "订单不在已出发状态。"})
         if not order.arrival_photo_id:
             raise ValidationError({"arrival_photo": "请先上传清晰包含本人及到场环境的集合照片。"})
+        if order.customer_wait.get("state") == "waiting":
+            raise ValidationError("请先结束用户失联等待，确认已联系上用户后再开始服务。")
         order.status = ProviderOrder.Status.IN_SERVICE
         order.service_started_at = timezone.now()
         assess_timing(order, stage="start", now=order.service_started_at)

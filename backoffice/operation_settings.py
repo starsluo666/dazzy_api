@@ -3,6 +3,8 @@ from decimal import Decimal
 
 
 DEFAULT_PLATFORM_OPERATION_RULES = {
+    "provider_cancellation_enabled": False,
+    "provider_cancellation_config": {},
     "customer_service_phone": "",
     "support_refund_single_limit": 0,
     "support_refund_daily_limit": 0,

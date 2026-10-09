@@ -2146,7 +2146,7 @@ class ProviderOrderAdminListView(APIView):
         query.is_valid(raise_exception=True)
         params = query.validated_data
         queryset = provider_order_queryset(access)
-        queryset = filter_work_queue(queryset, access, request.query_params, ("fulfillment_review", "legacy_overdue", "order_support"))
+        queryset = filter_work_queue(queryset, access, request.query_params, ("fulfillment_review", "legacy_overdue", "order_support", "cancellation_reconciliation"))
         if city_code := params.get("city_code"):
             queryset = queryset.filter(provider__service_city_code=city_code)
         if keyword := params.get("search", "").strip():

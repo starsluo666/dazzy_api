@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    ProviderOrderPolicyCancelView,
+    ProviderOrderWaitView,
     ProviderOrderTerminationView,
     CurrentProviderOrderAcceptView,
     CurrentProviderOrderArrivalEvidenceView,
@@ -30,6 +32,9 @@ from .views import (
 )
 
 urlpatterns = [
+    path("provider-orders/<str:order_no>/cancellation/", ProviderOrderPolicyCancelView.as_view()),
+    path("provider-orders/<str:order_no>/customer-wait/", ProviderOrderWaitView.as_view()),
+    path("providers/me/orders/<str:order_no>/customer-wait/", ProviderOrderWaitView.as_view(role="provider")),
     path("provider-orders/<str:order_no>/termination/", ProviderOrderTerminationView.as_view()),
     path("providers/me/orders/<str:order_no>/termination/", ProviderOrderTerminationView.as_view(role="provider")),
     path("users/me/coupons/", CurrentUserCouponListView.as_view()),
