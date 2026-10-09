@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -17,6 +18,7 @@ from orders.payment_recovery import (
 )
 
 from .models import (
+    WalletBalanceLot,
     RechargeCampaign,
     WalletLedgerEntry,
     WalletPaymentAllocation,
@@ -25,6 +27,7 @@ from .models import (
     WalletRefundReceipt,
     UserWallet,
 )
+from .lots import CONSUMPTION_PRICING_VERSION, hold_lots, restore_lots
 
 
 PAYMENT_SCENE_TRADE_TYPES = {
@@ -44,6 +47,11 @@ class WalletPaymentBreakdown:
 
 
 def _wallet_for_update(user_id: int) -> UserWallet:
+    # Order creation already locks its customer before the wallet. Payment
+    # completion also locks that user (and inserts user-owned notifications),
+    # so taking only the wallet here could invert the order and deadlock a
+    # concurrent booking. Apply this order to every wallet mutation.
+    get_user_model().objects.select_for_update().only("pk").get(pk=user_id)
     wallet = UserWallet.objects.select_for_update().filter(user_id=user_id).first()
     if wallet:
         return wallet
@@ -172,6 +180,7 @@ def prepare_wallet_payment(
         external_amount=external_amount,
     )
     if wallet_amount:
+        hold_lots(wallet, allocation)
         wallet.available_balance -= wallet_amount
         wallet.frozen_balance += wallet_amount
         wallet.version += 1
@@ -245,6 +254,7 @@ def release_wallet_payment(*, business_type: str, business_order_no: str) -> Wal
             raise ValidationError({"payment": "钱包冻结余额不足，需要人工核对。"})
         wallet.frozen_balance -= allocation.wallet_amount
         wallet.available_balance += allocation.wallet_amount
+        restore_lots(wallet, allocation, allocation.wallet_amount)
         wallet.version += 1
         wallet.save(
             update_fields=("available_balance", "frozen_balance", "version", "updated_at")
@@ -302,6 +312,7 @@ def complete_wallet_refund(
         raise ValidationError({"refund": "已解冻的余额不能重复退款。"})
     wallet = _wallet_for_update(allocation.user_id)
     if wallet_refund_amount:
+        restore_lots(wallet, allocation, wallet_refund_amount)
         wallet.available_balance += wallet_refund_amount
         wallet.version += 1
         wallet.save(update_fields=("available_balance", "version", "updated_at"))
@@ -355,7 +366,7 @@ def recharge_pricing(*, campaign: RechargeCampaign, quantity: int) -> dict:
     ).first()
     discount_rate_bps = tier.discount_rate_bps if tier else 10000
     credited_amount = campaign.unit_face_amount * quantity
-    payable_amount = (credited_amount * discount_rate_bps + 5000) // 10000
+    payable_amount = credited_amount
     return {
         "unit_face_amount": campaign.unit_face_amount,
         "quantity": quantity,
@@ -382,6 +393,7 @@ def create_recharge_order(*, user_id: int, quantity: int) -> WalletRechargeOrder
         **pricing,
         pricing_snapshot={
             **pricing,
+            "version": CONSUMPTION_PRICING_VERSION,
             "campaign_updated_at": campaign.updated_at.isoformat(),
             "rounding": "half_up_cent",
         },
@@ -391,6 +403,7 @@ def create_recharge_order(*, user_id: int, quantity: int) -> WalletRechargeOrder
 
 def recharge_order_payload(order: WalletRechargeOrder) -> dict:
     return {
+        "discount_usage": "consumption" if order.pricing_snapshot.get("version") == CONSUMPTION_PRICING_VERSION else "recharge",
         "order_no": order.order_no,
         "unit_face_amount": order.unit_face_amount,
         "quantity": order.quantity,
@@ -550,6 +563,11 @@ def _credit_recharge_order(*, order_no: str, gateway_trade_no: str, paid_at):
     if order.status != WalletRechargeOrder.Status.PENDING_PAYMENT:
         raise ValidationError({"status": "充值单已关闭，需要人工核对该笔到账。"})
     wallet = _wallet_for_update(order.user_id)
+    if order.pricing_snapshot.get("version") == CONSUMPTION_PRICING_VERSION:
+        WalletBalanceLot.objects.create(
+            wallet=wallet, recharge_order=order, discount_rate_bps=order.discount_rate_bps,
+            credited_amount=order.credited_amount, available_amount=order.credited_amount,
+        )
     wallet.available_balance += order.credited_amount
     wallet.version += 1
     wallet.save(update_fields=("available_balance", "version", "updated_at"))

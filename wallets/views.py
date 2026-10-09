@@ -13,6 +13,7 @@ from orders.wechat_oauth import (
 )
 
 from .models import RechargeCampaign, WalletRechargeOrder
+from .lots import benefits_payload
 from .serializers import RechargeOrderInputSerializer, RechargePaymentSessionInputSerializer
 from .services import (
     confirm_recharge_payment,
@@ -50,6 +51,7 @@ class CurrentWalletView(APIView):
                     "available_balance": wallet.available_balance,
                     "frozen_balance": wallet.frozen_balance,
                     "total_balance": wallet.available_balance + wallet.frozen_balance,
+                    **benefits_payload(wallet),
                     "ledger_entries": [ledger_payload(item) for item in entries],
                 }
             }
@@ -66,6 +68,7 @@ class RechargeCampaignView(APIView):
             {
                 "data": {
                     "is_enabled": campaign.is_enabled,
+                    "discount_usage": "consumption",
                     "unit_face_amount": campaign.unit_face_amount,
                     "max_quantity_per_order": campaign.max_quantity_per_order,
                     "rules_text": campaign.rules_text,

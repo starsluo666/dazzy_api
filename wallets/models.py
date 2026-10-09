@@ -342,3 +342,39 @@ class WalletRefundReceipt(models.Model):
 
     class Meta:
         db_table = "wallet_refund_receipt"
+
+
+class WalletBalanceLot(models.Model):
+    """New, face-value recharges only. Untracked legacy balance has no discount."""
+
+    wallet = models.ForeignKey(UserWallet, on_delete=models.PROTECT, related_name="balance_lots")
+    recharge_order = models.OneToOneField(WalletRechargeOrder, on_delete=models.PROTECT, related_name="balance_lot")
+    discount_rate_bps = models.PositiveSmallIntegerField(default=10000)
+    credited_amount = models.PositiveBigIntegerField()
+    available_amount = models.PositiveBigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "wallet_balance_lot"
+        ordering = ("discount_rate_bps", "id")
+        constraints = [
+            models.CheckConstraint(condition=Q(discount_rate_bps__gte=1, discount_rate_bps__lte=10000), name="wallet_lot_rate_valid"),
+            models.CheckConstraint(condition=Q(available_amount__lte=models.F("credited_amount")), name="wallet_lot_available_valid"),
+        ]
+
+
+class WalletLotDebit(models.Model):
+    """Batch amounts reserved at payment hold, restored on release/refund."""
+
+    allocation = models.ForeignKey(WalletPaymentAllocation, on_delete=models.PROTECT, related_name="lot_debits")
+    lot = models.ForeignKey(WalletBalanceLot, on_delete=models.PROTECT, related_name="debits")
+    amount = models.PositiveBigIntegerField()
+    restored_amount = models.PositiveBigIntegerField(default=0)
+
+    class Meta:
+        db_table = "wallet_lot_debit"
+        ordering = ("id",)
+        constraints = [
+            models.UniqueConstraint(fields=("allocation", "lot"), name="uniq_wallet_allocation_lot"),
+            models.CheckConstraint(condition=Q(amount__gt=0, restored_amount__lte=models.F("amount")), name="wallet_lot_restored_valid"),
+        ]

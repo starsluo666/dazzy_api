@@ -57,9 +57,11 @@ class WalletServiceTests(TestCase):
         two = recharge_pricing(campaign=campaign, quantity=2)
 
         self.assertEqual(one["credited_amount"], 100_000)
-        self.assertEqual(one["payable_amount"], 98_000)
+        self.assertEqual(one["payable_amount"], 100_000)
+        self.assertEqual(one["discount_rate_bps"], 9800)
         self.assertEqual(two["credited_amount"], 200_000)
-        self.assertEqual(two["payable_amount"], 190_000)
+        self.assertEqual(two["payable_amount"], 200_000)
+        self.assertEqual(two["discount_rate_bps"], 9500)
 
     def test_balance_sufficient_forces_full_wallet_payment(self):
         preview = preview_wallet_payment(
@@ -185,7 +187,7 @@ class WalletServiceTests(TestCase):
         self.wallet.refresh_from_db()
         self.assertTrue(changed)
         self.assertFalse(changed_again)
-        self.assertEqual(credited.payable_amount, 190_000)
+        self.assertEqual(credited.payable_amount, 200_000)
         self.assertEqual(self.wallet.available_balance, 200_000)
         self.assertEqual(
             WalletLedgerEntry.objects.filter(

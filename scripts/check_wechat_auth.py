@@ -25,6 +25,7 @@ DEFAULT_LABELS = [
     "activities.tests.ActivityModelTests.test_activity_full_balance_payment_bypasses_huifu_and_consumes_wallet",
     "activities.tests.ActivityModelTests.test_activity_mixed_payment_only_sends_external_remainder_to_huifu",
     "wallets.tests.WalletServiceTests",
+    "wallets.test_consumption_discount",
     "wallets.test_wechat_payment",
 ]
 

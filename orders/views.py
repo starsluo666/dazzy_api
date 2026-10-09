@@ -158,12 +158,19 @@ class ProviderOrderListCreateView(APIView):
                     order_amount=base_quote.payable_amount,
                     lock=True,
                 )
-            quote = base_quote
-            if coupon:
-                quote = build_quote(
-                    service, data["duration_minutes"], data["route"].distance_km,
-                    coupon=coupon,
-                )
+            from wallets.models import UserWallet
+            from wallets.services import prepare_wallet_payment
+            from wallets.lots import best_wallet_discount_rate
+            from .pricing_confirmation import check_quote
+            # Lock before choosing the benefit: a nearly depleted best-rate lot
+            # cannot grant its discount to several concurrently created orders.
+            wallet = UserWallet.objects.select_for_update().filter(user_id=customer.pk).first()
+            rate = best_wallet_discount_rate(wallet) if wallet else 10000
+            quote = build_quote(
+                service, data["duration_minutes"], data["route"].distance_km,
+                coupon=coupon, wallet_discount_rate_bps=rate,
+            )
+            check_quote(customer.pk, data, quote)
             from .cancellations import booking_policy
             policy = booking_policy(data)
             order = ProviderOrder.objects.create(
@@ -206,6 +213,11 @@ class ProviderOrderListCreateView(APIView):
             from .timeouts import enroll_fulfillment_timeouts
             enroll_fulfillment_timeouts(order)
             create_provider_order_payment_order(order)
+            if rate < 10000:
+                prepare_wallet_payment(
+                    user_id=customer.pk, business_type="provider_order",
+                    business_order_no=order.order_no, payable_amount=order.payable_amount,
+                )
             if coupon:
                 reserve_coupon(coupon=coupon, order=order)
             register_provider_order_payment_expiry(order)

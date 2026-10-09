@@ -69,11 +69,6 @@ def eligible_coupon(*, owner, public_id, order_amount, lock=False, now=None):
     return coupon
 
 
-def coupon_discount(coupon, order_amount):
-    # The payment gateway requires a positive payable amount.
-    return min(coupon.face_amount, order_amount - 1)
-
-
 def reserve_coupon(*, coupon, order):
     if coupon.status != UserCoupon.Status.AVAILABLE or coupon.reserved_order_id:
         raise ValidationError({"coupon_id": "优惠券已被其他订单使用。"})

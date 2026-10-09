@@ -39,6 +39,7 @@ DEFAULT_LABELS = [
     "providers.test_huifu_user_transport",
     "wallets.tests.WalletServiceTests",
     "wallets.tests.WalletConcurrencyTests",
+    "wallets.test_consumption_discount",
     "backoffice.tests",
     "taskcenter.tests",
     "accounts.test_account_closure",

@@ -33,6 +33,7 @@ def public_pricing_snapshot(snapshot: dict) -> dict:
 
 
 class ProviderOrderInputSerializer(serializers.Serializer):
+    pricing_token = serializers.CharField(required=False, allow_blank=True, max_length=2000)
     transport_mode = serializers.ChoiceField(choices=("taxi", "ride_hailing", "bus", "subway"), required=False)
     cancellation_policy_version = serializers.CharField(required=False, allow_blank=True, max_length=100)
     service_id = serializers.IntegerField(min_value=1)
@@ -111,7 +112,16 @@ class ProviderOrderInputSerializer(serializers.Serializer):
                 order_amount=base_quote.payable_amount,
             )
         attrs["coupon"] = coupon
-        attrs["quote"] = build_quote(service, duration, route.distance_km, coupon=coupon)
+        from wallets.lots import best_wallet_discount_rate
+        from wallets.models import UserWallet
+        from .pricing_confirmation import sign_quote
+        wallet = UserWallet.objects.filter(user_id=request.user.pk).first()
+        attrs["wallet_available"] = wallet.available_balance if wallet else 0
+        attrs["quote"] = build_quote(
+            service, duration, route.distance_km, coupon=coupon,
+            wallet_discount_rate_bps=best_wallet_discount_rate(wallet) if wallet else 10000,
+        )
+        attrs["preview_pricing_token"] = sign_quote(request.user.pk, attrs, attrs["quote"])
         return attrs
 
 
@@ -481,6 +491,9 @@ def quote_payload(validated_data):
     service = validated_data["service"]
     quote = validated_data["quote"]
     return {
+        "pricing_token": validated_data["preview_pricing_token"],
+        "wallet_amount": min(validated_data["wallet_available"], quote.payable_amount),
+        "external_amount": max(quote.payable_amount - validated_data["wallet_available"], 0),
         "provider": {
             "public_id": service.provider.user.public_id,
             "nickname": service.provider.public_display_name,

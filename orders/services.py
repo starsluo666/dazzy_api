@@ -2046,14 +2046,22 @@ def fallback_transport_fee(distance_km: Decimal | None) -> int:
     return max(1, math.ceil(float(distance_km) / 5)) * 500
 
 
-def build_quote(service: ProviderService, duration_minutes: int, distance_km: Decimal | None, coupon=None) -> PriceQuote:
+def build_quote(service: ProviderService, duration_minutes: int, distance_km: Decimal | None, coupon=None, *, wallet_discount_rate_bps=10000) -> PriceQuote:
     from .commission import commission_snapshot
-    from .coupons import coupon_discount
 
     service_fee = calculate_service_fee(service, duration_minutes)
     transport_fee = fallback_transport_fee(distance_km)
     total = service_fee + transport_fee
-    discount = coupon_discount(coupon, total) if coupon else 0
+    # Coupons and wallet benefits apply to service only; travel stays full price.
+    if not 1 <= wallet_discount_rate_bps <= 10000:
+        raise ValidationError({"wallet": "消费折扣无效。"})
+    coupon_amount = min(coupon.face_amount, max(service_fee - (0 if transport_fee else 1), 0)) if coupon else 0
+    after_coupon = service_fee - coupon_amount
+    net_service = (after_coupon * wallet_discount_rate_bps + 5000) // 10000
+    if after_coupon and not transport_fee:
+        net_service = max(net_service, 1)
+    wallet_discount = after_coupon - net_service
+    discount = coupon_amount + wallet_discount
     return PriceQuote(
         service_fee_amount=service_fee,
         transport_fee_amount=transport_fee,
@@ -2061,7 +2069,11 @@ def build_quote(service: ProviderService, duration_minutes: int, distance_km: De
         discount_amount=discount,
         payable_amount=total - discount,
         snapshot={
-            "version": "provider-order-pricing-v1",
+            "version": "provider-order-pricing-v2",
+            "coupon_discount_amount": coupon_amount,
+            "wallet_discount_amount": wallet_discount,
+            "wallet_discount_rate_bps": wallet_discount_rate_bps,
+            "net_service_fee_amount": net_service,
             "currency": "CNY",
             **commission_snapshot(service.provider, service.category.platform_commission_rate),
             "time_grain_minutes": TIME_GRAIN_MINUTES,
@@ -2071,7 +2083,7 @@ def build_quote(service: ProviderService, duration_minutes: int, distance_km: De
                 "public_id": str(coupon.public_id),
                 "face_amount": coupon.face_amount,
                 "min_order_amount": coupon.min_order_amount,
-                "discount_amount": discount,
+                "discount_amount": coupon_amount,
             } if coupon else None),
         },
     )
