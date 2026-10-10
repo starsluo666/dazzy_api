@@ -1,4 +1,8 @@
 from django.urls import path
+from .provider_invite_views import (
+    AdminProviderInviteConfigView, AdminProviderInviteSourcesView, AdminProviderInviteSourceView,
+    AdminProviderInviteRewardsView, AdminProviderInviteRewardActionView,
+)
 from .coupon_campaign_views import AdminCouponCampaignListView, AdminCouponCampaignDetailView, AdminCouponCampaignClaimsView
 from .coupon_batch_views import CouponBatchListView, CouponBatchDetailView
 from .training_views import AdminProviderTrainingView, AdminProviderTrainingPublishView
@@ -74,6 +78,11 @@ from .operations_views import AdminWorkItemsView, AdminWorkSummaryView, AdminFin
 from .refund_views import StaffRefundContextView, StaffActivityRefundCreateView, StaffRefundPolicyView
 
 urlpatterns = [
+    path("provider-invites/config/", AdminProviderInviteConfigView.as_view()),
+    path("provider-invites/sources/", AdminProviderInviteSourcesView.as_view()),
+    path("provider-invites/sources/<uuid:source_id>/", AdminProviderInviteSourceView.as_view()),
+    path("provider-invites/rewards/", AdminProviderInviteRewardsView.as_view()),
+    path("provider-invites/rewards/<uuid:reward_id>/action/", AdminProviderInviteRewardActionView.as_view()),
     path("coupon-campaigns/", AdminCouponCampaignListView.as_view()),
     path("coupon-campaigns/<uuid:campaign_id>/", AdminCouponCampaignDetailView.as_view()),
     path("coupon-campaigns/<uuid:campaign_id>/claims/", AdminCouponCampaignClaimsView.as_view()),

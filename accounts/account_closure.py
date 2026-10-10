@@ -136,8 +136,13 @@ def account_closure_blockers(user) -> list[dict[str, object]]:
     )
     from supportcases.models import SupportCase
     from wallets.models import UserWallet, WalletRechargeOrder
+    from growth.models import ProviderInviteReward
 
     checks = (
+        (
+            "provider_invite_rewards", "未处理的达人邀请奖励",
+            ProviderInviteReward.objects.filter(source__provider_user=user, status__in=("pending", "approved")),
+        ),
         (
             "wallet_balance", "未结清钱包余额",
             UserWallet.objects.filter(user=user).filter(

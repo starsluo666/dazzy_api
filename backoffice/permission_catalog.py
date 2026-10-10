@@ -90,6 +90,8 @@ PERMISSION_GROUPS = (
             ("coupon.issue", "向用户发放优惠券"),
             ("growth.view", "查看拉新活动配置与邀请记录"),
             ("growth.manage", "管理新人礼包与邀请规则"),
+            ("provider_invite.view", "查看达人邀请与奖励台账（全平台）"),
+            ("provider_invite.manage", "配置达人邀请奖励与门店来源（全平台）"),
         ),
     },
     {
@@ -97,6 +99,8 @@ PERMISSION_GROUPS = (
         "label": "财务管理",
         "permissions": (
             ("wallet.view", "查看用户钱包与充值记录"),
+            ("provider_invite.review", "财务审核达人邀请现金奖励（全平台）"),
+            ("provider_invite.pay", "登记达人邀请奖励人工打款（全平台）"),
             ("wallet.manage", "管理充值折扣配置"),
         ),
     },

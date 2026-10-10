@@ -7,6 +7,7 @@ from urllib.parse import quote
 BASE_DIR = Path(__file__).resolve().parents[2]
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-local-only-change-me")
 DEBUG = False
+PROVIDER_INVITE_H5_BASE_URL = os.getenv("PROVIDER_INVITE_H5_BASE_URL", "")
 ALLOWED_HOSTS: list[str] = []
 
 INSTALLED_APPS = [
@@ -296,6 +297,7 @@ WECHAT_OAUTH_STATE_MAX_AGE_SECONDS = int(
 )
 WECHAT_OAUTH_TIMEOUT_SECONDS = int(os.getenv("WECHAT_OAUTH_TIMEOUT_SECONDS", "10"))
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "provider_invite_public": "60/min",
     "provider_receiving_account": "10/min",
     "auth_sms_send": os.getenv("AUTH_SMS_SEND_RATE", "10/min"),
     "auth_sms_send_ip_daily": os.getenv("AUTH_SMS_SEND_IP_DAILY_RATE", "50/day"),

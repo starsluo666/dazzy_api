@@ -19,6 +19,7 @@ dependencies = [
   "psycopg[binary]>=3.2,<3.3",
   "redis>=6,<7",
   "whitenoise>=6.12,<7",
+  "qrcode[pil]>=8.2,<9",
 ]
 
 [dependency-groups]

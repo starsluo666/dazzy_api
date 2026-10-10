@@ -26,6 +26,10 @@ from .models import (
 
 @transaction.atomic
 def save_provider_application(*, user, data) -> ProviderProfile:
+    from growth.models import ProviderInviteReward
+    bound = ProviderInviteReward.objects.filter(invitee=user).values_list("code_snapshot", flat=True).first()
+    if bound and data.get("invitation_code", bound) != bound:
+        raise ValidationError({"invitation_code": "邀请来源已绑定，不能修改。"})
     profile, _ = ProviderProfile.objects.select_for_update().get_or_create(user=user)
     if profile.status in (ProviderProfile.Status.PENDING, ProviderProfile.Status.APPROVED):
         raise ValidationError("当前状态不可修改申请资料。")
