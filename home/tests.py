@@ -49,6 +49,7 @@ class HomeDiscoveryTests(TestCase):
                 service_city_code="130400",
                 service_city_name="邯郸市",
                 is_accepting_orders=True,
+                training_exempt=True,
                 rating=Decimal("4.90") - Decimal(index) / 100,
                 service_count=20 - index,
             )

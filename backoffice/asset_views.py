@@ -14,6 +14,7 @@ from mediafiles.models import MediaAsset
 from mediafiles.services import build_media_url
 from mediafiles.views import PublicImageUploadView
 from providers.models import ServiceCategory
+from orders.models import CouponCampaign
 
 from .access import client_ip, resolve_admin_access
 from .models import AdminAuditLog
@@ -50,6 +51,8 @@ def asset_references(asset):
         Q(icon_asset=asset) | Q(icon_object_key=asset.object_key)
     ).values("id", "name")
     return [
+        *({"type": "coupon_campaign", "id": str(item["public_id"]), "name": item["name"]}
+          for item in CouponCampaign.objects.filter(banner=asset).values("public_id", "name")),
         *({"type": "service_category", "id": item["id"], "name": item["name"]} for item in services),
         *({"type": "activity_category", "id": item["id"], "name": item["name"]} for item in activities),
     ]

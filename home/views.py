@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from activities.selectors import upcoming_public_activities
 from config.geospatial import gcj02_to_wgs84
 from mediafiles.services import build_home_card_assets
+from orders.coupon_campaigns import home_coupon_campaigns
 from providers.availability import build_availability
 from providers.models import ProviderService
 from providers.presence import online_provider_query
@@ -95,12 +96,14 @@ class HomeDiscoveryView(APIView):
             point = gcj02_to_wgs84(params["longitude"], params["latitude"])
 
         data = {
+            "coupon_campaigns": [],
             "card_assets": {},
             "recommended_activities": [],
             "recommended_providers": [],
             "errors": {},
         }
         loaders = {
+            "coupon_campaigns": lambda: home_coupon_campaigns(request.user),
             "card_assets": build_home_card_assets,
             "recommended_activities": lambda: _recommended_activities(params, point),
             "recommended_providers": lambda: _recommended_providers(params, point, request),
@@ -112,4 +115,6 @@ class HomeDiscoveryView(APIView):
                 logger.exception("Home section failed: %s", section)
                 data["errors"][section] = "暂时无法加载"
 
-        return Response({"data": data})
+        response = Response({"data": data})
+        response["Cache-Control"] = "private, no-store"
+        return response

@@ -948,7 +948,7 @@ class AdminCouponListQuerySerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         choices=(
-            "manual", "bulk_manual", "report_reward", "customer_service",
+            "manual", "bulk_manual", "campaign", "report_reward", "customer_service",
             "newcomer_gift", "invite_registration", "invite_first_order",
         ),
     )

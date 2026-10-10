@@ -2833,8 +2833,8 @@ class AdminCouponTemplateDetailView(APIView):
             public_id=template_id,
         )
         template.issued_count = template.coupons.count()
-        if template.issued_count or template.issue_batches.exists():
-            raise ValidationError({"detail": "该模板已有发放记录或批次预览，不能删除，请改为停用。"})
+        if template.issued_count or template.issue_batches.exists() or template.claim_campaigns.exists():
+            raise ValidationError({"detail": "该模板已有发放记录、批次预览或领券活动引用，不能删除，请先核查引用。"})
         if (
             template.newcomer_gift_items.exists()
             or template.growth_registration_reward_configs.exists()

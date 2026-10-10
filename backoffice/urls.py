@@ -1,4 +1,5 @@
 from django.urls import path
+from .coupon_campaign_views import AdminCouponCampaignListView, AdminCouponCampaignDetailView, AdminCouponCampaignClaimsView
 from .coupon_batch_views import CouponBatchListView, CouponBatchDetailView
 from .training_views import AdminProviderTrainingView, AdminProviderTrainingPublishView
 
@@ -73,6 +74,9 @@ from .operations_views import AdminWorkItemsView, AdminWorkSummaryView, AdminFin
 from .refund_views import StaffRefundContextView, StaffActivityRefundCreateView, StaffRefundPolicyView
 
 urlpatterns = [
+    path("coupon-campaigns/", AdminCouponCampaignListView.as_view()),
+    path("coupon-campaigns/<uuid:campaign_id>/", AdminCouponCampaignDetailView.as_view()),
+    path("coupon-campaigns/<uuid:campaign_id>/claims/", AdminCouponCampaignClaimsView.as_view()),
     path("refund-policy/", StaffRefundPolicyView.as_view(), name="admin-refund-policy"),
     path("refund-context/<str:kind>/<str:reference>/", StaffRefundContextView.as_view(), name="admin-refund-context"),
     path("activity-payments/<str:reference>/after-sales/", StaffActivityRefundCreateView.as_view(), name="admin-activity-refund-create"),

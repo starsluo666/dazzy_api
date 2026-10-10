@@ -1,4 +1,5 @@
 from django.urls import path
+from .coupon_campaign_views import CouponCampaignClaimView, CouponCampaignDetailView
 
 from .views import (
     ProviderOrderPolicyCancelView,
@@ -32,6 +33,8 @@ from .views import (
 )
 
 urlpatterns = [
+    path("coupon-campaigns/<uuid:campaign_id>/", CouponCampaignDetailView.as_view()),
+    path("coupon-campaigns/<uuid:campaign_id>/claim/", CouponCampaignClaimView.as_view()),
     path("provider-orders/<str:order_no>/cancellation/", ProviderOrderPolicyCancelView.as_view()),
     path("provider-orders/<str:order_no>/customer-wait/", ProviderOrderWaitView.as_view()),
     path("providers/me/orders/<str:order_no>/customer-wait/", ProviderOrderWaitView.as_view(role="provider")),

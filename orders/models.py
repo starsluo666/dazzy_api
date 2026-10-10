@@ -217,6 +217,7 @@ class CouponTemplate(models.Model):
 
 
 class UserCoupon(models.Model):
+    name_snapshot = models.CharField(max_length=80, blank=True)
     issue_request_id = models.UUIDField(null=True, blank=True, unique=True, editable=False)
     class Status(models.TextChoices):
         AVAILABLE = "available", "可使用"
@@ -258,6 +259,49 @@ class UserCoupon(models.Model):
         db_table = "user_coupon"
         ordering = ("-created_at", "-id")
         indexes = [models.Index(fields=("owner", "status", "expires_at"))]
+
+
+class CouponCampaign(models.Model):
+    """Operator-configured, explicitly claimed offers; not group activities."""
+
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    name = models.CharField(max_length=80)
+    banner = models.ForeignKey("mediafiles.MediaAsset", on_delete=models.PROTECT, related_name="coupon_campaigns")
+    template = models.ForeignKey(CouponTemplate, on_delete=models.PROTECT, related_name="claim_campaigns")
+    template_snapshot = models.JSONField(default=dict, blank=True)
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    stock = models.PositiveIntegerField()
+    issued_count = models.PositiveIntegerField(default=0)
+    sort_order = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=(("draft", "草稿"), ("published", "已上架"), ("offline", "已下架")), default="draft")
+    revision = models.PositiveIntegerField(default=1)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_coupon_campaigns")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="updated_coupon_campaigns")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "coupon_claim_campaign"
+        ordering = ("sort_order", "-id")
+        constraints = [
+            models.CheckConstraint(condition=models.Q(stock__gte=models.F("issued_count")), name="claim_campaign_stock_gte_issued"),
+            models.CheckConstraint(condition=models.Q(stock__gt=0), name="claim_campaign_positive_stock"),
+            models.CheckConstraint(condition=models.Q(ends_at__gt=models.F("starts_at")), name="claim_campaign_valid_window"),
+        ]
+        indexes = [models.Index(fields=("status", "ends_at"), name="claim_campaign_public_idx")]
+
+
+class CouponCampaignClaim(models.Model):
+    campaign = models.ForeignKey(CouponCampaign, on_delete=models.PROTECT, related_name="claims")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="coupon_campaign_claims")
+    coupon = models.OneToOneField(UserCoupon, on_delete=models.PROTECT, related_name="campaign_claim")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "coupon_campaign_claim"
+        constraints = [models.UniqueConstraint(fields=("campaign", "user"), name="unique_campaign_claim_user")]
 
 
 class CouponIssueBatch(models.Model):

@@ -33,6 +33,8 @@ PERMISSION_GROUPS = (
             ("service_category.manage", "管理服务分类"),
             ("asset.view", "查看运营素材库"),
             ("asset.manage", "上传与管理运营素材"),
+            ("coupon_campaign.view", "查看领券活动及领取记录（全平台）"),
+            ("coupon_campaign.manage", "配置与发布领券活动（全平台发券）"),
             ("operations.manage", "管理平台参数、接单规则与收款提现配置"),
         ),
     },

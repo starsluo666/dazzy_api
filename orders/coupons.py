@@ -34,6 +34,7 @@ def issue_coupon(*, owner, source="manual", issued_by=None, template=None, now=N
         owner=owner,
         template=template,
         source=source,
+        name_snapshot=snapshot["name"],
         issued_by=issued_by,
         face_amount=snapshot["face_amount"],
         min_order_amount=snapshot["min_order_amount"],
@@ -103,7 +104,7 @@ def coupon_payload(coupon, *, now=None):
     return {
         "public_id": str(coupon.public_id),
         "template_public_id": str(coupon.template.public_id) if coupon.template_id else None,
-        "template_name": coupon.template.name if coupon.template_id else "优惠券",
+        "template_name": coupon.name_snapshot or (coupon.template.name if coupon.template_id else "优惠券"),
         "face_amount": coupon.face_amount,
         "min_order_amount": coupon.min_order_amount,
         "expires_at": coupon.expires_at,
