@@ -451,15 +451,15 @@ class ProviderInviteTests(APITestCase):
         result = self.client.get(ADMIN + "rewards/").data["data"]
         self.assertEqual(result["summary"], [{"status": "pending", "count": 2, "amount": 10000}])
 
-    def test_qr_uses_explicit_provider_h5_base_and_ignores_request_host(self):
+    def test_qr_uses_explicit_invite_h5_base_and_ignores_request_host(self):
         self.client.force_authenticate(self.admin)
-        with override_settings(PROVIDER_INVITE_H5_BASE_URL="https://provider.example.test/work/", ALLOWED_HOSTS=["evil.example.test"]):
+        with override_settings(PROVIDER_INVITE_H5_BASE_URL="https://h5.example.test/", ALLOWED_HOSTS=["evil.example.test"]):
             response = self.client.get(
                 ADMIN + f"sources/{self.source.public_id}/", HTTP_HOST="evil.example.test"
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["invite_url"],
-                         f"https://provider.example.test/work/#/pages/invitations/provider-register?code={self.source.code}")
+                         f"https://h5.example.test/#/pages/invitations/provider-register?code={self.source.code}")
 
     def test_missing_or_invalid_h5_blocks_new_invites_not_existing_ledger(self):
         reward = self.make_reward()

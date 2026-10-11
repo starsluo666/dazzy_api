@@ -28,7 +28,7 @@ def invite_h5_base():
 def require_invite_h5_base():
     base = invite_h5_base()
     if not base:
-        raise ValidationError("请先配置达人端 H5 地址 PROVIDER_INVITE_H5_BASE_URL（HTTPS，不含查询参数或 #）。")
+        raise ValidationError("请先配置承载达人邀请页的用户端 H5 地址 PROVIDER_INVITE_H5_BASE_URL（HTTPS，不含查询参数或 #）。")
     return base
 
 
