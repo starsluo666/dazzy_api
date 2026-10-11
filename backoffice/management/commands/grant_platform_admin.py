@@ -42,6 +42,8 @@ class Command(BaseCommand):
                     "service_category.manage",
                     "asset.view",
                     "asset.manage",
+                    "coupon_campaign.view",
+                    "coupon_campaign.manage",
                     "activity.view",
                     "activity.review",
                     "activity.manage",

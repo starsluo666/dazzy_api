@@ -4,8 +4,10 @@
 
 ## 部署与权限
 
-- 后端部署必须执行迁移 `orders.0037`，同步发布后台和用户端；不需要定时任务。
-- 超级管理员可直接使用。客服/运营角色须由管理员授予 `coupon_campaign.view`、`coupon_campaign.manage`，且必须是平台组织、全部数据范围。没有自动给客服扩大跨城市发券权限。
+- 后端部署必须执行迁移 `orders.0037` 和 `backoffice.0039_grant_coupon_campaign_permissions`，同步发布后台和用户端；不需要定时任务。
+- 超级管理员可直接使用。`backoffice.0039` 仅为平台组织、全部数据范围的内置 `platform-admin` 角色补齐 `coupon_campaign.view`、`coupon_campaign.manage`，保留其他权限；新建平台管理员时也包含这两项。不会给自定义角色、普通客服或城市/区域角色自动扩权。
+- 客服/运营自定义角色须由管理员按需授予以上权限，且必须是平台组织、全部数据范围。只有查看权限时能查看活动与记录，不能配置或发布。
+- 平台管理员看不到「运营配置 → 领券活动」时，更新后端并运行 `sudo bash ./deploy-docker.sh deploy --migrate`；迁移成功后刷新后台页面（必要时重新登录）。仅拉代码或只更新前端不会补齐数据库内已有角色的权限。迁移不创建/上架活动、不发券，也不触发短信或资金操作；回滚迁移不撤销既有授权。
 - 选图需要 `asset.view`；直接上传需要 `asset.manage`。已有优惠券模板在营销管理中维护。
 - 不迁移或创建示例活动、示例券、真实领取记录；不调用短信、微信或资金渠道。
 
@@ -30,6 +32,6 @@
 
 ## 验证
 
-常规用例：`orders.test_coupon_campaigns`；真实行锁用例：`orders.test_coupon_campaign_concurrency`（仅 PostgreSQL 执行）。回归覆盖优惠券发放、营销礼包、素材引用与首页聚合。浏览器测试不发送真实券，微信小程序仍需真机验收滑动与登录回跳。
+权限修复回归：`backoffice.test_coupon_campaign_permissions`（新建/重复授权、历史模型迁移、增量幂等、角色范围、会话权限与 API 隔离）；菜单回归：`dazzy_admin/tests/couponCampaignPermissions.test.cjs`。常规用例：`orders.test_coupon_campaigns`；真实行锁用例：`orders.test_coupon_campaign_concurrency`（仅 PostgreSQL 执行）。回归覆盖优惠券发放、营销礼包、素材引用与首页聚合。浏览器测试不发送真实券，微信小程序仍需真机验收滑动与登录回跳。
 
 2026-10-10 本地检查：后端 55 项通过，2 项 PostgreSQL 专用并发用例在 Spatialite 上跳过；前端 23 项发现页/导航/错误提示/分类回归通过，后台批次发券回归通过。用户端类型检查、H5/微信小程序构建、后台类型检查与构建通过。`dazzy_app/tests/couponCampaigns.browser.cjs` 使用模拟接口验证 320/390/430 宽度的原生滑动、登录回跳、不同活动领取、我的优惠券、领完禁领与首页回退，以及后台选图、保存、下架、领取记录。未在真实 PostgreSQL、微信真机或线上环境执行本功能验收。
