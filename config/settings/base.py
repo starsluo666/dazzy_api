@@ -171,6 +171,13 @@ COS_PUBLIC_PREFIX = os.getenv("COS_PUBLIC_PREFIX", "dazzy-test/public/")
 COS_PRIVATE_PREFIX = os.getenv("COS_PRIVATE_PREFIX", "dazzy-test/private/")
 COS_SIGNED_PUBLIC_URL_TTL = int(os.getenv("COS_SIGNED_PUBLIC_URL_TTL", "3600"))
 COS_SIGNED_PRIVATE_URL_TTL = int(os.getenv("COS_SIGNED_PRIVATE_URL_TTL", "300"))
+
+# Opt in only after Tencent FaceID activation and consent-capable clients are deployed.
+TENCENT_FACEID_ENABLED = os.getenv("TENCENT_FACEID_ENABLED", "false").lower() == "true"
+TENCENT_FACEID_SECRET_ID = os.getenv("TENCENT_FACEID_SECRET_ID", "")
+TENCENT_FACEID_SECRET_KEY = os.getenv("TENCENT_FACEID_SECRET_KEY", "")
+TENCENT_FACEID_TIMEOUT_SECONDS = max(1, min(20, int(os.getenv("TENCENT_FACEID_TIMEOUT_SECONDS", "12"))))
+TENCENT_FACEID_DAILY_LIMIT = max(1, int(os.getenv("TENCENT_FACEID_DAILY_LIMIT", "5")))
 PROVIDER_IDENTITY_WATERMARK_FONT_PATH = os.getenv("PROVIDER_IDENTITY_WATERMARK_FONT_PATH", "")
 MEDIA_FFMPEG_PATH = os.getenv("MEDIA_FFMPEG_PATH", "ffmpeg")
 MEDIA_FFPROBE_PATH = os.getenv("MEDIA_FFPROBE_PATH", "ffprobe")

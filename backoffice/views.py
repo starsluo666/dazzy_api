@@ -1650,6 +1650,7 @@ def _provider_change_payload(kind, obj):
         "service_city_name": provider.service_city_name,
     }
     if kind == "onboarding":
+        from providers.identity_verification import verification_summary
         profile_revision = provider.profile_revisions.filter(
             status=ProviderProfileRevision.Status.PENDING
         ).select_related("lifestyle_photo").first()
@@ -1662,6 +1663,7 @@ def _provider_change_payload(kind, obj):
             "rejection_reason": provider.onboarding_rejection_reason,
             "identity": {
                 "status": provider.identity_status,
+                "verification": verification_summary(provider, admin=True),
                 "number_masked": provider.identity_number_masked,
                 "front_photo_url": build_media_url(
                     provider.identity_front_photo.object_key, private=True

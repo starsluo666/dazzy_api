@@ -275,6 +275,13 @@ class ProviderProfileManageSerializer(serializers.ModelSerializer):
 
 
 class ProviderIdentitySerializer(serializers.ModelSerializer):
+    recognition_mode = serializers.ChoiceField(choices=("photo",), required=False, write_only=True)
+    identity_verification = serializers.SerializerMethodField()
+
+    def get_identity_verification(self, obj):
+        from .identity_verification import verification_summary
+        return verification_summary(obj)
+
     id_number = serializers.CharField(write_only=True, required=False, max_length=18)
     identity_status_label = serializers.CharField(source="get_identity_status_display", read_only=True)
     identity_front_photo_id = serializers.PrimaryKeyRelatedField(
@@ -317,6 +324,8 @@ class ProviderIdentitySerializer(serializers.ModelSerializer):
             "identity_status",
             "identity_status_label",
             "identity_real_name",
+            "identity_verification",
+            "recognition_mode",
             "id_number",
             "identity_number_masked",
             "identity_front_photo_id",

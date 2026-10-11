@@ -708,6 +708,8 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
             and profile.application_real_name.strip() != profile.identity_real_name.strip()
         ):
             raise ValidationError({"decision": "实名认证姓名与入驻申请姓名不一致。"})
+        from providers.identity_verification import require_verified_check
+        require_verified_check(profile)
         profile.display_name = profile_revision.display_name
         profile.bio = profile_revision.bio
         profile.lifestyle_photo = profile_revision.lifestyle_photo
@@ -892,6 +894,8 @@ def correct_provider_application_name(
     if not access.all_data:
         queryset = queryset.filter(service_city_code__in=access.city_codes)
     profile = get_object_or_404(queryset, id=profile_id)
+    from providers.identity_verification import ensure_not_checking
+    ensure_not_checking(profile)
     if profile.status != ProviderProfile.Status.APPROVED:
         raise ValidationError("仅已通过入驻审核的达人可更正申请姓名。")
     if profile.identity_status not in (
@@ -932,6 +936,9 @@ def review_provider_identity(*, profile_id, decision, reason, actor, access, req
         raise ValidationError("首次实名认证请在达人综合开通审核中处理。")
     if profile.identity_status != ProviderProfile.IdentityStatus.PENDING:
         raise ValidationError("仅认证中的实名认证可以执行审核。")
+    if decision == "approve":
+        from providers.identity_verification import require_verified_check
+        require_verified_check(profile)
     before = {
         "identity_status": profile.identity_status,
         "identity_rejection_reason": profile.identity_rejection_reason,

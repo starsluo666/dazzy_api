@@ -259,11 +259,29 @@ def provider_profile_blockers(profile: ProviderProfile) -> list[str]:
 @transaction.atomic
 def save_provider_identity(*, provider: ProviderProfile, data: dict) -> ProviderProfile:
     locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
+    from .identity_verification import ensure_not_checking
+    ensure_not_checking(locked)
     if locked.identity_status in (
         ProviderProfile.IdentityStatus.PENDING,
         ProviderProfile.IdentityStatus.VERIFIED,
     ):
         raise ValidationError({"detail": "当前实名认证状态不可修改。"})
+    data = dict(data)
+    recognition_mode = data.pop("recognition_mode", "")
+    auto_recognize = (recognition_mode == "photo" or settings.TENCENT_FACEID_ENABLED
+                      or locked.identity_verification_required)
+    if auto_recognize:
+        if "identity_real_name" in data or "id_number" in data:
+            raise ValidationError({"detail": "姓名和证件号由身份证验真自动识别，请更新页面后仅上传照片。"})
+        changed = not locked.identity_verification_required or any(
+            field in data and getattr(locked, f"{field}_id") != getattr(data[field], "pk", None)
+            for field in ("identity_front_photo", "identity_back_photo", "identity_face_photo")
+        )
+        locked.identity_verification_required = True
+        if changed:
+            locked.identity_real_name = ""
+            locked.identity_number_masked = ""
+            locked.identity_number_digest = ""
     id_number = data.pop("id_number", "")
     for field, value in data.items():
         setattr(locked, field, value)
@@ -283,18 +301,23 @@ def save_provider_identity(*, provider: ProviderProfile, data: dict) -> Provider
     return locked
 
 
-@transaction.atomic
-def submit_provider_identity(*, provider: ProviderProfile) -> ProviderProfile:
-    locked = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
+def submit_provider_identity(*, provider: ProviderProfile, consent_version="", recognition_mode="") -> ProviderProfile:
+    from .identity_verification import submit_identity
+    return submit_identity(provider=provider, consent_version=consent_version, recognition_mode=recognition_mode)
+
+
+def validate_identity_submission(locked, *, auto_recognize=False):
     if locked.identity_status not in (
         ProviderProfile.IdentityStatus.UNVERIFIED,
         ProviderProfile.IdentityStatus.REJECTED,
     ):
         raise ValidationError({"detail": "当前实名认证状态不可重复提交。"})
     missing = []
-    if not locked.identity_real_name.strip():
+    if auto_recognize and not locked.application_real_name.strip():
+        raise ValidationError({"detail": "入驻申请姓名缺失，请联系客服核实补充后再提交认证。"})
+    if not auto_recognize and not locked.identity_real_name.strip():
         missing.append("真实姓名")
-    if not locked.identity_number_digest:
+    if not auto_recognize and not locked.identity_number_digest:
         missing.append("身份证号码")
     if not locked.identity_front_photo_id:
         missing.append("身份证人像面")
@@ -305,12 +328,16 @@ def submit_provider_identity(*, provider: ProviderProfile) -> ProviderProfile:
     if missing:
         raise ValidationError({"detail": f"请先完善：{'、'.join(missing)}。"})
     if (
-        locked.application_real_name
+        not auto_recognize and locked.application_real_name
         and locked.identity_real_name.strip() != locked.application_real_name.strip()
     ):
         raise ValidationError({
             "identity_real_name": "实名认证姓名与入驻申请姓名不一致，请联系客服核实并更正申请姓名后重试。"
         })
+
+
+def mark_identity_submitted(locked):
+    """Caller holds the profile lock and has completed any required channel check."""
     locked.identity_status = ProviderProfile.IdentityStatus.PENDING
     locked.identity_submitted_at = timezone.now()
     locked.identity_reviewed_at = None

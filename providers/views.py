@@ -344,7 +344,14 @@ class CurrentProviderProfileView(APIView):
         })
 
 
-class CurrentProviderIdentityView(APIView):
+class PrivateProviderIdentityView(APIView):
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Cache-Control"] = "no-store, private"
+        return response
+
+
+class CurrentProviderIdentityView(PrivateProviderIdentityView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -368,12 +375,15 @@ class CurrentProviderIdentityView(APIView):
         )
 
 
-class CurrentProviderIdentitySubmitView(APIView):
+class CurrentProviderIdentitySubmitView(PrivateProviderIdentityView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         profile = current_approved_provider(request)
-        profile = submit_provider_identity(provider=profile)
+        profile = submit_provider_identity(
+            provider=profile, consent_version=request.data.get("consent_version", ""),
+            recognition_mode=request.data.get("recognition_mode", ""),
+        )
         return Response(
             {"data": ProviderIdentitySerializer(profile, context={"request": request}).data}
         )

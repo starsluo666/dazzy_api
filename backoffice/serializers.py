@@ -1070,6 +1070,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
     identity_front_photo_url = serializers.SerializerMethodField()
     identity_back_photo_url = serializers.SerializerMethodField()
     identity_face_photo_url = serializers.SerializerMethodField()
+    identity_verification = serializers.SerializerMethodField()
     is_profile_complete = serializers.BooleanField(read_only=True)
     receiving_account = serializers.SerializerMethodField()
 
@@ -1091,6 +1092,7 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             "admin_restriction_reason", "service_names", "services", "weekly_availability",
             "credit_adjustments", "submitted_at", "reviewed_at", "rejection_reason",
             "application_real_name", "identity_real_name", "identity_number_masked",
+            "identity_verification",
             "identity_front_photo_url",
             "identity_back_photo_url", "identity_face_photo_url", "identity_submitted_at",
             "identity_reviewed_at", "identity_rejection_reason", "is_profile_complete",
@@ -1103,6 +1105,12 @@ class ProviderAdminSerializer(serializers.ModelSerializer):
             return None
         from providers.receiving_accounts import receiving_account_summary
         return receiving_account_summary(obj)
+
+    def get_identity_verification(self, obj):
+        if not (self.context.get("can_review", False) and self.context.get("include_detail", False)):
+            return None
+        from providers.identity_verification import verification_summary
+        return verification_summary(obj, admin=True)
 
     def get_phone_masked(self, obj):
         return mask_phone(obj.user.phone)

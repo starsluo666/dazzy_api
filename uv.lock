@@ -240,6 +240,7 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "qrcode", extra = ["pil"] },
     { name = "redis" },
+    { name = "tencentcloud-sdk-python-faceid" },
     { name = "whitenoise" },
 ]
 
@@ -266,6 +267,7 @@ requires-dist = [
     { name = "pycryptodome", specifier = ">=3.20,<4" },
     { name = "qrcode", extras = ["pil"], specifier = ">=8.2,<9" },
     { name = "redis", specifier = ">=6,<7" },
+    { name = "tencentcloud-sdk-python-faceid", specifier = ">=3.0,<4" },
     { name = "whitenoise", specifier = ">=6.12,<7" },
 ]
 
@@ -778,6 +780,30 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5f/d3/3f06a1006f2261d1342aefb3c71eed02f5d4ca5bdbecd86ebc12ad38306e/sqlparse-0.6.0.tar.gz", hash = "sha256:113c35c75365ab9cc9c7231d68c6428fb11c085fc8e9eb1ad659b7ddbf6cd2b9", size = 178477, upload-time = "2026-08-13T19:16:06.396Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d9/50/f00935da0ec7cbf325f8dc4f772ae46fbc7b672dd62876e73f0a94adda57/sqlparse-0.6.0-py3-none-any.whl", hash = "sha256:b861c0288ce2fa56209a9a6412d2e066ac664b3873b89c26c9d8415e8e32996f", size = 50070, upload-time = "2026-08-13T19:16:04.062Z" },
+]
+
+[[package]]
+name = "tencentcloud-sdk-python-common"
+version = "3.1.187"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/a0/fdbdf3249306edaae14c504c9bd41b648f8b8db91e29033e9d2551be1c42/tencentcloud_sdk_python_common-3.1.187.tar.gz", hash = "sha256:51239eb12b1e5289cc6ec3ac09b6a32954717c0f0b256b6b4c0a948c0d9ac4c9", size = 22662, upload-time = "2026-10-08T20:03:09.861Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/bc/3df8b7bfcfb9b8d8d79e7b5393d9985e9967d19e902a56a67cb5576e3f4c/tencentcloud_sdk_python_common-3.1.187-py2.py3-none-any.whl", hash = "sha256:98bb08583a6045ff25307810e6c935ff54d99ccc3a6334ffbd74df082bfa8e8a", size = 34277, upload-time = "2026-10-08T20:03:07.249Z" },
+]
+
+[[package]]
+name = "tencentcloud-sdk-python-faceid"
+version = "3.1.179"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tencentcloud-sdk-python-common" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/72/b2/43f4110b4ae1329f41e094ce56cb2b804b312250666b1cada687a68a3043/tencentcloud_sdk_python_faceid-3.1.179.tar.gz", hash = "sha256:8b44142084ac5dc5d82837ff9b84d552da7455f9f53eb24e17db4440ad71c930", size = 58162, upload-time = "2026-09-21T18:59:28.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/58/f570a9ec521c8e9338d22f4f59bb72b4e1a87a7d004b6d06368b72913a37/tencentcloud_sdk_python_faceid-3.1.179-py2.py3-none-any.whl", hash = "sha256:b99c19973c0bb8d87eca2ae8bc0b986cebb63f50d2e2a96d28800af480fc87da", size = 61133, upload-time = "2026-09-21T18:59:26.389Z" },
 ]
 
 [[package]]

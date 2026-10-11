@@ -141,6 +141,7 @@ class ProviderProfile(models.Model):
     identity_real_name = models.CharField("实名姓名", max_length=50, blank=True)
     identity_number_masked = models.CharField("证件号码脱敏值", max_length=32, blank=True)
     identity_number_digest = models.CharField("证件号码摘要", max_length=64, blank=True)
+    identity_verification_required = models.BooleanField("本次认证须通过腾讯验真", default=False)
     identity_front_photo = models.ForeignKey(
         "mediafiles.MediaAsset",
         on_delete=models.PROTECT,
@@ -226,6 +227,31 @@ class ProviderProfile(models.Model):
     @property
     def public_display_name(self) -> str:
         return self.display_name.strip() or self.user.nickname
+
+
+class ProviderIdentityCheck(models.Model):
+    """Minimal verification receipt; never persist OCR identity data or portrait bytes."""
+
+    class Status(models.TextChoices):
+        PROCESSING = "processing", "验真中"
+        PASSED = "passed", "身份证验真通过"
+        FAILED = "failed", "身份证验真未通过"
+        ERROR = "error", "验真未完成"
+
+    provider = models.ForeignKey(ProviderProfile, on_delete=models.CASCADE, related_name="identity_checks")
+    fingerprint = models.CharField(max_length=64)
+    status = models.CharField(max_length=16, choices=Status, default=Status.PROCESSING)
+    consent_version = models.CharField(max_length=64)
+    request_id = models.CharField(max_length=64, blank=True)
+    result_code = models.CharField(max_length=128, blank=True)
+    similarity = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    message = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "provider_identity_check"
+        ordering = ("-id",)
 
 
 class ProviderTrainingVersion(models.Model):
