@@ -10,6 +10,7 @@ from .training_views import AdminProviderTrainingView, AdminProviderTrainingPubl
 from .asset_views import AdminAssetBatchDeleteView, AdminAssetListUploadView, AdminAssetRestoreView
 from .auth_views import AdminLogoutView, AdminPasswordLoginView, AdminTokenRefreshView
 from .receiving_setting_views import ReceivingWithdrawalSettingView
+from .user_invitation_views import AdminUserInvitationsView
 from .views import (
     AdminActivityDetailView,
     AdminActivityActionView,
@@ -190,6 +191,11 @@ urlpatterns = [
         name="backoffice-service-category-detail",
     ),
     path("users/", AdminUserListView.as_view(), name="backoffice-users"),
+    path(
+        "users/<uuid:public_id>/invitations/",
+        AdminUserInvitationsView.as_view(),
+        name="backoffice-user-invitations",
+    ),
     path(
         "users/<uuid:public_id>/",
         AdminUserDetailView.as_view(),
