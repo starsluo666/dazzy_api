@@ -293,7 +293,8 @@ class ReceivingOnboardingTests(TestCase):
                 result = response.data["data"]
                 self.assertEqual(result["channel_status"], "active")
                 self.assertIs(result["automatic_settlement_disabled"], True)
-                self.assertIn("按平台规则暂按未开通处理", result["channel_notice"])
+                self.assertEqual(result["status_label"], "收款账户已开通")
+                self.assertNotIn("配置", result["channel_notice"])
                 self.assertNotIn("已核验自动结算关闭", result["channel_notice"])
                 self.assertIn("按平台规则暂按未开通处理", self.account.channel_message)
                 self.assertEqual(manual_cash_account(self.provider.pk, SimpleNamespace(
@@ -405,9 +406,10 @@ class ReceivingOnboardingTests(TestCase):
         self.assertEqual(result["cash_status"], "")
         self.assertEqual(result["card_status"], "")
         self.assertIs(result["automatic_settlement_disabled"], True)
-        self.assertIn("按平台规则暂按未开通处理", result["channel_notice"])
+        self.assertIn("暂不可提现", result["channel_notice"])
+        self.assertIn("按平台规则暂按未开通处理", self.account.channel_message)
         for label in ("手动提现配置", "提现银行卡资料"):
-            self.assertIn(f"渠道未返回{label}", result["channel_notice"])
+            self.assertIn(f"渠道未返回{label}", self.account.channel_message)
         self.assertEqual(self.account.verified_cash_config, {})
         self.assertEqual(self.account.cash_card_ciphertext, "")
         with self.assertRaises(ValidationError):
@@ -430,8 +432,9 @@ class ReceivingOnboardingTests(TestCase):
         self.assertEqual(result["cash_status"], "F")
         self.assertEqual(result["card_status"], "S")
         self.assertIs(result["automatic_settlement_disabled"], False)
-        self.assertIn("仍开启", result["channel_notice"])
-        self.assertIn("未开通所授权周期", result["channel_notice"])
+        self.assertIn("暂不可提现", result["channel_notice"])
+        self.assertIn("仍开启", self.account.channel_message)
+        self.assertIn("未开通所授权周期", self.account.channel_message)
         self.assertNotIn("TESTTOKEN1", str(result))
 
     def test_refresh_explains_audit_and_old_authorization_blocks(self):
@@ -444,8 +447,10 @@ class ReceivingOnboardingTests(TestCase):
             with patch("providers.receiving_onboarding.HuifuUserGateway.call", return_value=self.query_response(settle_config_list=None)):
                 result = self.client.post(URL + "refresh/").data["data"]
             self.assertNotEqual(result["channel_status"], "active")
-            self.assertIn(notice, result["channel_notice"])
-            self.assertIn("需先确认当前手动提现授权", result["channel_notice"])
+            self.assertIn(notice, self.account.channel_message)
+            self.assertIn("需先确认当前手动提现授权", self.account.channel_message)
+            self.assertIn("请先阅读并确认提现授权", result["channel_notice"])
+            self.assertIn("审核", result["channel_notice"])
             self.assertLessEqual(len(result["channel_notice"]), 200)
 
     def test_submitted_copy_no_longer_claims_unsubmitted_or_clearable(self):

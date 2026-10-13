@@ -56,6 +56,28 @@ class ReceivingAccountTests(TestCase):
         for method in (self.client.get, self.client.put, self.client.delete):
             self.assertEqual(method(URL).status_code, 401)
 
+    def test_public_account_copy_does_not_expose_internal_channel_diagnostics(self):
+        from .receiving_accounts import receiving_account_summary
+        self.assertEqual(self.save().status_code, 200)
+        record = ProviderReceivingAccount.objects.get()
+        diagnostic = "渠道未返回自动结算配置，按平台规则暂按未开通处理。"
+        for state in ("not_connected", "registering", "registered", "configuring", "pending", "attention", "active", "rejected"):
+            with self.subTest(state=state):
+                record.channel_status = state
+                record.channel_message = diagnostic
+                record.save()
+                response = self.client.get(URL)
+                self.assertEqual(response.status_code, 200)
+                public = response.data["data"]
+                self.assertEqual(public["channel_status"], state)
+                self.assertNotIn("配置", public["channel_notice"] + public["status_label"])
+                self.assertNotIn("按未开通处理", public["channel_notice"])
+                if state == "attention":
+                    self.assertIn("暂不可提现", public["channel_notice"])
+                self.assertEqual(receiving_account_summary(self.provider)["channel_notice"], diagnostic)
+        record.refresh_from_db()
+        self.assertEqual(record.channel_message, diagnostic)
+
     def test_unverified_cannot_save_and_get_does_not_create_record(self):
         self.provider.identity_status = "pending"
         self.provider.save()
@@ -90,7 +112,7 @@ class ReceivingAccountTests(TestCase):
         self.assertEqual(response.data["data"]["collection_unavailable_reason"], "")
         self.assertIn("尚未向汇付提交", response.data["data"]["collection_notice"])
         self.assertTrue(response.data["data"]["can_clear"])
-        self.assertIn("待渠道开通", response.data["data"]["status_label"])
+        self.assertEqual(response.data["data"]["status_label"], "资料已保存，待申请开户")
         self.assertIn("no-store", response["Cache-Control"])
         self.provider.refresh_from_db()
         self.assertEqual(self.provider.identity_status, "verified")

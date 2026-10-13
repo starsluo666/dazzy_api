@@ -70,7 +70,7 @@ def resolve_gallery(provider, data):
             raise ValidationError({"media_ids": "请将每张展示照片裁剪为5:4后再提交资料。"})
         if asset.category == MediaAsset.Category.PROVIDER_VIDEO:
             if asset.duration_ms is None:
-                raise ValidationError({"media_ids": "旧视频时长尚未核验，请移除并重新上传不超过10秒的视频。"})
+                raise ValidationError({"media_ids": "请移除并重新上传不超过10秒的视频。"})
             if not 0 < asset.duration_ms <= MAX_VIDEO_DURATION_MS:
                 raise ValidationError({"media_ids": "每个视频时长不能超过10秒，请裁剪后重新上传。"})
     return assets

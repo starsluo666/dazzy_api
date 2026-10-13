@@ -273,9 +273,15 @@ def save_provider_identity(*, provider: ProviderProfile, data: dict) -> Provider
     if auto_recognize:
         if "identity_real_name" in data or "id_number" in data:
             raise ValidationError({"detail": "姓名和证件号由身份证验真自动识别，请更新页面后仅上传照片。"})
+        latest_check = locked.identity_checks.first()
+        # New receipts verify only the front. Back/selfie edits still require manual review,
+        # but do not discard a valid front receipt or incur another channel call.
+        identity_fields = ("identity_front_photo",) if latest_check and latest_check.material_scope == "front" else (
+            "identity_front_photo", "identity_back_photo", "identity_face_photo",
+        )
         changed = not locked.identity_verification_required or any(
             field in data and getattr(locked, f"{field}_id") != getattr(data[field], "pk", None)
-            for field in ("identity_front_photo", "identity_back_photo", "identity_face_photo")
+            for field in identity_fields
         )
         locked.identity_verification_required = True
         if changed:
@@ -301,9 +307,11 @@ def save_provider_identity(*, provider: ProviderProfile, data: dict) -> Provider
     return locked
 
 
-def submit_provider_identity(*, provider: ProviderProfile, consent_version="", recognition_mode="") -> ProviderProfile:
+def submit_provider_identity(*, provider: ProviderProfile, consent_version="", recognition_mode="",
+                             verification_mode="on_submit") -> ProviderProfile:
     from .identity_verification import submit_identity
-    return submit_identity(provider=provider, consent_version=consent_version, recognition_mode=recognition_mode)
+    return submit_identity(provider=provider, consent_version=consent_version, recognition_mode=recognition_mode,
+                           verification_mode=verification_mode)
 
 
 def validate_identity_submission(locked, *, auto_recognize=False):

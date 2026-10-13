@@ -181,6 +181,156 @@ class IdentitySubmissionTests(TransactionTestCase):
     def submit(self, consent=CONSENT_VERSION):
         return submit_provider_identity(provider=self.profile, consent_version=consent)
 
+    def verify_front(self, **changes):
+        return self.client.post("/api/v1/providers/me/identity/verify/", {
+            "consent_version": CONSENT_VERSION,
+            "identity_front_photo_id": str(self.profile.identity_front_photo_id), **changes,
+        }, format="json")
+
+    def submit_preverified(self):
+        return self.client.post("/api/v1/providers/me/identity/submit/", {
+            "recognition_mode": "photo", "verification_mode": "preverified",
+        }, format="json")
+
+    def test_front_only_verifies_and_fills_without_entering_review(self):
+        back, selfie = self.profile.identity_back_photo, self.profile.identity_face_photo
+        self.profile.identity_back_photo = self.profile.identity_face_photo = None
+        self.profile.save()
+        with patch("providers.identity_verification.check_identity_photo", return_value=self.result) as channel:
+            response = self.verify_front()
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertIn("no-store", response["Cache-Control"])
+            self.assertEqual(response.data["data"]["identity_status"], "unverified")
+            self.assertEqual(response.data["data"]["identity_real_name"], "测试姓名")
+            self.assertEqual(response.data["data"]["identity_verification"]["status"], "passed")
+            self.assertNotIn(NUMBER, json.dumps(response.data, default=str))
+            self.profile.refresh_from_db()
+            self.assertIsNone(self.profile.identity_submitted_at)
+            self.assertEqual(self.submit_preverified().status_code, 400)
+            check = self.profile.identity_checks.get()
+            self.assertEqual(check.material_scope, "front")
+            for field, asset in (("identity_back_photo_id", back), ("identity_face_photo_id", selfie)):
+                response = self.client.patch("/api/v1/providers/me/identity/", {
+                    "recognition_mode": "photo", field: str(asset.pk),
+                }, format="json")
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["data"]["identity_real_name"], "测试姓名")
+                self.assertEqual(response.data["data"]["identity_verification"]["status"], "passed")
+            self.assertEqual(self.submit_preverified().data["data"]["identity_status"], "pending")
+            channel.assert_called_once()
+            self.assertEqual(self.submit_preverified().status_code, 400)
+        self.profile.refresh_from_db()
+        require_verified_check(self.profile)
+
+    def test_preverified_submit_never_falls_back_to_paid_verification(self):
+        with patch("providers.identity_verification.check_identity_photo") as channel:
+            self.assertEqual(self.submit_preverified().status_code, 400)
+            channel.assert_not_called()
+        with patch("providers.identity_verification.check_identity_photo", return_value=self.result):
+            self.assertEqual(self.verify_front().status_code, 200)
+        self.profile.identity_checks.update(completed_at=timezone.now() - timedelta(hours=25))
+        with patch("providers.identity_verification.check_identity_photo") as channel:
+            self.assertEqual(self.submit_preverified().status_code, 400)
+            self.profile.refresh_from_db()
+            self.assertEqual(verification_summary(self.profile)["status"], "not_checked")
+            channel.assert_not_called()
+
+    def test_front_replacement_invalidates_recognition_and_receipt(self):
+        with patch("providers.identity_verification.check_identity_photo", return_value=self.result):
+            self.assertEqual(self.verify_front().status_code, 200)
+        changed = MediaAsset.objects.create(owner=self.user, scope="private", category="identity",
+                                           status="uploaded", object_key="private/new-front.jpg")
+        response = self.client.patch("/api/v1/providers/me/identity/", {
+            "recognition_mode": "photo", "identity_front_photo_id": str(changed.pk),
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["data"]["identity_real_name"], "")
+        self.assertEqual(response.data["data"]["identity_number_masked"], "")
+        self.assertEqual(response.data["data"]["identity_verification"]["status"], "not_checked")
+        with patch("providers.identity_verification.check_identity_photo") as channel:
+            self.assertEqual(self.submit_preverified().status_code, 400)
+            self.assertEqual(self.verify_front().status_code, 400, "stale client cannot verify the replacement")
+            channel.assert_not_called()
+
+    def test_front_verification_guards_consent_state_source_and_configuration(self):
+        with patch("providers.identity_verification.check_identity_photo") as channel:
+            self.assertEqual(self.verify_front(consent_version="wrong").status_code, 400)
+            self.assertEqual(self.verify_front(identity_front_photo_id="bad-uuid").status_code, 400)
+            self.assertEqual(self.verify_front(identity_front_photo_id=str(self.profile.identity_back_photo_id)).status_code, 400)
+            with override_settings(TENCENT_FACEID_ENABLED=False):
+                self.assertEqual(self.verify_front().status_code, 503)
+            self.profile.identity_status = "pending"
+            self.profile.save()
+            self.assertEqual(self.verify_front().status_code, 400)
+            self.profile.identity_status = "unverified"
+            self.profile.save()
+            self.profile.identity_front_photo.scope = "public"
+            self.profile.identity_front_photo.save()
+            self.assertEqual(self.verify_front().status_code, 400)
+            channel.assert_not_called()
+        self.client.force_authenticate(None)
+        self.assertIn(self.verify_front().status_code, (401, 403))
+
+    def test_front_failure_and_reentrant_requests_do_not_auto_submit_or_call_twice(self):
+        def verify(**kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            self.assertEqual(self.verify_front().status_code, 400)
+            self.assertEqual(self.submit_preverified().status_code, 400)
+            return CheckResult("failed", "NameMismatch", "姓名不一致", "request-front-fail")
+        with patch("providers.identity_verification.check_identity_photo", side_effect=verify) as channel:
+            self.assertEqual(self.verify_front().status_code, 400)
+            self.assertEqual(self.verify_front().status_code, 400)
+            channel.assert_called_once()
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.identity_status, "unverified")
+        self.assertEqual(self.profile.identity_checks.get().status, "failed")
+
+    def test_front_late_result_cannot_fill_replaced_photo(self):
+        def change(**kwargs):
+            ProviderProfile.objects.filter(pk=self.profile.pk).update(identity_front_photo=None)
+            return self.result
+        with patch("providers.identity_verification.check_identity_photo", side_effect=change):
+            self.assertEqual(self.verify_front().status_code, 503)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.identity_checks.get().result_code, "StaleAttempt")
+        self.assertEqual(self.profile.identity_status, "unverified")
+
+    def test_front_success_reused_and_review_still_checks_other_materials(self):
+        with patch("providers.identity_verification.check_identity_photo", return_value=self.result) as channel:
+            self.assertEqual(self.verify_front().status_code, 200)
+            self.assertEqual(self.verify_front().status_code, 200)
+            channel.assert_called_once()
+        self.profile.identity_face_photo.status = "rejected"
+        self.profile.identity_face_photo.save()
+        with patch("providers.identity_verification.check_identity_photo") as channel:
+            self.assertEqual(self.submit_preverified().status_code, 400)
+            channel.assert_not_called()
+        self.profile.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            require_verified_check(self.profile)
+
+    def test_preverified_submit_works_with_channel_disabled_and_review_does_not_expire(self):
+        with patch("providers.identity_verification.check_identity_photo", return_value=self.result):
+            self.assertEqual(self.verify_front().status_code, 200)
+        with override_settings(TENCENT_FACEID_ENABLED=False, TENCENT_FACEID_SECRET_KEY=""):
+            with patch("providers.identity_verification.check_identity_photo") as channel:
+                self.assertEqual(self.submit_preverified().status_code, 200)
+                channel.assert_not_called()
+        self.profile.identity_checks.update(completed_at=timezone.now() - timedelta(hours=25))
+        self.profile.refresh_from_db()
+        self.assertEqual(verification_summary(self.profile)["status"], "passed")
+        require_verified_check(self.profile)
+
+    def test_front_privacy_change_during_check_discards_result(self):
+        def change(**kwargs):
+            MediaAsset.objects.filter(pk=self.profile.identity_front_photo_id).update(scope="public")
+            return self.result
+        with patch("providers.identity_verification.check_identity_photo", side_effect=change):
+            self.assertEqual(self.verify_front().status_code, 503)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.identity_checks.get().result_code, "StaleAttempt")
+        self.assertEqual(self.profile.identity_status, "unverified")
+
     def receipt(self, status="processing", age=0, **kwargs):
         check = ProviderIdentityCheck.objects.create(
             provider=self.profile, fingerprint=fingerprint(self.profile), consent_version=CONSENT_VERSION,

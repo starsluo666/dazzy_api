@@ -45,6 +45,8 @@ from .serializers import (
     ProviderLiveLocationInputSerializer,
     ProviderLiveLocationUpdateSerializer,
     ProviderIdentitySerializer,
+    ProviderIdentityVerifySerializer,
+    ProviderIdentitySubmitSerializer,
     ProviderProfileManageSerializer,
     ProviderScheduleCreateSerializer,
     ProviderScheduleQuerySerializer,
@@ -375,14 +377,27 @@ class CurrentProviderIdentityView(PrivateProviderIdentityView):
         )
 
 
+class CurrentProviderIdentityVerifyView(PrivateProviderIdentityView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .identity_verification import verify_identity
+        profile = current_approved_provider(request)
+        serializer = ProviderIdentityVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        profile = verify_identity(provider=profile, **serializer.validated_data)
+        return Response({"data": ProviderIdentitySerializer(profile, context={"request": request}).data})
+
+
 class CurrentProviderIdentitySubmitView(PrivateProviderIdentityView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         profile = current_approved_provider(request)
+        serializer = ProviderIdentitySubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         profile = submit_provider_identity(
-            provider=profile, consent_version=request.data.get("consent_version", ""),
-            recognition_mode=request.data.get("recognition_mode", ""),
+            provider=profile, **serializer.validated_data,
         )
         return Response(
             {"data": ProviderIdentitySerializer(profile, context={"request": request}).data}

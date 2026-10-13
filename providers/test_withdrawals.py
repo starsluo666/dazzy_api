@@ -237,6 +237,17 @@ class WithdrawalStateTests(TransactionTestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
+    def test_wallet_hold_uses_public_copy_without_changing_hold_or_balance(self):
+        diagnostic = "渠道配置与收入账户快照不一致，请人工核账。"
+        self.wallet.hold_reason = diagnostic
+        self.wallet.save(update_fields=["hold_reason"])
+        result = income_wallet_data(self.provider)
+        self.assertFalse(result["can_withdraw"])
+        self.assertEqual(result["unavailable_reason"], "收入暂不可提现，请联系客服核实。")
+        self.assertEqual(result["available_amount"], self.wallet.available_amount)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.hold_reason, diagnostic)
+
     def query_account(self):
         return {
             "resp_code": "00000000",

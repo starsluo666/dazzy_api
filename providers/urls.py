@@ -26,6 +26,7 @@ from .views import (
     CurrentProviderWorkbenchView,
     CurrentProviderIncomeView,
     CurrentProviderIdentitySubmitView,
+    CurrentProviderIdentityVerifyView,
     CurrentProviderIdentityView,
     CurrentProviderProfileView,
 )
@@ -58,6 +59,7 @@ urlpatterns = [
     ),
     path("providers/me/profile/", CurrentProviderProfileView.as_view(), name="provider-profile"),
     path("providers/me/identity/", CurrentProviderIdentityView.as_view(), name="provider-identity"),
+    path("providers/me/identity/verify/", CurrentProviderIdentityVerifyView.as_view(), name="provider-identity-verify"),
     path(
         "providers/me/identity/submit/",
         CurrentProviderIdentitySubmitView.as_view(),

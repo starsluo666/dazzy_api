@@ -202,6 +202,7 @@ def receiving_account_data(provider):
     submitted = bool(account and (has_attempts or account.user_huifu_id))
     return {
         **receiving_account_summary(provider),
+        **receiving_account_public_copy(account, consent_version=ONBOARDING_CONSENT_VERSION),
         "collection_enabled": enabled,
         "can_edit": enabled and not locked,
         "can_clear": bool(account and not has_attempts),
@@ -227,6 +228,32 @@ def receiving_account_data(provider):
         "consent_version": CONSENT_VERSION,
         "collection_notice": SUBMITTED_COLLECTION_NOTICE if submitted else COLLECTION_NOTICE,
     }
+
+
+def receiving_account_public_copy(account, *, consent_version):
+    """User-facing copy only. Keep channel_message/summary unchanged for staff diagnosis."""
+    if not account:
+        return {"status_label": "未填写收款资料", "channel_notice": "请填写本人收款资料，保存后再申请开户。保存不会开户、绑卡或扣款。"}
+    states = {
+        "not_connected": ("资料已保存，待申请开户", "资料已保存，请继续申请开户。保存不会开户、绑卡或扣款。"),
+        "registering": ("开户申请处理中", "开户结果暂未确认，请稍后刷新，勿重复申请。"),
+        "registered": ("提现账户待开通", "收款账户已创建，请继续完成提现开通。"),
+        "configuring": ("提现账户开通中", "正在开通提现账户，请稍后刷新结果，勿重复申请。"),
+        "pending": ("账户确认中", "账户正在确认中，暂不可提现，请稍后刷新结果。"),
+        "active": ("收款账户已开通", "收入计入可提现余额后，可在收入页申请提现。账户开通不代表银行卡已到账。"),
+        "rejected": ("开户资料需修改", "开户未通过，请核对资料或联系客服。"),
+        "attention": ("账户状态待确认", "账户状态暂未确认，暂不可提现。请刷新结果或联系客服核实。"),
+    }
+    label, notice = states.get(account.channel_status, states["attention"])
+    if account.channel_status in {"pending", "attention", "rejected"} and account.audit_status in {"P", "N"}:
+        notice = "开户审核中，暂不可提现，请等待审核结果。" if account.audit_status == "P" else "开户审核未通过，暂不可提现，请联系客服核实。"
+    elif account.channel_status == "attention" and account.card_status == "F":
+        notice = "提现银行卡尚未确认通过，暂不可提现，请联系客服核实银行卡资料。"
+    elif account.channel_status == "attention" and account.cash_status == "F":
+        notice = "提现账户尚未开通，暂不可提现，请联系客服处理。"
+    if account.user_huifu_id and account.onboarding_consent_version != consent_version:
+        notice += "请先阅读并确认提现授权。"
+    return {"status_label": label, "channel_notice": notice}
 
 
 @sensitive_variables()

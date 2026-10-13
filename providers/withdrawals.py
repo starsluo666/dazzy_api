@@ -258,9 +258,9 @@ def income_wallet_data(provider):
     if not settings.HUIFU_PROVIDER_WITHDRAWAL_ENABLED:
         reason = "提现暂未开放，余额会保留。"
     if wallet and (wallet.hold_reason or wallet.reserved_amount):
-        reason = wallet.hold_reason or "已有提现处理中，请等待或刷新结果。"
+        reason = "收入暂不可提现，请联系客服核实。" if wallet.hold_reason else "已有提现处理中，请等待或刷新结果。"
     if not reason and not available:
-        reason = "分账核验成功后，收入才会计入可提现余额。"
+        reason = "暂无可提现余额，订单收入完成结算并确认到账后可提现。"
     return {
         "available_amount": available,
         "reserved_amount": wallet.reserved_amount if wallet else 0,

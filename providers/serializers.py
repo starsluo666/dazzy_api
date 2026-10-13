@@ -274,6 +274,17 @@ class ProviderProfileManageSerializer(serializers.ModelSerializer):
         return obj.rejection_reason if isinstance(obj, ProviderProfileRevision) else ""
 
 
+class ProviderIdentityVerifySerializer(serializers.Serializer):
+    consent_version = serializers.CharField(max_length=64)
+    identity_front_photo_id = serializers.UUIDField()
+
+
+class ProviderIdentitySubmitSerializer(serializers.Serializer):
+    consent_version = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    recognition_mode = serializers.ChoiceField(choices=("", "photo"), default="")
+    verification_mode = serializers.ChoiceField(choices=("on_submit", "preverified"), default="on_submit")
+
+
 class ProviderIdentitySerializer(serializers.ModelSerializer):
     recognition_mode = serializers.ChoiceField(choices=("photo",), required=False, write_only=True)
     identity_verification = serializers.SerializerMethodField()

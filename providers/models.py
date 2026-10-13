@@ -240,6 +240,9 @@ class ProviderIdentityCheck(models.Model):
 
     provider = models.ForeignKey(ProviderProfile, on_delete=models.CASCADE, related_name="identity_checks")
     fingerprint = models.CharField(max_length=64)
+    material_scope = models.CharField(
+        max_length=16, choices=(("all", "整套认证材料"), ("front", "身份证人像面")), default="all",
+    )
     status = models.CharField(max_length=16, choices=Status, default=Status.PROCESSING)
     consent_version = models.CharField(max_length=64)
     request_id = models.CharField(max_length=64, blank=True)
