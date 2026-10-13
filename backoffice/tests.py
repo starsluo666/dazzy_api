@@ -133,6 +133,7 @@ class BackofficeProviderReviewTests(APITestCase):
             category=MediaAsset.Category.PROVIDER_PHOTO,
             status=MediaAsset.Status.UPLOADED,
             object_key="public/provider-photos/handan/lifestyle.webp",
+            provider_photo_cropped=True,
         )
         cls.handan = ProviderProfile.objects.create(
             user=cls.handan_user,

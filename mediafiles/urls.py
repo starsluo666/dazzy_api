@@ -8,11 +8,15 @@ from .views import (
     ReviewImageUploadView,
     SupportAttachmentUploadView,
     ProviderLifestylePhotoUploadView,
+    ProviderPhotoCropView,
+    ProviderPhotoPreviewView,
     ProviderVideoUploadView,
     ProviderIdentityPhotoUploadView,
 )
 
 urlpatterns = [
+    path("media/provider-photos/crop/", ProviderPhotoCropView.as_view(), name="provider-photo-crop"),
+    path("media/provider-photos/preview/", ProviderPhotoPreviewView.as_view(), name="provider-photo-preview"),
     path("media/provider-videos/", ProviderVideoUploadView.as_view(), name="provider-video-upload"),
     path("content/home-cards/", HomeCardAssetView.as_view(), name="home-card-assets"),
     path("media/activity-covers/", ActivityCoverUploadView.as_view(), name="activity-cover-upload"),

@@ -42,6 +42,7 @@ class MediaAsset(models.Model):
     content_type = models.CharField(max_length=127, blank=True)
     size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
     duration_ms = models.PositiveIntegerField("已核验视频时长（毫秒）", null=True, blank=True)
+    provider_photo_cropped = models.BooleanField("已完成达人照片5:4裁剪", default=False)
     etag = models.CharField(max_length=128, blank=True)
     checksum_sha256 = models.CharField(max_length=64, blank=True)
     uploaded_at = models.DateTimeField(null=True, blank=True)

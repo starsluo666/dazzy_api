@@ -7,7 +7,8 @@ from django.conf import settings
 from django.utils import timezone
 from PIL import Image, UnidentifiedImageError
 from rest_framework.exceptions import APIException, ValidationError
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -122,6 +123,7 @@ class PublicImageUploadView(APIView):
             content_type=uploaded.content_type,
             size_bytes=uploaded.size,
             duration_ms=getattr(uploaded, "duration_ms", None),
+            provider_photo_cropped=getattr(uploaded, "provider_photo_cropped", False),
         )
         try:
             asset.etag = self.upload_stream(
@@ -166,6 +168,37 @@ class ProviderLifestylePhotoUploadView(PublicImageUploadView):
             {"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key)}},
             status=201,
         )
+
+
+class ProviderPhotoCropThrottle(UserRateThrottle):
+    scope = "provider_photo_crop"
+    rate = "30/min"
+
+
+class ProviderPhotoCropView(ProviderLifestylePhotoUploadView):
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+    throttle_classes = [ProviderPhotoCropThrottle]
+    folder = "provider-photos-cropped"
+    field_label = "达人展示照片"
+
+    def post(self, request):
+        from .provider_photos import ProviderPhotoCropSerializer, render_provider_photo, source_payload
+        serializer = ProviderPhotoCropSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        prepared = render_provider_photo(source_payload(request), serializer.validated_data)
+        try:
+            asset = self.store_asset(request, prepared)
+        finally:
+            prepared.close()
+        return Response({"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key), "cropped": True}}, status=201)
+
+
+class ProviderPhotoPreviewView(ProviderPhotoCropView):
+    def post(self, request):
+        from .provider_photos import photo_preview, source_payload
+        response = Response({"data": photo_preview(source_payload(request))})
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class ProviderVideoUploadView(ProviderLifestylePhotoUploadView):

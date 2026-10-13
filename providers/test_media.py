@@ -52,6 +52,7 @@ class ProviderGalleryTests(TestCase):
             scope="public",
             status="uploaded",
             category="provider_photo",
+            provider_photo_cropped=True,
             object_key=f"test/gallery/{key}",
         )
         fields.update(kwargs)
@@ -121,6 +122,36 @@ class ProviderGalleryTests(TestCase):
             self.client.get("/api/v1/providers/me/profile/").data["data"]["review_status"],
             "rejected",
         )
+
+    def test_every_photo_must_be_cropped_including_non_cover_photos(self):
+        raw = self.asset("uncropped", provider_photo_cropped=False)
+        for ids in ([raw.pk, self.photo.pk], [self.photo.pk, raw.pk]):
+            response = self.submit(ids)
+            self.assertEqual(response.status_code, 400, response.data)
+            self.assertIn("5:4", str(response.data))
+        self.assertFalse(self.profile.profile_revisions.exists())
+
+    def test_all_cropped_photos_are_published_and_preview_uses_same_assets(self):
+        response = self.submit([self.photo2.pk, self.photo.pk])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(all(item["cropped"] for item in response.data["data"]["media"]))
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.lifestyle_photo_id, self.photo.pk)
+        self.review("approve")
+        self.assertEqual(self.profile.lifestyle_photo_id, self.photo2.pk)
+        self.assertEqual([asset.pk for asset in gallery_assets(self.profile)], [self.photo2.pk, self.photo.pk])
+
+    def test_approval_rechecks_crop_of_each_photo(self):
+        self.assertEqual(self.submit([self.photo.pk, self.photo2.pk]).status_code, 200)
+        self.photo2.provider_photo_cropped = False
+        self.photo2.save(update_fields=("provider_photo_cropped",))
+        revision = self.profile.profile_revisions.get(status="pending")
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(reverse("backoffice-provider-change-review-action", args=("profile", revision.pk)), {"decision": "approve"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.profile.refresh_from_db()
+        self.assertEqual([asset.pk for asset in gallery_assets(self.profile)], [self.photo.pk])
+
 
     def test_initial_combined_approval_publishes_full_gallery(self):
         self.profile.onboarding_status = "incomplete"

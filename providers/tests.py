@@ -774,6 +774,7 @@ class ProviderSelfManagementTests(TestCase):
             category=MediaAsset.Category.PROVIDER_PHOTO,
             status=MediaAsset.Status.UPLOADED,
             object_key=f"public/provider-photos/{self.user.public_id}/profile-review.webp",
+            provider_photo_cropped=True,
         )
         profile = ProviderProfile.objects.create(
             user=self.user,
@@ -899,6 +900,7 @@ class ProviderSelfManagementTests(TestCase):
             category=MediaAsset.Category.PROVIDER_PHOTO,
             status=MediaAsset.Status.UPLOADED,
             object_key=f"public/provider-photos/{self.user.public_id}/legacy-onboarding.webp",
+            provider_photo_cropped=True,
         )
         profile = ProviderProfile.objects.create(
             user=self.user,

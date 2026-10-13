@@ -29,6 +29,7 @@ def gallery_payload(profile_or_revision):
             "type": "video" if asset.category == MediaAsset.Category.PROVIDER_VIDEO else "image",
             "url": build_media_url(asset.object_key),
             "duration_ms": asset.duration_ms,
+            "cropped": asset.provider_photo_cropped,
         }
         for asset in gallery_assets(profile_or_revision)
     ]
@@ -65,6 +66,8 @@ def resolve_gallery(provider, data):
     if sum(asset.category == MediaAsset.Category.PROVIDER_VIDEO for asset in assets) > MAX_VIDEOS:
         raise ValidationError({"media_ids": "最多上传2个视频。"})
     for asset in assets:
+        if asset.category == MediaAsset.Category.PROVIDER_PHOTO and not asset.provider_photo_cropped:
+            raise ValidationError({"media_ids": "请将每张展示照片裁剪为5:4后再提交资料。"})
         if asset.category == MediaAsset.Category.PROVIDER_VIDEO:
             if asset.duration_ms is None:
                 raise ValidationError({"media_ids": "旧视频时长尚未核验，请移除并重新上传不超过10秒的视频。"})
