@@ -2090,6 +2090,8 @@ def build_quote(service: ProviderService, duration_minutes: int, distance_km: De
 
 
 def validate_booking(service: ProviderService, starts_at, duration_minutes: int):
+    from locations.discovery import require_open_city
+    require_open_city(service.provider.service_city_code)
     now = timezone.now()
     if starts_at < now + MINIMUM_ADVANCE:
         raise ValidationError({"starts_at": "至少提前1小时预约。"})

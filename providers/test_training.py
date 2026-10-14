@@ -251,6 +251,46 @@ class FirstOrderTrainingTests(TestCase):
         self.provider.refresh_from_db()
         self.assertTrue(provider_is_online(self.provider))
 
+    def test_passed_provider_can_read_latest_lessons_without_losing_qualification(self):
+        self.publish()
+        self.learn_all()
+        self.submit()
+        self.provider.refresh_from_db()
+        passed_at = self.provider.training_passed_at
+        progress = ProviderTrainingProgress.objects.get(provider=self.provider)
+        completed = progress.completed_lesson_ids.copy()
+        attempts = ProviderTrainingAttempt.objects.count()
+        self.curriculum["title"] = "新版接单规范"
+        self.publish()
+        for _ in range(2):
+            data = self.client.get("/api/v1/providers/me/training/").data["data"]
+            self.assertFalse(data["required"])
+            self.assertTrue(data["passed"])
+            self.assertEqual(data["course"]["version_id"], self.version_id)
+            self.assertEqual(data["course"]["title"], "新版接单规范")
+            self.assertEqual(data["course"]["lessons"], self.curriculum["lessons"])
+        self.provider.refresh_from_db()
+        progress.refresh_from_db()
+        self.assertEqual(self.provider.training_passed_at, passed_at)
+        self.assertEqual(progress.completed_lesson_ids, completed)
+        self.assertEqual(ProviderTrainingAttempt.objects.count(), attempts)
+        self.assertEqual(ProviderTrainingProgress.objects.filter(provider=self.provider).count(), 1)
+
+    def test_exempt_provider_can_read_published_lessons_without_an_exam(self):
+        self.publish()
+        self.provider.training_exempt = True
+        self.provider.save(update_fields=("training_exempt",))
+        for _ in range(2):
+            data = self.client.get("/api/v1/providers/me/training/").data["data"]
+            self.assertFalse(data["required"])
+            self.assertTrue(data["exempt"])
+            self.assertEqual(data["course"]["lessons"], self.curriculum["lessons"])
+        self.provider.refresh_from_db()
+        self.assertTrue(self.provider.training_exempt)
+        self.assertIsNone(self.provider.training_passed_at)
+        self.assertFalse(ProviderTrainingAttempt.objects.exists())
+        self.assertFalse(ProviderTrainingProgress.objects.exists())
+
     def test_migration_exempts_only_previously_accepted_providers(self):
         new_provider = ProviderProfile.objects.create(user=self.other, status="approved")
         self.order(accepted_at=timezone.now(), status="completed")

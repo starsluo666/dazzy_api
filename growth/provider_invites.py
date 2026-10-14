@@ -33,9 +33,9 @@ def require_invite_h5_base():
 
 
 def service_cities():
-    from locations.discovery import discovery_cities
+    from locations.discovery import open_service_cities
 
-    return {row["city_code"]: row["city_name"] for row in discovery_cities()}
+    return open_service_cities()
 
 
 def config_payload(config=None):

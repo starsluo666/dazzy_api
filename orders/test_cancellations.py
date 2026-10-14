@@ -66,6 +66,17 @@ class CancellationTests(APITestCase):
         self.assertEqual(self.order.settlement.status, "cancelled")
         self.assertFalse(self.complete()[1])
 
+    def test_city_closure_does_not_block_existing_paid_order_refund(self):
+        setting = PlatformOperationSetting.current()
+        setting.discovery_cities = []
+        setting.save(update_fields=("discovery_cities",))
+        response = self.confirm()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.order.refund_orders.get().refund_amount, 16800)
+        self.complete()
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "cancelled")
+
     def test_all_mode_boundaries_and_no_stacking(self):
         now = timezone.now()
         for mode in c.MODES:

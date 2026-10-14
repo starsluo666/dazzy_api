@@ -318,7 +318,9 @@ class ActivityCreateSerializer(serializers.Serializer):
         category = attrs.get("category_slug")
         if not tags and not category:
             raise serializers.ValidationError({"tag_slugs": "请至少选择一个活动标签。"})
-        city_code = attrs.get("city_code", "")
+        from locations.discovery import require_open_city
+        city_code, city_name = require_open_city(attrs.get("city_code"), field="city_code")
+        attrs.update(city_code=city_code, city_name=city_name)
         unavailable_tags = [
             tag.name for tag in tags if tag.city_codes and city_code not in tag.city_codes
         ]

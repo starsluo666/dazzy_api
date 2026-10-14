@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from backoffice.models import ProviderOrderingSetting
+from backoffice.models import PlatformOperationSetting, ProviderOrderingSetting
 from mediafiles.models import MediaAsset
 from orders.models import ProviderOrder, ProviderOrderReview, ProviderOrderSettlement
 
@@ -121,6 +121,9 @@ class ProviderModelTests(TestCase):
         self.assertEqual(location.source_longitude, Decimal("116.4039810"))
 
     def test_provider_list_supports_gcj02_distance(self):
+        PlatformOperationSetting.objects.create(discovery_cities=[
+            {"city_code": "110100", "city_name": "北京市"},
+        ])
         user = User.objects.create_user(
             phone="13800000003", password="test-password", nickname="晓晓"
         )
@@ -479,6 +482,10 @@ class ProviderModelTests(TestCase):
 
 class ProviderSelfManagementTests(TestCase):
     def setUp(self):
+        PlatformOperationSetting.objects.create(discovery_cities=[
+            {"city_code": "130400", "city_name": "邯郸市"},
+            {"city_code": "110100", "city_name": "北京市"},
+        ])
         self.user = User.objects.create_user(
             phone="13800000021", password="test-password", nickname="申请人"
         )

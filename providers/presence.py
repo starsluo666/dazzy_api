@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.db.models import Q
 from django.utils import timezone
+from locations.discovery import open_service_cities
 
 from .models import ProviderLiveLocation, ProviderProfile
 
@@ -42,6 +43,7 @@ def online_provider_query(now=None) -> Q:
         identity_status=ProviderProfile.IdentityStatus.VERIFIED,
         lifestyle_photo__isnull=False,
         is_accepting_orders=True,
+        service_city_code__in=open_service_cities(),
         admin_order_restricted=False,
         user__is_active=True,
         user__account_status="active",
@@ -74,6 +76,7 @@ def provider_is_online(provider: ProviderProfile, now=None) -> bool:
         or provider.admin_order_restricted
         or not provider.user.is_active
         or provider.user.account_status != provider.user.AccountStatus.ACTIVE
+        or provider.service_city_code not in open_service_cities()
     ):
         return False
     location = get_provider_live_location(provider)

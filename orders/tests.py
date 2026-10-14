@@ -168,6 +168,44 @@ class ProviderOrderApiTests(TestCase):
         self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
         return ProviderOrder.objects.get(order_no=order_no)
 
+    def test_city_closing_during_route_lookup_blocks_new_order(self):
+        from backoffice.models import PlatformOperationSetting
+
+        def close_city(*_args):
+            PlatformOperationSetting.objects.update_or_create(singleton_key="default", defaults={"discovery_cities": []})
+            return RouteResult(distance_km=Decimal("6.80"), duration_minutes=18)
+
+        with patch("orders.serializers.tencent_map.driving_route", side_effect=close_city):
+            response = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("暂未开放", str(response.json()))
+        self.assertFalse(ProviderOrder.objects.exists())
+
+    def test_city_closing_does_not_block_existing_order_payment_and_fulfillment(self):
+        from backoffice.models import PlatformOperationSetting
+
+        response = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        order_no = response.json()["data"]["order_no"]
+        PlatformOperationSetting.objects.update_or_create(singleton_key="default", defaults={"discovery_cities": []})
+        paid = self.client.post(f"/api/v1/provider-orders/{order_no}/simulate-payment/")
+        self.assertEqual(paid.status_code, 200)
+        self.client.force_login(self.provider_user)
+        accepted = self.client.post(f"/api/v1/providers/me/orders/{order_no}/accept/")
+        self.assertEqual(accepted.status_code, 200, accepted.json())
+        contacted = self.client.post(f"/api/v1/providers/me/orders/{order_no}/contact/")
+        self.assertEqual(contacted.status_code, 200, contacted.json())
+        departed = self.client.post(f"/api/v1/providers/me/orders/{order_no}/depart/", {"contact_confirmed": True}, content_type="application/json")
+        self.assertEqual(departed.status_code, 200, departed.json())
+
+    def test_city_closing_does_not_block_existing_unpaid_order_cancellation(self):
+        from backoffice.models import PlatformOperationSetting
+
+        response = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        order_no = response.json()["data"]["order_no"]
+        PlatformOperationSetting.objects.update_or_create(singleton_key="default", defaults={"discovery_cities": []})
+        cancelled = self.client.post(f"/api/v1/provider-orders/{order_no}/cancel/", {}, content_type="application/json")
+        self.assertEqual(cancelled.status_code, 200, cancelled.json())
+
     def test_legacy_external_payment_does_not_charge_new_wallet_balance(self):
         from wallets.models import UserWallet, WalletPaymentAllocation
         from .services import apply_provider_order_payment_success

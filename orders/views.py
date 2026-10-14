@@ -143,6 +143,9 @@ class ProviderOrderListCreateView(APIView):
                 .select_related("user")
                 .get(pk=service.provider_id)
             )
+            # Configuration may change during the route lookup above.
+            from locations.discovery import require_open_city
+            require_open_city(provider.service_city_code)
             ensure_booking_within_schedule(
                 provider, data["starts_at"], data["ends_at"]
             )

@@ -81,6 +81,7 @@ def _scoped_users(access):
 
 @transaction.atomic
 def review_activity(*, activity_id, decision, reason, actor, access, request):
+    from locations.discovery import require_open_city
     queryset = (
         Activity.objects.select_for_update()
         .select_related("organizer")
@@ -104,6 +105,7 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
     now = timezone.now()
     if decision == "approve":
         tags = list(activity.tags.all()) or ([activity.category] if activity.category_id else [])
+        activity.city_code, activity.city_name = require_open_city(activity.city_code, field="city_code")
         if not tags:
             raise ValidationError({"decision": "活动未配置标签，不能通过审核。"})
         inactive_tags = [tag.name for tag in tags if not tag.is_active]
@@ -133,7 +135,7 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
     activity.save(
         update_fields=(
             "status", "reviewed_by", "reviewed_at", "rejection_reason",
-            "published_at", "updated_at",
+            "published_at", "updated_at", "city_code", "city_name",
         )
     )
     if decision == "approve":
@@ -534,6 +536,7 @@ def review_activity_report(*, case_no, action, result_note, actor, access, reque
 def review_provider_application(
     *, profile_id, decision, reason, allowed_category_ids, actor, access, request
 ):
+    from locations.discovery import require_open_city
     queryset = ProviderProfile.objects.select_for_update().select_related("user")
     if not access.all_data:
         queryset = queryset.filter(service_city_code__in=access.city_codes)
@@ -543,6 +546,7 @@ def review_provider_application(
     before = {"status": profile.status, "rejection_reason": profile.rejection_reason}
     categories = []
     if decision == "approve":
+        profile.service_city_code, profile.service_city_name = require_open_city(profile.service_city_code)
         categories = list(
             ServiceCategory.objects.filter(
                 id__in=set(allowed_category_ids), is_active=True
@@ -583,6 +587,8 @@ def review_provider_application(
             "reviewed_at",
             "rejection_reason",
             "is_accepting_orders",
+            "service_city_code",
+            "service_city_name",
             "updated_at",
         )
     )
@@ -710,6 +716,8 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
             raise ValidationError({"decision": "实名认证姓名与入驻申请姓名不一致。"})
         from providers.identity_verification import require_verified_check
         require_verified_check(profile)
+        from locations.discovery import require_open_city
+        profile_revision.service_city_code, profile_revision.service_city_name = require_open_city(profile_revision.service_city_code)
         profile.display_name = profile_revision.display_name
         profile.bio = profile_revision.bio
         profile.lifestyle_photo = profile_revision.lifestyle_photo
@@ -753,7 +761,10 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
     profile_revision.reviewed_at = now
     profile_revision.reviewed_by = actor
     profile_revision.save(
-        update_fields=("status", "rejection_reason", "reviewed_at", "reviewed_by", "updated_at")
+        update_fields=(
+            "status", "rejection_reason", "reviewed_at", "reviewed_by", "updated_at",
+            "service_city_code", "service_city_name",
+        )
     )
     profile.onboarding_reviewed_at = now
     profile.onboarding_reviewed_by = actor
@@ -799,6 +810,8 @@ def review_provider_profile_revision(*, revision_id, decision, reason, actor, ac
     now = timezone.now()
     if decision == "approve":
         profile = revision.provider
+        from locations.discovery import require_open_city
+        revision.service_city_code, revision.service_city_name = require_open_city(revision.service_city_code)
         for field in (
             "display_name", "bio", "lifestyle_photo", "service_city_code",
             "service_city_name", "max_service_radius_km",

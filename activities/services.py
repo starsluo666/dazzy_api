@@ -10,6 +10,7 @@ from accounts.account_closure import lock_active_user_for_business
 from backoffice.operation_settings import platform_operation_rules
 from config.geospatial import gcj02_to_wgs84
 from config.payment_capabilities import ensure_activity_payment_available
+from locations.discovery import require_open_city
 from notifications.models import UserNotification
 from notifications.services import (
     create_activity_notification,
@@ -36,6 +37,9 @@ from .serializers import STANDARD_REFUND_SNAPSHOT
 @transaction.atomic
 def create_activity_draft(*, organizer, validated_data) -> Activity:
     ensure_activity_payment_available("activity_publish")
+    validated_data = dict(validated_data)
+    code, name = require_open_city(validated_data.get("city_code"), field="city_code")
+    validated_data.update(city_code=code, city_name=name)
     organizer = lock_active_user_for_business(organizer)
     tags = validated_data.pop("tag_slugs", [])
     category = validated_data.pop("category_slug", None)
@@ -387,6 +391,8 @@ def get_or_create_publish_order(*, activity_id: int, user):
     ).first()
     if existing and existing.expires_at > now:
         return existing
+    # Existing payment recovery/confirmation stays available after a city closes.
+    require_open_city(activity.city_code, field="city_code")
     if existing:
         existing.status = ActivityPublishOrder.Status.CANCELLED
         existing.closed_at = now
@@ -674,6 +680,7 @@ def get_or_create_participation_order(*, activity_id: int, user, channel: str):
             register_activity_participation_payment_expiry(order)
             return participation, order, False
 
+    require_open_city(activity.city_code, field="city_code")
     if _occupied_count(activity, now=now) >= activity.capacity:
         raise ValidationError("活动名额已满。")
 

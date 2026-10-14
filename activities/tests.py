@@ -62,6 +62,10 @@ from .huifu import (
 
 class ActivityModelTests(TestCase):
     def setUp(self):
+        PlatformOperationSetting.objects.create(discovery_cities=[
+            {"city_code": "130400", "city_name": "邯郸市"},
+            {"city_code": "110100", "city_name": "北京市"},
+        ])
         self.organizer = User.objects.create_user(phone="13800000002", password="test-password")
         self.category = ActivityCategory.objects.create(name="台球", slug="billiards")
         self.cover = MediaAsset.objects.create(
@@ -83,6 +87,8 @@ class ActivityModelTests(TestCase):
             "formation_deadline": starts_at - timedelta(hours=12),
             "meeting_place_name": "测试台球俱乐部",
             "meeting_address": "北京市测试地址",
+            "city_code": "110100",
+            "city_name": "北京市",
             "source_longitude": Decimal("116.4039810"),
             "source_latitude": Decimal("39.9150010"),
             "meeting_point": Point(116.397755, 39.913873, srid=4326),
@@ -877,9 +883,9 @@ class ActivityModelTests(TestCase):
         self.assertNotIn("meeting_address", item)
 
     def test_activity_publish_rules_are_public_and_use_current_operation_settings(self):
-        PlatformOperationSetting.objects.create(
-            activity_minimum_advance_hours=24,
-            activity_maximum_advance_days=45,
+        PlatformOperationSetting.objects.update_or_create(
+            singleton_key="default",
+            defaults={"activity_minimum_advance_hours": 24, "activity_maximum_advance_days": 45},
         )
 
         response = self.client.get("/api/v1/activity-publish-rules/")
@@ -1178,7 +1184,7 @@ class ActivityModelTests(TestCase):
 
     @override_settings(DEBUG=True)
     def test_participation_uses_configured_payment_timeout(self):
-        PlatformOperationSetting.objects.create(activity_payment_timeout_minutes=10)
+        PlatformOperationSetting.objects.update_or_create(singleton_key="default", defaults={"activity_payment_timeout_minutes": 10})
         activity = self.build_activity(status=Activity.Status.RECRUITING)
         activity.save()
         participant = User.objects.create_user(
@@ -1481,9 +1487,9 @@ class ActivityModelTests(TestCase):
         )
 
     def test_activity_lifecycle_creates_and_advances_settlement_idempotently(self):
-        PlatformOperationSetting.objects.create(
-            activity_settlement_confirmation_hours=48,
-            activity_settlement_risk_freeze_days=3,
+        PlatformOperationSetting.objects.update_or_create(
+            singleton_key="default",
+            defaults={"activity_settlement_confirmation_hours": 48, "activity_settlement_risk_freeze_days": 3},
         )
         now = timezone.now()
         activity = self.build_activity(
@@ -1636,6 +1642,8 @@ class ActivityModelTests(TestCase):
             "formation_deadline": (starts_at - timedelta(hours=12)).isoformat(),
             "meeting_place_name": "美乐城桌游空间",
             "meeting_address": "邯郸市丛台区人民路",
+            "city_code": "130400",
+            "city_name": "邯郸市",
             "longitude": "114.5389610",
             "latitude": "36.6256570",
             "capacity": 8,

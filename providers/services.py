@@ -9,6 +9,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from config.geospatial import gcj02_to_wgs84
+from locations.discovery import open_service_cities, require_open_city
 from .media import resolve_gallery, save_revision_gallery
 
 from .models import (
@@ -33,6 +34,12 @@ def save_provider_application(*, user, data) -> ProviderProfile:
     profile, _ = ProviderProfile.objects.select_for_update().get_or_create(user=user)
     if profile.status in (ProviderProfile.Status.PENDING, ProviderProfile.Status.APPROVED):
         raise ValidationError("当前状态不可修改申请资料。")
+    data = dict(data)
+    if "service_city_code" in data or "service_city_name" in data:
+        code = data.get("service_city_code", profile.service_city_code).strip()
+        # Partial drafts may clear their city; names never override the configured name.
+        code, name = require_open_city(code) if code else ("", "")
+        data.update(service_city_code=code, service_city_name=name)
     for field, value in data.items():
         setattr(profile, field, value)
     if profile.status == ProviderProfile.Status.REJECTED:
@@ -76,6 +83,7 @@ def submit_provider_application(*, user) -> ProviderProfile:
         missing.append("服务城市")
     if missing:
         raise ValidationError({"detail": f"请先完善：{'、'.join(missing)}。"})
+    profile.service_city_code, profile.service_city_name = require_open_city(profile.service_city_code)
     now = timezone.now()
     profile.status = ProviderProfile.Status.PENDING
     profile.agreement_accepted_at = now
@@ -84,6 +92,8 @@ def submit_provider_application(*, user) -> ProviderProfile:
     profile.save(
         update_fields=(
             "status",
+            "service_city_code",
+            "service_city_name",
             "agreement_accepted_at",
             "submitted_at",
             "rejection_reason",
@@ -157,6 +167,7 @@ def submit_provider_profile_revision(*, provider: ProviderProfile, data: dict) -
         missing.append("服务城市")
     if missing:
         raise ValidationError({"detail": f"请先完善：{'、'.join(missing)}。"})
+    service_city_code, service_city_name = require_open_city(service_city_code)
     revision = ProviderProfileRevision.objects.create(
         provider=locked,
         display_name=display_name,
@@ -243,6 +254,8 @@ def provider_profile_blockers(profile: ProviderProfile) -> list[str]:
         blockers.append("请先完成实名认证")
     if not profile.is_profile_complete:
         blockers.append("请先完善达人资料")
+    if profile.service_city_code and profile.service_city_code not in open_service_cities():
+        blockers.append("服务城市暂未开放，请修改服务城市后重新提交资料")
     if not ProviderService.objects.filter(
         provider=profile,
         is_active=True,
