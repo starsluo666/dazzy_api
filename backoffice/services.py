@@ -1422,6 +1422,8 @@ def review_provider_order_after_sales_case(
     case = get_object_or_404(queryset, case_no=case_no)
     order = ProviderOrder.objects.select_for_update().get(pk=case.order_id)
     case = ProviderOrderAfterSalesCase.objects.select_for_update().get(pk=case.pk)
+    if case.case_type == ProviderOrderAfterSalesCase.CaseType.FULFILLMENT and action == "approve":
+        raise ValidationError("履约异常售后须先核实责任并预览退款，不能直接核准总金额。")
     if case.case_type == ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION and action == "approve":
         raise ValidationError("提前终止申请须核定实际结束时间、责任和各项退款明细。")
     if action == "escalate":

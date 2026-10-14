@@ -145,6 +145,9 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
         if order.status == ProviderOrder.Status.TERMINATED:
             block("termination_reconciliation", "提前终止剩余款待核账，暂不自动分账")
             waiting = True
+        if order.after_sales_cases.filter(case_type="fulfillment_dispute", status__in=("approved", "refunded", "resolved")).exists():
+            block("fulfillment_reconciliation", "履约售后剩余款待核账，暂不自动分账")
+            waiting = True
         if order.fulfillment_review_required:
             block("fulfillment_review", "履约时间异常，等待客服审核")
             waiting = True

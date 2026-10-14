@@ -1387,32 +1387,9 @@ def create_provider_order_refund(
     if settlement and settlement.status == ProviderOrderSettlement.Status.SETTLED:
         raise ValidationError("订单资金已经结算，不能直接退款，请转异常交易处理。")
     allocation = _refund_allocation(order, amount, components_override=components_override)
-    from wallets.models import WalletPaymentAllocation
-
-    payment_allocation = WalletPaymentAllocation.objects.select_for_update().filter(
-        business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
-        business_order_no=order.order_no,
-    ).first()
-    if payment_allocation and payment_allocation.wallet_released:
-        reserved_external = order.refund_orders.aggregate(total=Sum("external_refund_amount"))["total"] or 0
-        if reserved_external + amount > payment_allocation.external_amount:
-            raise ValidationError("退款金额超过已收取的外部支付金额。")
-    if payment_allocation and not payment_allocation.wallet_released:
-        reserved_total = order.refund_orders.aggregate(total=Sum("refund_amount"))["total"] or 0
-        reserved_wallet = order.refund_orders.aggregate(total=Sum("wallet_refund_amount"))["total"] or 0
-        cumulative_refund = reserved_total + amount
-        if cumulative_refund >= payment_allocation.payable_amount:
-            target_wallet_refund = payment_allocation.wallet_amount
-        else:
-            target_wallet_refund = (
-                cumulative_refund
-                * payment_allocation.wallet_amount
-                // payment_allocation.payable_amount
-            )
-        wallet_refund_amount = max(target_wallet_refund - reserved_wallet, 0)
-    else:
-        wallet_refund_amount = 0
-    external_refund_amount = amount - wallet_refund_amount
+    routes = provider_refund_payment_routes(order, amount)
+    wallet_refund_amount = routes["wallet"]
+    external_refund_amount = routes["external"]
     try:
         with transaction.atomic():
             refund = ProviderOrderRefundOrder.objects.create(
@@ -1458,6 +1435,30 @@ def create_provider_order_refund(
     register_provider_order_refund(refund)
     sync_provider_settlement_plan(order_no=order.order_no)
     return refund, True
+
+
+def provider_refund_payment_routes(order, amount):
+    """Read-only allocation shared by preview and creation; caller holds order lock."""
+    from wallets.models import WalletPaymentAllocation
+
+    allocation = WalletPaymentAllocation.objects.select_for_update().filter(
+        business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
+        business_order_no=order.order_no,
+    ).first()
+    if allocation and allocation.wallet_released:
+        reserved_external = order.refund_orders.aggregate(total=Sum("external_refund_amount"))["total"] or 0
+        if reserved_external + amount > allocation.external_amount:
+            raise ValidationError("退款金额超过已收取的外部支付金额。")
+    wallet = 0
+    if allocation and not allocation.wallet_released:
+        reserved_total = order.refund_orders.aggregate(total=Sum("refund_amount"))["total"] or 0
+        reserved_wallet = order.refund_orders.aggregate(total=Sum("wallet_refund_amount"))["total"] or 0
+        cumulative = reserved_total + amount
+        target = allocation.wallet_amount if cumulative >= allocation.payable_amount else (
+            cumulative * allocation.wallet_amount // allocation.payable_amount
+        )
+        wallet = max(target - reserved_wallet, 0)
+    return {"wallet": wallet, "external": amount - wallet}
 
 
 def _settlement_amounts(order: ProviderOrder, commission_rate: Decimal) -> dict:
@@ -1746,6 +1747,8 @@ def _complete_provider_order_refund(
         if case:
             case.status = ProviderOrderAfterSalesCase.Status.REFUNDED
             case.save(update_fields=("status", "updated_at"))
+        fulfillment_decision = (case.fulfillment_snapshot.get("decision")
+                                if case and case.case_type == ProviderOrderAfterSalesCase.CaseType.FULFILLMENT else None)
         terminated = order.status == ProviderOrder.Status.TERMINATED or bool(
             case and case.case_type == ProviderOrderAfterSalesCase.CaseType.EARLY_TERMINATION
             and case.termination_snapshot.get("decision")
@@ -1763,9 +1766,14 @@ def _complete_provider_order_refund(
             order.status = case.original_order_status
         if order.cancellation_record:
             order.status = ProviderOrder.Status.TERMINATED if order.service_started_at else ProviderOrder.Status.CANCELLED
+        if fulfillment_decision:
+            order.status = fulfillment_decision["terminal_status"]
         order.save(update_fields=("status", "updated_at"))
 
-        if order.cancellation_record:
+        if fulfillment_decision:
+            from .fulfillment_after_sales import reconcile
+            reconcile(order, case)
+        elif order.cancellation_record:
             from .cancellations import reconcile
             reconcile(order)
         elif terminated:
@@ -1774,7 +1782,7 @@ def _complete_provider_order_refund(
         settlement = ProviderOrderSettlement.objects.select_for_update().filter(
             order=order
         ).first()
-        if settlement and not terminated and not order.cancellation_record:
+        if settlement and not terminated and not order.cancellation_record and not fulfillment_decision:
             amounts = _settlement_amounts(order, settlement.platform_commission_rate)
             _apply_settlement_amounts(settlement, amounts)
             if settlement.refunded_amount >= settlement.paid_amount:

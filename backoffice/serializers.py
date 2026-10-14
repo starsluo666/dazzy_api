@@ -1378,7 +1378,7 @@ class ProviderOrderFinanceQuerySerializer(serializers.Serializer):
 
 class ProviderOrderAfterSalesCaseCreateSerializer(serializers.Serializer):
     order_no = serializers.CharField(max_length=32)
-    case_type = serializers.ChoiceField(choices=[choice for choice in ProviderOrderAfterSalesCase.CaseType.choices if choice[0] != "early_termination"])
+    case_type = serializers.ChoiceField(choices=[choice for choice in ProviderOrderAfterSalesCase.CaseType.choices if choice[0] not in ("early_termination", "fulfillment_dispute")])
     requested_amount = serializers.IntegerField(min_value=0)
     reason = serializers.CharField(min_length=5, max_length=1000, trim_whitespace=True)
 
@@ -1409,6 +1409,12 @@ class ProviderOrderAfterSalesCaseActionSerializer(serializers.Serializer):
 
 
 class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
+    fulfillment = serializers.SerializerMethodField()
+
+    def get_fulfillment(self, obj):
+        from orders.fulfillment_after_sales import case_payload
+        return case_payload(obj, internal=True)
+
     termination = serializers.SerializerMethodField()
 
     def get_termination(self, obj):
@@ -1447,7 +1453,7 @@ class ProviderOrderAfterSalesCaseSerializer(serializers.ModelSerializer):
             "service_city_code", "service_city_name", "requested_amount",
             "approved_amount", "reason", "evidence_urls", "result_note", "creator_name",
             "organization_name", "reviewed_by_name", "reviewed_at", "created_at",
-            "updated_at", "refund_order", "termination",
+            "updated_at", "refund_order", "termination", "fulfillment",
         )
 
     def get_refund_order(self, obj):

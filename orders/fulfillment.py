@@ -84,6 +84,8 @@ def resolve_fulfillment_review(order, *, revision, reason, actor, now=None):
     from taskcenter.services import reopen_provider_order_confirmation_timeout, reopen_provider_order_settlement
     from .settlement_plans import sync_provider_settlement_plan
     now = now or timezone.now()
+    if order.after_sales_cases.filter(case_type="fulfillment_dispute", status__in=("pending", "processing", "approved")).exists():
+        raise ValidationError("本单已转履约异常售后，请先处理原售后单，不能直接恢复正常。")
     if order.departure_timed_out_at or order.status in (ProviderOrder.Status.CANCELLED, ProviderOrder.Status.REFUNDED, ProviderOrder.Status.TERMINATED):
         raise ValidationError("订单已取消或退款，不能恢复履约；扣分异议请通过申诉撤销处理。")
     if order.refund_orders.exists():

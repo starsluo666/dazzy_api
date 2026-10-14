@@ -1,4 +1,8 @@
 from django.urls import path
+from .fulfillment_after_sales_views import (
+    OrderFulfillmentAfterSalesView, FulfillmentCaseContextView,
+    FulfillmentCasePreviewView, FulfillmentCaseResolveView,
+)
 from .provider_invite_views import (
     AdminProviderInviteConfigView, AdminProviderInviteSourcesView, AdminProviderInviteSourceView,
     AdminProviderInviteRewardsView, AdminProviderInviteRewardActionView,
@@ -283,6 +287,10 @@ urlpatterns = [
         name="backoffice-provider-order-evidence",
     ),
     path("provider-orders/<str:order_no>/fulfillment-review/", ProviderOrderFulfillmentReviewView.as_view(), name="backoffice-provider-order-fulfillment-review"),
+    path("provider-orders/<str:order_no>/fulfillment-after-sales/", OrderFulfillmentAfterSalesView.as_view(), name="admin-fulfillment-after-sales"),
+    path("order-after-sales/<str:case_no>/fulfillment-context/", FulfillmentCaseContextView.as_view(), name="admin-fulfillment-case-context"),
+    path("order-after-sales/<str:case_no>/fulfillment-preview/", FulfillmentCasePreviewView.as_view(), name="admin-fulfillment-case-preview"),
+    path("order-after-sales/<str:case_no>/fulfillment-resolve/", FulfillmentCaseResolveView.as_view(), name="admin-fulfillment-case-resolve"),
     path("provider-orders/<str:order_no>/timeout-appeal/", ProviderOrderTimeoutAppealView.as_view(), name="backoffice-provider-order-timeout-appeal"),
     path(
         "provider-orders/<str:order_no>/review/action/",

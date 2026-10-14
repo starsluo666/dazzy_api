@@ -273,6 +273,12 @@ class ProviderOrderTerminationInputSerializer(ProviderOrderAfterSalesInputSerial
 
 
 class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
+    fulfillment = serializers.SerializerMethodField()
+
+    def get_fulfillment(self, obj):
+        from .fulfillment_after_sales import case_payload
+        return case_payload(obj)
+
     termination = serializers.SerializerMethodField()
 
     def get_termination(self, obj):
@@ -289,7 +295,7 @@ class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
         fields = (
             "case_no", "case_type", "case_type_label", "status", "status_label",
             "requested_amount", "approved_amount", "reason", "evidence_urls",
-            "result_note", "reviewed_at", "refund_order", "created_at", "updated_at", "termination",
+            "result_note", "reviewed_at", "refund_order", "created_at", "updated_at", "termination", "fulfillment",
         )
 
     def get_evidence_urls(self, obj):

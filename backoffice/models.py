@@ -272,6 +272,7 @@ class ProviderOrderAfterSalesCase(models.Model):
     class CaseType(models.TextChoices):
         REFUND = "refund", "退款申请"
         EARLY_TERMINATION = "early_termination", "提前终止服务"
+        FULFILLMENT = "fulfillment_dispute", "履约异常售后"
         SERVICE_DISPUTE = "service_dispute", "服务争议"
         PROVIDER_CANCEL = "provider_cancel", "达人取消"
         OTHER = "other", "其他售后"
@@ -316,6 +317,7 @@ class ProviderOrderAfterSalesCase(models.Model):
     reason = models.CharField("申请原因", max_length=1000)
     evidence_object_keys = models.JSONField("凭证对象键", default=list, blank=True)
     termination_snapshot = models.JSONField("提前终止申请及裁定快照", default=dict, blank=True)
+    fulfillment_snapshot = models.JSONField("履约异常售后核查及裁定快照", default=dict, blank=True)
     result_note = models.CharField("审核结论", max_length=1000, blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
