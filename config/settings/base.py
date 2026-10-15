@@ -238,10 +238,10 @@ HUIFU_NOTIFY_URL = os.getenv("HUIFU_NOTIFY_URL", "")
 HUIFU_FEE_FLAG = os.getenv("HUIFU_FEE_FLAG", "1")
 HUIFU_CONNECT_TIMEOUT_SECONDS = int(os.getenv("HUIFU_CONNECT_TIMEOUT_SECONDS", "15"))
 
-# Controlled provider-order pilot. Neither switch enables a scheduled payout job.
+# Verified-provider eligibility (no ID allowlist). Execution switches stay independent.
 HUIFU_PROVIDER_DELAYED_PAYMENT_ENABLED = os.getenv("HUIFU_PROVIDER_DELAYED_PAYMENT_ENABLED", "false").lower() in {"1", "true", "yes"}
 HUIFU_PROVIDER_DISTRIBUTION_ENABLED = os.getenv("HUIFU_PROVIDER_DISTRIBUTION_ENABLED", "false").lower() in {"1", "true", "yes"}
-HUIFU_PROVIDER_DISTRIBUTION_IDS = tuple(value.strip() for value in os.getenv("HUIFU_PROVIDER_DISTRIBUTION_IDS", "").split(",") if value.strip())
+# Retired: HUIFU_PROVIDER_DISTRIBUTION_IDS no longer limits payment, split or withdrawal.
 # Explicit channel-side confirmation, NOT a request parameter or a fee-rate default.
 HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED = os.getenv("HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED", "false").lower() in {"1", "true", "yes"}
 HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS = int(os.getenv("HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS", "0"))

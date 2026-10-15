@@ -12,7 +12,7 @@ from orders.distribution_preflight import preflight_summary
 
 
 class Command(BaseCommand):
-    help = "受控达人分账：inspect 只读本地；query 只查原流水；execute 需开关、白名单和显式确认。"
+    help = "受控达人分账：inspect 只读本地；query 只查原流水；execute 需开关、限额、账户核验和显式确认。"
 
     def add_arguments(self, parser):
         parser.add_argument("action", choices=("inspect", "execute", "query"))

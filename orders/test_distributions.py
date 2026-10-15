@@ -1,4 +1,4 @@
-"""Offline pilot tests. Never call a real payment or use a business database."""
+"""Offline distribution tests. Never call a real payment or use a business database."""
 
 import copy
 from datetime import timedelta
@@ -338,9 +338,6 @@ class DistributionStateTests(TransactionTestCase):
         self.settlement.status = "settled"
         self.settlement.save()
         self.config = HuifuPaymentConfig.from_settings()
-        allowlist = override_settings(HUIFU_PROVIDER_DISTRIBUTION_IDS=(str(self.provider.pk),))
-        allowlist.enable()
-        self.addCleanup(allowlist.disable)
         self.account = ProviderReceivingAccount.objects.create(
             provider=self.provider,
             details_ciphertext="unused",
@@ -417,6 +414,74 @@ class DistributionStateTests(TransactionTestCase):
         self.assertFalse(created)
         self.assertEqual(repeated.pk, record.pk)
         http.assert_not_called()
+
+    def test_new_payment_ignores_empty_or_unrelated_retired_allowlist(self):
+        for old_ids in ((), ("999999999",)):
+            with (
+                self.subTest(old_ids=old_ids),
+                override_settings(HUIFU_PROVIDER_DISTRIBUTION_IDS=old_ids),
+                patch("requests.sessions.Session.post") as http,
+            ):
+                cohort = payment_cohort(
+                    self.order, self.allocation, self.config, now=self.now
+                )
+            self.assertEqual(cohort, self.payment.distribution_cohort)
+            self.assertEqual(cohort["provider_id"], self.provider.pk)
+            http.assert_not_called()
+
+    @override_settings(HUIFU_PROVIDER_DISTRIBUTION_IDS=("999999999",))
+    def test_formal_distribution_ignores_retired_allowlist(self):
+        record, created, http = self.run_execute()
+        self.assertTrue(created)
+        self.assertEqual(record.snapshot["receiver_id"], self.account.user_huifu_id)
+        self.assertEqual(http.call_count, 2)
+
+    def test_formal_payment_and_split_still_require_verified_provider_and_account(self):
+        for model, field, value in (
+            (self.provider, "status", "pending"),
+            (self.provider, "identity_status", "unverified"),
+            (self.account, "channel_status", "attention"),
+            (self.account, "card_status", "F"),
+            (self.account, "cash_status", "F"),
+            (self.account, "automatic_settlement_disabled", False),
+            (self.account, "automatic_settlement_disabled", None),
+            (self.account, "onboarding_consented_at", None),
+            (self.account, "onboarding_consent_version", "old"),
+            (self.account, "channel_checked_at", self.now - timedelta(hours=1)),
+            (self.account, "verified_cash_config", {}),
+        ):
+            original = getattr(model, field)
+            try:
+                setattr(model, field, value)
+                model.save(update_fields=[field])
+                with self.subTest(field=field, value=value), patch(
+                    "requests.sessions.Session.post"
+                ) as http:
+                    # Invalid receivers cannot silently select ordinary payment.
+                    with self.assertRaises(ValidationError):
+                        payment_cohort(self.order, self.allocation, self.config, now=self.now)
+                    with self.assertRaises(ValidationError):
+                        execute_distribution(self.order.order_no)
+                    http.assert_not_called()
+                    self.assertFalse(ProviderOrderDistribution.objects.exists())
+            finally:
+                setattr(model, field, original)
+                model.save(update_fields=[field])
+
+    def test_formal_payment_still_requires_fee_policy_and_positive_sufficient_limit(self):
+        for changes in (
+            {"HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED": False},
+            {"HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS": 0},
+            {"HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS": 9999},
+        ):
+            with (
+                self.subTest(changes=changes),
+                override_settings(**changes),
+                patch("requests.sessions.Session.post") as http,
+                self.assertRaises(ValidationError),
+            ):
+                payment_cohort(self.order, self.allocation, self.config, now=self.now)
+            http.assert_not_called()
 
     def test_fulfillment_hold_blocks_dispatch_before_any_channel_call(self):
         self.order.fulfillment_review_required = True
@@ -611,7 +676,6 @@ class DistributionStateTests(TransactionTestCase):
     def test_closed_scope_flags_and_limits_never_call_network(self):
         for changes in (
             {"HUIFU_PROVIDER_DISTRIBUTION_ENABLED": False},
-            {"HUIFU_PROVIDER_DISTRIBUTION_IDS": ()},
             {"HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED": False},
             {"HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS": 0},
             {"HUIFU_MERCHANT_ID": "wrong"},

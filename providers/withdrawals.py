@@ -27,11 +27,9 @@ from .receiving_onboarding import refresh_onboarding
 from .withdrawal_gateway import HuifuWithdrawalGateway
 
 
-def _enabled(provider, amount, config):
+def _enabled(amount, config):
     if not settings.HUIFU_PROVIDER_WITHDRAWAL_ENABLED:
         raise ValidationError("余额提现暂未开放，收入余额会保留，请等待平台开通。")
-    if str(provider.pk) not in settings.HUIFU_PROVIDER_DISTRIBUTION_IDS:
-        raise ValidationError("当前账户暂未开放提现。")
     if not settings.HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED:
         raise ValidationError("平台承担提现手续费的渠道规则尚未确认。")
     if type(amount) is not int or not 0 < amount <= settings.HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS:
@@ -81,7 +79,7 @@ def create_withdrawal(provider, *, amount, request_key):
     if existing:
         return _replay(existing, amount)
     config = HuifuPaymentConfig.from_settings()
-    _enabled(provider, amount, config)
+    _enabled(amount, config)
     # Read-only local preflight before channel queries; no debt/negative balance.
     wallet = ProviderIncomeWallet.objects.filter(provider=provider).first()
     if not wallet or wallet.available_amount < amount:
@@ -108,7 +106,7 @@ def create_withdrawal(provider, *, amount, request_key):
         existing = wallet.withdrawals.filter(request_key=request_key).first()
         if existing:
             return _replay(existing, amount)
-        _enabled(provider, amount, config)
+        _enabled(amount, config)
         current = manual_cash_account(provider.pk, config, lock=True)
         if _fingerprint(current) != fingerprint:
             raise ValidationError("收款配置已变化，请重新核验后提现。")
@@ -242,7 +240,7 @@ def income_wallet_data(provider):
     config = HuifuPaymentConfig.from_settings()
     try:
         _enabled(
-            provider, max(1, min(available, settings.HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS)), config
+            max(1, min(available, settings.HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS)), config
         )
         # Let an otherwise eligible user START preflight after cache expiry.
         # create_withdrawal still requires a new signed account query and balance.

@@ -2,6 +2,8 @@
 
 > 本文记录第一阶段本地准备层。第二阶段新增默认关闭、仅测试白名单且命令行显式确认的延时分账试点，见 [受控分账接入](provider-distribution-pilot.md)。准备层本身仍不出款，后台 `execution_enabled=false` 仍表示后台没有执行按钮/API；真实渠道状态单独返回 `distribution`。
 
+> 2026-10-15 更新：执行层已取消达人 ID 白名单，采用[正式资格模式](provider-distribution-production.md)；本地准备单、历史核账及资金安全边界不变。
+
 ## 当前边界
 
 在现有 Django/Python 聚合支付系统上增量增加本地分账准备记录。保留订单号、支付入口、订单佣金快照、退款分配规则、账务结算状态与冻结期。

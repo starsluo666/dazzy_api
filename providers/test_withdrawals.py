@@ -364,6 +364,46 @@ class WithdrawalStateTests(TransactionTestCase):
             self.assertTrue(self.wallet.hold_reason)
         self.assert_balances(7000, 0, 0)
 
+    @override_settings(HUIFU_PROVIDER_DISTRIBUTION_IDS=("999999999",))
+    def test_formal_income_page_and_cash_do_not_require_retired_allowlist(self):
+        with patch("requests.sessions.Session.post") as http:
+            self.assertTrue(income_wallet_data(self.provider)["can_withdraw"])
+            http.assert_not_called()
+        record, created, http = self.submit()
+        self.assertTrue(created)
+        self.assertEqual(record.status, "processing")
+        self.assertEqual(http.call_count, 3)
+        self.assert_balances(5000, 2000, 0)
+        with patch("requests.sessions.Session.post", return_value=signed_http_response(
+            cash_query_response(record)
+        )):
+            self.assertEqual(query_withdrawal(record).status, "succeeded")
+        self.assert_balances(5000, 0, 2000)
+
+    def test_formal_cash_still_requires_provider_approval_and_identity(self):
+        for field, value in (("status", "pending"), ("identity_status", "unverified")):
+            original = getattr(self.provider, field)
+            try:
+                setattr(self.provider, field, value)
+                self.provider.save(update_fields=[field])
+                with self.subTest(field=field):
+                    self.assertFalse(income_wallet_data(self.provider)["can_withdraw"])
+                    with (
+                        patch("requests.sessions.Session.post",
+                              return_value=signed_http_response(self.query_account())) as http,
+                        self.assertRaises(ValidationError),
+                    ):
+                        create_withdrawal(self.provider, amount=2000, request_key=uuid.uuid4())
+                    # At most an account query; never reserve, query balance or submit cash.
+                    self.assertTrue(all(
+                        call.args[0].endswith("basicdata/query") for call in http.call_args_list
+                    ))
+                    self.assertFalse(ProviderWithdrawal.objects.exists())
+                    self.assert_balances(7000, 0, 0)
+            finally:
+                setattr(self.provider, field, original)
+                self.provider.save(update_fields=[field])
+
     def test_distribution_query_timeout_after_success_does_not_hold_wallet(self):
         with patch("requests.sessions.Session.post", side_effect=TimeoutError("offline")):
             result = query_distribution(self.order.order_no)
@@ -731,10 +771,9 @@ class WithdrawalStateTests(TransactionTestCase):
         with self.assertRaises(ValidationError):
             create_withdrawal(self.provider, amount=1, request_key=uuid.uuid4())
 
-    def test_switch_allowlist_limit_and_channel_change_fail_closed(self):
+    def test_switch_limit_and_channel_change_fail_closed(self):
         for changes in (
             {"HUIFU_PROVIDER_WITHDRAWAL_ENABLED": False},
-            {"HUIFU_PROVIDER_DISTRIBUTION_IDS": ()},
             {"HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS": 1},
             {"HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED": False},
         ):
@@ -918,6 +957,7 @@ class IncomeJobTests(TransactionTestCase):
             distribution.confirm_receipt(record, query=url.endswith("confirmquery"))
         )
 
+    @override_settings(HUIFU_PROVIDER_DISTRIBUTION_IDS=("999999999",))
     def test_eligible_order_credits_income_once_and_never_automatically_withdraws(self):
         from .tasks import process_income_transfers
 
@@ -933,6 +973,24 @@ class IncomeJobTests(TransactionTestCase):
         self.assertEqual(wallet.entries.filter(kind="credit").count(), 1)
         self.assertFalse(ProviderWithdrawal.objects.exists())
 
+    def test_formal_jobs_still_honor_execution_switches(self):
+        from .tasks import process_income_transfers
+
+        for changes in (
+            {"HUIFU_PROVIDER_INCOME_JOBS_ENABLED": False},
+            {"HUIFU_PROVIDER_DISTRIBUTION_ENABLED": False},
+        ):
+            with (
+                self.subTest(changes=changes),
+                override_settings(**changes),
+                patch("requests.sessions.Session.post") as http,
+            ):
+                result = process_income_transfers()
+            self.assertEqual(result.get("distribution_submitted", 0), 0)
+            http.assert_not_called()
+        self.assertFalse(ProviderOrderDistribution.objects.exists())
+        self.assertFalse(ProviderIncomeWallet.objects.exists())
+
     def test_internal_payment_job_preserves_provider_income_and_waits_for_cash_application(self):
         distribution.DistributionStateTests.use_internal_payment(self)
         self.test_eligible_order_credits_income_once_and_never_automatically_withdraws()
@@ -942,7 +1000,7 @@ class IncomeJobTests(TransactionTestCase):
         self.assertEqual(record.snapshot["platform_split_amount"], 2965)
         self.assertEqual(record.snapshot["split_amount"], 9965)
 
-    def test_freeze_unexpired_and_nonpilot_orders_do_not_send_distribution(self):
+    def test_freeze_unexpired_and_non_delayed_orders_do_not_send_distribution(self):
         from .tasks import process_income_transfers
 
         self.settlement.freeze_until = timezone.now() + timezone.timedelta(days=1)

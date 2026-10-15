@@ -11,7 +11,7 @@ from .models import ProviderOrder, ProviderOrderDistribution, ProviderOrderDistr
 
 logger = logging.getLogger(__name__)
 REASONS = {
-    "configuration": "分账开关、白名单、额度或渠道配置未满足，请检查配置。",
+    "configuration": "分账开关、限额、手续费承担规则或渠道配置未满足，请检查配置。",
     "local_conditions": "订单、冻结期、退款或资金来源条件未满足，请查看业务准备记录。",
     "receiving_account": "达人收款账户、提现方式或费用承担规则尚未核实。",
     "payment_proof": "原支付或渠道费用明细暂未核实，尚未发起分账。",
@@ -21,7 +21,7 @@ REASONS = {
     "platform_fee_shortfall": "平台份额不足以承担支付手续费，禁止扣减达人收入。",
     "available_amount": "渠道可分账金额与本次分账总额不一致，请人工核账。",
     "snapshot_changed": "核验期间订单或收款资料发生变化，尚未发起分账。",
-    "refunded_order": "订单已有成功退款，当前试点不支持退款后的分账，请人工核账。",
+    "refunded_order": "订单已有成功退款，暂不支持退款后的分账，请人工核账。",
 }
 
 

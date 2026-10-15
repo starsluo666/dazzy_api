@@ -1,4 +1,4 @@
-"""Default-closed delayed split pilot. Verified new splits credit provider income."""
+"""Default-closed delayed splits for verified providers, without a per-provider allowlist."""
 
 import logging
 import uuid
@@ -41,16 +41,14 @@ def _scope(config):
     )
 
 
-def _policy(config, *, provider_id, amount):
-    if str(provider_id) not in settings.HUIFU_PROVIDER_DISTRIBUTION_IDS:
-        raise ValidationError("达人不在分账测试白名单中。")
+def _policy(config, *, amount):
     if not settings.HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED:
         raise ValidationError("尚未确认渠道支付、分账及提现手续费由平台承担。")
     if (
         settings.HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS <= 0
         or not 0 < amount <= settings.HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS
     ):
-        raise ValidationError("订单超出已配置的单笔分账测试额度。")
+        raise ValidationError("订单超出已配置的单笔分账限额。")
     if not settings.HUIFU_USER_UPPER_ID.strip():
         raise ValidationError("达人开户渠道范围未配置。")
     validate_transport(config)
@@ -65,15 +63,14 @@ def _receiver(provider_id, config, now):
 
 
 def payment_cohort(order, allocation, config, *, now):
-    """Called ONLY before a brand-new provider payment request is persisted."""
+    """Select new external payments; an unverified receiver must not fall back to N."""
     if (
         not settings.HUIFU_PROVIDER_DELAYED_PAYMENT_ENABLED
         or allocation.wallet_amount
         or not allocation.external_amount
-        or str(order.provider_id) not in settings.HUIFU_PROVIDER_DISTRIBUTION_IDS
     ):
         return {}
-    _policy(config, provider_id=order.provider_id, amount=allocation.external_amount)
+    _policy(config, amount=allocation.external_amount)
     account = _receiver(order.provider_id, config, now)
     return {
         "version": "provider-delayed-v1",
@@ -101,9 +98,7 @@ def _snapshot(order, config, *, now):
         raise ValidationError(reasons or "仅支持新产生且来源已核对的全额外部支付订单。")
     payment = ProviderOrderPaymentOrder.objects.get(order=order)
     try:
-        _policy(
-            config, provider_id=order.provider_id, amount=plan.provider_amount + plan.platform_amount
-        )
+        _policy(config, amount=plan.provider_amount + plan.platform_amount)
     except ValidationError as exc:
         exc.preflight_code = "configuration"
         raise
@@ -289,7 +284,7 @@ def _save_result(record_id, result, *, queried):
 
 
 def assert_refund_not_distributed(order):
-    # Even a verified F is manual review in this pilot; it must not become an
+    # Even a verified F requires manual review; it must not become an
     # implicit retry/reversal authorization. Caller holds the order row lock.
     if ProviderOrderDistribution.objects.filter(settlement__order=order).exists():
         raise ValidationError(
