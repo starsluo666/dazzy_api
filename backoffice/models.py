@@ -12,6 +12,48 @@ def generate_after_sales_case_no():
     return f"AS{uuid.uuid4().hex[:20].upper()}"
 
 
+def generate_manual_refund_case_no():
+    return f"MR{uuid.uuid4().hex[:20].upper()}"
+
+
+class ProviderManualRefundCase(models.Model):
+    """Manual evidence register, NOT a channel refund or permission to move money."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "待财务处理"
+        PROCESSING = "processing", "财务处理中"
+        REVIEWING = "reviewing", "待财务复核"
+        COMPLETED = "completed", "人工处理已核验"
+        REJECTED = "rejected", "已驳回·未退款"
+
+    case_no = models.CharField(max_length=24, unique=True, default=generate_manual_refund_case_no, editable=False)
+    request_key = models.UUIDField(unique=True)
+    order = models.ForeignKey("orders.ProviderOrder", on_delete=models.PROTECT, related_name="manual_refund_cases")
+    requested_amount = models.PositiveIntegerField()
+    reason = models.CharField(max_length=1000)
+    status = models.CharField(max_length=20, choices=Status, default=Status.PENDING)
+    revision = models.PositiveIntegerField(default=1)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_manual_refunds")
+    processed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="processed_manual_refunds", null=True, blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="reviewed_manual_refunds", null=True, blank=True)
+    # A financial receipt identifier must not be reused across manual cases.
+    receipt_no = models.CharField(max_length=128, unique=True, null=True, blank=True)
+    evidence_reference = models.CharField(max_length=500, blank=True)
+    handling_note = models.CharField(max_length=1000, blank=True)
+    review_note = models.CharField(max_length=1000, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.CheckConstraint(condition=models.Q(requested_amount__gt=0), name="manual_refund_positive"),
+            models.UniqueConstraint(fields=("order",), condition=models.Q(status__in=("pending", "processing", "reviewing")), name="one_open_manual_refund"),
+        ]
+
+
 class Organization(models.Model):
     class Type(models.TextChoices):
         PLATFORM = "platform", "平台"

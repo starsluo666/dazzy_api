@@ -139,6 +139,9 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
     )
     waiting = False
     if not cancelled:
+        if order.manual_refund_cases.exclude(status="rejected").exists():
+            block("manual_refund_reconciliation", "存在人工售后资金记录，须财务核账，不自动分账")
+            waiting = True
         if order.cancellation_record:
             block("cancellation_reconciliation", "取消订单剩余款待核账，暂不自动分账")
             waiting = True

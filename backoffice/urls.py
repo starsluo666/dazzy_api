@@ -1,4 +1,5 @@
 from django.urls import path
+from .manual_refunds import ManualRefundListView, ManualRefundDetailView
 from .fulfillment_after_sales_views import (
     OrderFulfillmentAfterSalesView, FulfillmentCaseContextView,
     FulfillmentCasePreviewView, FulfillmentCaseResolveView,
@@ -83,6 +84,8 @@ from .operations_views import AdminWorkItemsView, AdminWorkSummaryView, AdminFin
 from .refund_views import StaffRefundContextView, StaffActivityRefundCreateView, StaffRefundPolicyView
 
 urlpatterns = [
+    path("manual-refunds/", ManualRefundListView.as_view(), name="admin-manual-refunds"),
+    path("manual-refunds/<str:case_no>/", ManualRefundDetailView.as_view(), name="admin-manual-refund-detail"),
     path("provider-invites/config/", AdminProviderInviteConfigView.as_view()),
     path("provider-invites/sources/", AdminProviderInviteSourcesView.as_view()),
     path("provider-invites/sources/<uuid:source_id>/", AdminProviderInviteSourceView.as_view()),

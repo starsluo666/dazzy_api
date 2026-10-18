@@ -84,6 +84,8 @@ def payment_cohort(order, allocation, config, *, now):
 
 
 def _snapshot(order, config, *, now):
+    from backoffice.manual_refunds import assert_no_manual_refund
+    assert_no_manual_refund(order)
     # Caller holds the order lock. The same lock protects refunds and completion.
     plan = sync_provider_settlement_plan(order_no=order.order_no, now=now)
     if not plan or plan.status == "cancelled":
@@ -284,6 +286,8 @@ def _save_result(record_id, result, *, queried):
 
 
 def assert_refund_not_distributed(order):
+    from backoffice.manual_refunds import assert_no_manual_refund
+    assert_no_manual_refund(order)
     # Even a verified F requires manual review; it must not become an
     # implicit retry/reversal authorization. Caller holds the order row lock.
     if ProviderOrderDistribution.objects.filter(settlement__order=order).exists():

@@ -340,6 +340,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     refund_orders = ProviderOrderRefundSummarySerializer(many=True, read_only=True)
     settlement = ProviderOrderSettlementSummarySerializer(read_only=True, allow_null=True)
     after_sales = serializers.SerializerMethodField()
+    manual_after_sales_required = serializers.SerializerMethodField()
     pricing_snapshot = serializers.SerializerMethodField()
 
     class Meta:
@@ -359,12 +360,18 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "customer_confirmed_at", "auto_confirmed_at", "review", "payment_order",
             "review_expires_at",
             "fulfillment_review_required",
-            "refund_orders", "settlement", "after_sales",
+            "refund_orders", "settlement", "after_sales", "manual_after_sales_required",
             "timeout",
         )
 
     def get_provider_avatar_url(self, obj):
         return build_media_url(obj.provider.user.avatar_object_key)
+
+    def get_manual_after_sales_required(self, obj):
+        settlement = getattr(obj, "settlement", None)
+        return bool(settlement and (
+            settlement.status == "settled" or getattr(settlement, "distribution", None)
+        ))
 
     def get_pricing_snapshot(self, obj):
         return public_pricing_snapshot(obj.pricing_snapshot)

@@ -18,7 +18,7 @@ from orders.timeouts import legacy_overdue_query
 from providers.models import ProviderProfile, ProviderProfileRevision, ProviderServiceRevision
 from supportcases.models import SupportCase, SupportCaseRecord
 from taskcenter.models import ScheduledTask
-from .models import AdminWorkReadReceipt, ProviderOrderAfterSalesCase
+from .models import AdminWorkReadReceipt, ProviderOrderAfterSalesCase, ProviderManualRefundCase
 from .finance_work import finance_queues
 from .task_scope import scoped_scheduled_tasks
 
@@ -61,6 +61,14 @@ def queues(access, *, now=None):
     providers = scope(ProviderProfile.objects.all(), access, "service_city_code")
     orders = scope(ProviderOrder.objects.all(), access, "provider__service_city_code")
     activities = scope(Activity.objects.all(), access, "city_code")
+    if permitted(access, "order.after_sales.view"):
+        manual = ProviderManualRefundCase.objects.filter(order__in=orders)
+        result.append(Queue("manual_refund_processing", "已结算订单人工售后", "finance",
+            manual.filter(status__in=("pending", "processing")), "manual_refunds", "case_no",
+            version=Cast("revision", CharField()), hours=4))
+        result.append(Queue("manual_refund_review", "人工退款凭证待复核", "finance",
+            manual.filter(status="reviewing"), "manual_refunds", "case_no",
+            version=Cast("revision", CharField()), hours=4))
     if permitted(access, "provider.review"):
         result.extend([
             Queue("provider_application_review", "达人入驻初审", "review", providers.filter(status="pending"),

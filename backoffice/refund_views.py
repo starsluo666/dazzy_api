@@ -147,11 +147,20 @@ class StaffRefundContextView(APIView):
 
     def get(self, request, kind, reference):
         access = resolve_admin_access(request.user)
-        data = refund_context(refund_source(access, kind, reference), kind)
+        source = refund_source(access, kind, reference)
+        data = refund_context(source, kind)
         permission = (
             "order.after_sales.create" if kind == "provider" else "activity_after_sales.create"
         )
         data["can_create"] = has(access, permission) and not data["blocked_reason"]
+        if kind == "provider":
+            from .manual_refunds import context as manual_context
+            data["manual"] = manual_context(source)
+            data["manual"]["can_create"] = has(access, permission) and not data["manual"]["blocked_reason"]
+            # Keep channel-confirmed refunds distinct from manually verified records.
+            if data["manual"]["completed_amount"] or data["manual"]["occupied_amount"]:
+                data["can_create"] = False
+                data["blocked_reason"] = "本单已有人工售后资金记录，请处理原工单，不能重复自动退款。"
         data["policy"] = refund_policy(request.user, access)
         return Response({"data": data})
 

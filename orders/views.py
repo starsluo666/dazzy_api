@@ -122,7 +122,7 @@ class ProviderOrderListCreateView(APIView):
         customer_orders = ProviderOrder.objects.filter(customer=request.user)
         orders = customer_orders.select_related(
             "provider__user", "service__category", "arrival_photo", "review__customer",
-            "payment_order", "settlement",
+            "payment_order", "settlement__distribution",
         ).prefetch_related(
             "review__images", "refund_orders", "after_sales_cases"
         )[:50]
@@ -234,7 +234,7 @@ class ProviderOrderDetailView(APIView):
         return get_object_or_404(
             ProviderOrder.objects.select_related(
                 "provider__user", "service__category", "arrival_photo", "review__customer",
-                "payment_order", "settlement",
+                "payment_order", "settlement__distribution",
             ).prefetch_related("review__images", "refund_orders", "after_sales_cases"),
             order_no=order_no,
             customer=request.user,
@@ -567,7 +567,7 @@ class CurrentProviderOrderListView(APIView):
             paid_at__isnull=False,
         ).select_related(
             "customer", "provider__user", "service__category", "arrival_photo",
-            "payment_order", "settlement",
+            "payment_order", "settlement__distribution",
         ).prefetch_related("refund_orders", "after_sales_cases")
         if order_status := query.validated_data.get("status"):
             orders = orders.filter(status=order_status)
@@ -587,7 +587,7 @@ class CurrentProviderOrderDetailView(APIView):
         return get_object_or_404(
             queryset.select_related(
                 "customer", "provider__user", "service__category", "arrival_photo",
-                "payment_order", "settlement",
+                "payment_order", "settlement__distribution",
             ).prefetch_related("refund_orders", "after_sales_cases"),
             provider=provider,
             paid_at__isnull=False,
@@ -891,7 +891,7 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
         order = get_object_or_404(
             ProviderOrder.objects.select_related(
                 "provider__user", "service__category", "arrival_photo", "payment_order",
-                "settlement",
+                "settlement__distribution",
             ).select_for_update(of=("self",)),
             order_no=order_no,
             customer=request.user,
@@ -915,7 +915,7 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
         ensure_provider_order_settlement(order_no=order.order_no)
         order = ProviderOrder.objects.select_related(
             "provider__user", "service__category", "arrival_photo", "payment_order",
-            "settlement",
+            "settlement__distribution",
         ).prefetch_related("review__images", "refund_orders", "after_sales_cases").get(pk=order.pk)
         return Response({"data": ProviderOrderSerializer(order).data})
 
