@@ -35,6 +35,111 @@ Redis 只承担 Celery 消息传递。
 
 存活检查：`GET /api/v1/health/`；就绪检查：`GET /api/v1/health/ready/`；OpenAPI：`GET /api/schema/`。
 
+## 腾讯云验证码短信
+
+复用现有验证码接口，无需改小程序/H5 的请求协议。注册（含达人邀请注册）、短信登录、
+找回密码、微信绑定手机号、首次设置密码、换绑原/新手机号均使用同一服务端入口，
+验证码仍按“手机号 + 用途”隔离。此接入不包含订单通知、营销群发或自动创建签名/模板。
+
+依据腾讯云 [API 概览](https://cloud.tencent.com/document/api/382/52077)、
+[SendSms](https://cloud.tencent.com/document/product/382/55981)、
+[Python SDK](https://cloud.tencent.com/document/product/382/43196)，使用官方
+`tencentcloud-sdk-python-sms` 产品包，API 版本 `2021-01-11`，HTTPS + SDK 签名。
+不使用旧版 SDKAppKey，不在前端存储云密钥或直接调用腾讯接口。
+
+### 配置
+
+腾讯云控制台先开通短信、准备国内短信套餐、创建短信应用，并完成签名与验证码模板审核。
+建议使用仅具有短信发送权限的子账号密钥，不要将密钥发到聊天或提交 Git。
+在**后端运行环境文件**中配置，Docker 默认读取 `.env.online`
+（若部署配置指定 `DAZZY_ENV_FILE`，则修改其指向的文件）：
+
+```dotenv
+TENCENT_SMS_ENABLED=true
+TENCENT_SMS_SECRET_ID=填写短信子账号SecretId
+TENCENT_SMS_SECRET_KEY=填写短信子账号SecretKey
+TENCENT_SMS_SDK_APP_ID=填写短信应用SDKAppID
+TENCENT_SMS_SIGN_NAME=填写审核通过的签名文字
+TENCENT_SMS_TEMPLATE_ID=填写审核通过的通用验证码模板ID
+TENCENT_SMS_TEMPLATE_PARAMS=code
+TENCENT_SMS_REGION=ap-guangzhou
+TENCENT_SMS_TIMEOUT_SECONDS=10
+SMS_CODE_TTL_SECONDS=300
+SMS_CODE_RESEND_SECONDS=60
+SMS_CODE_MAX_ATTEMPTS=5
+SMS_PHONE_DAILY_LIMIT=10
+```
+
+`SDK_APP_ID` 不是微信 AppID；`SIGN_NAME` 不是签名 ID。专用密钥两项**同时留空**
+才复用已有 `TENCENT_CLOUD_SECRET_ID/KEY`，且该账号仍须有短信权限；只填一项会拒绝发送。
+本次不自动启用网关，也不改动真实环境文件。
+
+可以只配置上面的默认通用模板，也可以按场景配置以下模板 ID。选择顺序：
+**对应场景模板 → 默认 `TENCENT_SMS_TEMPLATE_ID`**。场景模板未配置或为空时使用默认模板；
+两者都未配置则该场景拒绝发送。已经配置但格式不合法、腾讯云拒绝或超时，
+均不会换用默认模板重新发送。
+
+```dotenv
+TENCENT_SMS_TEMPLATE_ID_REGISTER=
+TENCENT_SMS_TEMPLATE_ID_LOGIN=
+TENCENT_SMS_TEMPLATE_ID_RESET_PASSWORD=
+TENCENT_SMS_TEMPLATE_ID_INITIAL_PASSWORD=
+TENCENT_SMS_TEMPLATE_ID_WECHAT_BIND=
+TENCENT_SMS_TEMPLATE_ID_CHANGE_PHONE=
+```
+
+六项依次对应注册、短信登录、找回密码、首次设置密码、微信绑定手机号、更换手机号。
+换绑原/新手机号共用换绑模板，但校验用途独立。用户端与达人端共用相同业务场景配置。
+模板由后端按已校验的业务用途选取，前端不能指定模板 ID。
+
+默认模板使用通用的身份验证文案，不要写成仅适用“登录”或“重置密码”的文案；
+实际是否可用于全部这些场景以腾讯云审核为准。签名由腾讯云添加，不作为模板变量传入。
+**默认模板和所有专用模板使用相同变量数量和顺序**，由 `TENCENT_SMS_TEMPLATE_PARAMS` 配置：
+
+- 模板只有验证码变量 `{1}`：配置 `TENCENT_SMS_TEMPLATE_PARAMS=code`。
+- 模板含验证码 `{1}` 和有效分钟数 `{2}`：配置 `TENCENT_SMS_TEMPLATE_PARAMS=code,minutes`。
+  此时有效期必须是整分钟，默认 300 秒传入 `"5"`。不支持任意自定义变量。
+- 若模板写死“5 分钟内有效”，保持 `SMS_CODE_TTL_SECONDS=300`，避免文案与校验期限不一致。
+
+更新代码和依赖后重新构建、部署 API，使新运行环境生效。此改动无需数据库迁移。
+容器内只读检查：
+
+```bash
+sudo bash ./deploy-docker.sh manage check_tencent_sms
+```
+
+该检查只验证本地配置完整性，不发送短信，不代表腾讯云权限、模板审核、套餐余额已通过。
+经授权使用自有测试手机号完成一次发送、注册/登录、错误码与重发验收；
+在腾讯云控制台核对实际发送记录和手机接收结果。
+
+### 安全与异常行为
+
+- 正式网关开启时始终使用随机六位验证码，即使 `DEBUG=True` 也不返回 `debug_code`；
+  网关未开启且 `DEBUG=False` 返回 503，不返回固定码或假成功。
+- 同一手机号跨用途共用原子发送冷却，真实发送至少间隔 60 秒；保留手机号每日上限、
+  IP 分钟/每日限频和验证码错误次数限制。不同手机号、不同用途不能混用验证码。
+- 只有对应手机号的 `SendStatusSet.Code=Ok`、流水及请求 ID 完整才激活新验证码。
+  API 受理不等于手机已收到，不伪造送达状态。
+- 不自动重试付费请求。超时、失败、响应不完整均返回用户可读的失败提示，
+  不启用新码；保留冷却和本次日额度，避免连续重发。原先尚有效的验证码不因此被覆盖。
+- 禁用 SDK 请求/响应正文日志，只记录经筛选的错误码和请求 ID，不记录密钥、验证码、
+  手机号或供应商原始错误消息。排查时按请求 ID 到腾讯云核对。
+- 生产多实例共用 Redis。不得改为进程内缓存，否则验证码和限频状态无法跨实例共享；
+  另在腾讯云控制台配置发送频率与费用告警。现有 IP 限频仍依赖可信代理配置正确。
+- `SMS_TEST_REGISTRATION_PHONES` 是原有运维测试入口，不是网关白名单，也不会让公开接口绕过短信；
+  正式上线应保持该测试白名单为空。
+
+离线回归使用独立内存数据库，SDK 发送由测试桩替代，不读取 `.env` 或操作业务库：
+
+```bash
+uv run --no-env-file python scripts/check_wechat_auth.py accounts.test_tencent_sms accounts.tests accounts.test_wechat_security accounts.test_test_registration_code accounts.test_account_closure growth.test_provider_invites
+```
+
+2026-10-20 离线验收（含分场景模板及默认模板回退）：上述 134 项中 130 项通过、
+4 项既有 PostgreSQL 专用测试跳过；新增短信相关 30 项全部通过。
+验收同时拦截真实 HTTP，未发送短信、未连接业务数据库。
+Ruff、依赖锁文件及 Django 配置/迁移一致性检查通过；真实渠道联调待配置后另行授权执行。
+
 ## 已接单但未出发的超时处理
 
 新增订单在下单时固定时间规则与信用扣分规则，后台“平台运营参数 → 达人订单”可配置

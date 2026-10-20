@@ -241,6 +241,7 @@ dependencies = [
     { name = "qrcode", extra = ["pil"] },
     { name = "redis" },
     { name = "tencentcloud-sdk-python-faceid" },
+    { name = "tencentcloud-sdk-python-sms" },
     { name = "whitenoise" },
 ]
 
@@ -268,6 +269,7 @@ requires-dist = [
     { name = "qrcode", extras = ["pil"], specifier = ">=8.2,<9" },
     { name = "redis", specifier = ">=6,<7" },
     { name = "tencentcloud-sdk-python-faceid", specifier = ">=3.0,<4" },
+    { name = "tencentcloud-sdk-python-sms", specifier = ">=3.0,<4" },
     { name = "whitenoise", specifier = ">=6.12,<7" },
 ]
 
@@ -804,6 +806,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/72/b2/43f4110b4ae1329f41e094ce56cb2b804b312250666b1cada687a68a3043/tencentcloud_sdk_python_faceid-3.1.179.tar.gz", hash = "sha256:8b44142084ac5dc5d82837ff9b84d552da7455f9f53eb24e17db4440ad71c930", size = 58162, upload-time = "2026-09-21T18:59:28.608Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/58/f570a9ec521c8e9338d22f4f59bb72b4e1a87a7d004b6d06368b72913a37/tencentcloud_sdk_python_faceid-3.1.179-py2.py3-none-any.whl", hash = "sha256:b99c19973c0bb8d87eca2ae8bc0b986cebb63f50d2e2a96d28800af480fc87da", size = 61133, upload-time = "2026-09-21T18:59:26.389Z" },
+]
+
+[[package]]
+name = "tencentcloud-sdk-python-sms"
+version = "3.1.153"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tencentcloud-sdk-python-common" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/21/f22f5e3c7ab0665de70da8f09d488e266fd9d264f224bf46ff1013b7fe52/tencentcloud_sdk_python_sms-3.1.153.tar.gz", hash = "sha256:3d00d97bb9210095d507dd2b7649c2782663b50d3f5bf3029fd3e385d0610495", size = 52292, upload-time = "2026-08-09T18:50:40.494Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/ed/c7e77cc2c64d1b4270102c7cfdf6840c217e4c5f9e70d185ceaae6d2672e/tencentcloud_sdk_python_sms-3.1.153-py2.py3-none-any.whl", hash = "sha256:951dcdb0fb34ba6c2be4782ddfd87eb3b06820b9b6e8c6014429e4f6993ae631", size = 60246, upload-time = "2026-08-09T18:50:38.483Z" },
 ]
 
 [[package]]

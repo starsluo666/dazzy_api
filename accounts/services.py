@@ -1,13 +1,14 @@
+import re
 import secrets
 from dataclasses import dataclass
 
 from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
-from rest_framework.exceptions import APIException
 from rest_framework.exceptions import ValidationError
 from rest_framework.throttling import BaseThrottle
 
+from .tencent_sms import SmsConfig, SmsDeliveryUnavailable, send_verification_sms
 
 SMS_PURPOSES = {
     "register",
@@ -18,12 +19,6 @@ SMS_PURPOSES = {
     "wechat_bind",
     "initial_password",
 }
-
-
-class SmsDeliveryUnavailable(APIException):
-    status_code = 503
-    default_detail = "短信服务尚未开通，请稍后重试。"
-    default_code = "sms_delivery_unavailable"
 
 
 def _code_key(phone: str, purpose: str) -> str:
@@ -76,11 +71,20 @@ def _increment_counter(key: str, timeout: int) -> int:
 def send_sms_code(*, phone: str, purpose: str) -> SmsCodeResult:
     if purpose not in SMS_PURPOSES:
         raise ValidationError({"purpose": "不支持的验证码用途。"})
-    # Never report success when production has no SMS gateway. A provider must
-    # be wired here before enabling phone-based registration or Wechat binding.
-    if not settings.DEBUG:
+    if not re.fullmatch(r"1[3-9][0-9]{9}", phone):
+        raise ValidationError({"phone": "请输入正确的中国大陆手机号。"})
+    real_delivery = settings.TENCENT_SMS_ENABLED
+    config = SmsConfig.load(purpose=purpose) if real_delivery else None
+    if not real_delivery and not settings.DEBUG:
         raise SmsDeliveryUnavailable()
-    if cache.get(_cooldown_key(phone)):
+    # Atomically reserve the phone across purposes BEFORE making a billable call.
+    # Keep the cooldown on failure/timeout: the provider may already have accepted it.
+    retry_after = max(60, settings.SMS_CODE_RESEND_SECONDS) if real_delivery else (
+        settings.SMS_CODE_RESEND_SECONDS
+    )
+    reservation = secrets.token_urlsafe(24)
+    lease = max(retry_after, config.timeout * 2 + 30) if config else max(1, retry_after)
+    if not cache.add(_cooldown_key(phone), reservation, lease):
         raise ValidationError({"phone": "验证码发送过于频繁，请稍后再试。"})
 
     daily_limit = settings.SMS_PHONE_DAILY_LIMIT
@@ -89,16 +93,21 @@ def send_sms_code(*, phone: str, purpose: str) -> SmsCodeResult:
         if daily_count > daily_limit:
             raise ValidationError({"phone": "该手机号今日获取验证码次数已达上限。"})
 
-    code = settings.SMS_DEVELOPMENT_CODE if settings.DEBUG else f"{secrets.randbelow(1_000_000):06d}"
+    code = f"{secrets.randbelow(1_000_000):06d}" if real_delivery else settings.SMS_DEVELOPMENT_CODE
+    if config:
+        send_verification_sms(phone=phone, code=code, config=config)
+    # A stale/expired sender must not overwrite a newer challenge.
+    if cache.get(_cooldown_key(phone)) != reservation:
+        raise SmsDeliveryUnavailable()
+    # Activate the challenge only after Tencent accepts this exact recipient.
     cache.set(_code_key(phone, purpose), code, settings.SMS_CODE_TTL_SECONDS)
     cache.delete(_code_attempt_key(phone, purpose))
-    cache.set(_cooldown_key(phone), True, settings.SMS_CODE_RESEND_SECONDS)
+    cache.set(_cooldown_key(phone), reservation, retry_after)
 
-    # Development-only code. Production must use a real SMS provider.
     return SmsCodeResult(
         expires_in=settings.SMS_CODE_TTL_SECONDS,
-        retry_after=settings.SMS_CODE_RESEND_SECONDS,
-        debug_code=code if settings.DEBUG else None,
+        retry_after=retry_after,
+        debug_code=code if not real_delivery and settings.DEBUG else None,
     )
 
 

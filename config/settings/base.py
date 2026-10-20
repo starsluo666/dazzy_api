@@ -226,6 +226,31 @@ SMS_CODE_RESEND_SECONDS = int(os.getenv("SMS_CODE_RESEND_SECONDS", "60"))
 SMS_CODE_MAX_ATTEMPTS = int(os.getenv("SMS_CODE_MAX_ATTEMPTS", "5"))
 SMS_PHONE_DAILY_LIMIT = int(os.getenv("SMS_PHONE_DAILY_LIMIT", "10"))
 SMS_DEVELOPMENT_CODE = os.getenv("SMS_DEVELOPMENT_CODE", "123456")
+TENCENT_SMS_ENABLED = os.getenv("TENCENT_SMS_ENABLED", "false").lower() == "true"
+TENCENT_SMS_SECRET_ID = os.getenv("TENCENT_SMS_SECRET_ID", "").strip()
+TENCENT_SMS_SECRET_KEY = os.getenv("TENCENT_SMS_SECRET_KEY", "").strip()
+TENCENT_SMS_SDK_APP_ID = os.getenv("TENCENT_SMS_SDK_APP_ID", "").strip()
+TENCENT_SMS_SIGN_NAME = os.getenv("TENCENT_SMS_SIGN_NAME", "").strip()
+TENCENT_SMS_TEMPLATE_ID = os.getenv("TENCENT_SMS_TEMPLATE_ID", "").strip()
+# Optional scene overrides; a blank value uses the generic default above.
+TENCENT_SMS_TEMPLATE_ID_REGISTER = os.getenv("TENCENT_SMS_TEMPLATE_ID_REGISTER", "").strip()
+TENCENT_SMS_TEMPLATE_ID_LOGIN = os.getenv("TENCENT_SMS_TEMPLATE_ID_LOGIN", "").strip()
+TENCENT_SMS_TEMPLATE_ID_RESET_PASSWORD = os.getenv(
+    "TENCENT_SMS_TEMPLATE_ID_RESET_PASSWORD", ""
+).strip()
+TENCENT_SMS_TEMPLATE_ID_INITIAL_PASSWORD = os.getenv(
+    "TENCENT_SMS_TEMPLATE_ID_INITIAL_PASSWORD", ""
+).strip()
+TENCENT_SMS_TEMPLATE_ID_WECHAT_BIND = os.getenv("TENCENT_SMS_TEMPLATE_ID_WECHAT_BIND", "").strip()
+TENCENT_SMS_TEMPLATE_ID_CHANGE_PHONE = os.getenv("TENCENT_SMS_TEMPLATE_ID_CHANGE_PHONE", "").strip()
+# Match the approved template's variable order: code or code,minutes.
+TENCENT_SMS_TEMPLATE_PARAMS = tuple(
+    part.strip() for part in os.getenv("TENCENT_SMS_TEMPLATE_PARAMS", "code").split(",")
+)
+TENCENT_SMS_REGION = os.getenv("TENCENT_SMS_REGION", "ap-guangzhou").strip()
+TENCENT_SMS_TIMEOUT_SECONDS = max(
+    1, min(15, int(os.getenv("TENCENT_SMS_TIMEOUT_SECONDS", "10")))
+)
 SMS_TEST_REGISTRATION_PHONES = tuple(
     phone.strip() for phone in os.getenv("SMS_TEST_REGISTRATION_PHONES", "").split(",")
     if phone.strip()

@@ -21,6 +21,7 @@ dependencies = [
   "whitenoise>=6.12,<7",
   "qrcode[pil]>=8.2,<9",
   "tencentcloud-sdk-python-faceid>=3.0,<4",
+  "tencentcloud-sdk-python-sms>=3.0,<4",
 ]
 
 [dependency-groups]
