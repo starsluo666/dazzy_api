@@ -4,6 +4,7 @@ from datetime import timedelta
 import logging
 
 from celery import shared_task
+from financeops.watchdog import monitored
 from django.conf import settings
 from django.db.models import F, Q
 from django.utils import timezone
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(name="providers.process_income_transfers", ignore_result=True)
+@monitored("providers.process_income_transfers")
 def process_income_transfers():
     if not settings.HUIFU_PROVIDER_INCOME_JOBS_ENABLED:
         return {"disabled": True}

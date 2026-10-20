@@ -19,9 +19,16 @@ from wallets.models import WalletPaymentAllocation
 from . import test_distributions as fixtures
 from . import test_wallet_settlement_preparation as preparation_fixtures
 from .balance_payment_gateway import HuifuBalancePaymentGateway
+from .distribution_preflight import DistributionBlocked
 from .distributions import execute_distribution, query_distribution
 from .distribution_transport import DistributionUncertain
-from .models import ProviderBalancePaymentPool, ProviderOrderDistribution, ProviderOrderDistributionPreflight
+from .models import (
+    ProviderBalancePaymentPool,
+    ProviderOrder,
+    ProviderOrderDistribution,
+    ProviderOrderDistributionPreflight,
+    ProviderOrderRefundOrder,
+)
 from .services import create_provider_order_refund
 from .settlement_plans import sync_provider_settlement_plan
 from .wallet_distributions import execute_wallet_distribution
@@ -205,13 +212,55 @@ class WalletDistributionTests(TransactionTestCase):
             source_reference="offline", idempotency_key="refund-offline", reason="offline regression",
         )
 
-    def test_refund_during_read_only_preflight_prevents_payment(self):
-        with patch.object(HuifuBalancePaymentGateway, "platform_balance") as balance, patch.object(HuifuBalancePaymentGateway, "pay") as pay:
-            balance.side_effect = lambda *_: (self.refund() and {"available_amount": 100000, "response_digest": "synthetic"})
-            with patch("requests.sessions.Session.post", side_effect=self.respond), self.assertRaises(ValidationError):
+    def pending_refund(self):
+        """Synthetic outstanding record, not a supported post-settlement refund.
+
+        Normal refund creation must stay blocked after settlement. Insert only
+        test data to exercise the payout's independent pending-record guard.
+        """
+        with transaction.atomic():
+            ProviderOrder.objects.select_for_update().get(pk=self.order.pk)
+            return ProviderOrderRefundOrder.objects.create(
+                order=self.order,
+                payment_order=self.payment,
+                beneficiary=self.customer,
+                source_type="admin",
+                source_reference="pending-wallet-refund-fixture",
+                idempotency_key="pending-wallet-refund-fixture",
+                service_fee_refund_amount=100,
+                transport_fee_refund_amount=0,
+                other_fee_refund_amount=0,
+                refund_amount=100,
+                wallet_refund_amount=100,
+                external_refund_amount=0,
+                status=ProviderOrderRefundOrder.Status.PENDING,
+                reason="synthetic pending refund regression",
+            )
+
+    def test_pending_refund_during_balance_query_prevents_payment(self):
+        def balance_after_refund(*_):
+            self.assertFalse(transaction.get_connection().in_atomic_block)
+            self.pending_refund()
+            return {"available_amount": 100000, "response_digest": "synthetic"}
+
+        with (
+            patch.object(
+                HuifuBalancePaymentGateway, "platform_balance", side_effect=balance_after_refund,
+            ) as balance,
+            patch.object(HuifuBalancePaymentGateway, "pay") as pay,
+            patch("requests.sessions.Session.post", side_effect=self.respond),
+        ):
+            with self.assertRaises(DistributionBlocked) as blocked:
                 execute_wallet_distribution(self.order.order_no)
+        self.assertEqual(blocked.exception.code, "local_conditions")
+        balance.assert_called_once()
         pay.assert_not_called()
+        refund = ProviderOrderRefundOrder.objects.get(order=self.order)
+        self.assertEqual(refund.status, "pending")
+        self.assertEqual(refund.wallet_refund_amount, 100)
+        self.assertEqual(ProviderOrderDistributionPreflight.objects.get().reason_code, "local_conditions")
         self.assertFalse(ProviderOrderDistribution.objects.exists())
+        self.assertFalse(ProviderIncomeEntry.objects.exists())
 
     def test_insufficient_balance_and_stale_generation_never_register(self):
         with patch("requests.sessions.Session.post", side_effect=self.respond), patch.object(

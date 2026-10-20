@@ -2,6 +2,7 @@ import logging
 from datetime import timedelta
 
 from celery import shared_task
+from financeops.watchdog import monitored
 from django.db.models import F
 from django.utils import timezone
 
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(name="wallets.reconcile_pending_recharges", ignore_result=True)
+@monitored("wallets.reconcile_pending_recharges")
 def reconcile_pending_recharges():
     """Recover successful payments even if the user leaves and callbacks are lost."""
     pending = WalletRechargeOrder.objects.filter(

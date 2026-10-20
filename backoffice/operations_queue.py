@@ -58,6 +58,31 @@ def refund_attention(queryset, task_type, now):
 def queues(access, *, now=None):
     now = now or timezone.now()
     result = []
+    if access.all_data and permitted(access, "finance.recovery.view"):
+        from financeops.models import FinanceRecoveryCase, PaymentJobHeartbeat
+        from financeops.watchdog import health
+        from orders.models import ProviderBalancePaymentPool
+        job_alerts = [row for row in health(now) if row["alert"] and row["id"]]
+        job_events = Case(*[
+            When(pk=row["id"], then=Value(row["event_version"])) for row in job_alerts
+        ], default=Value("healthy"), output_field=CharField())
+        result.extend([
+            Queue("finance_recovery_open", "资金异常待处置", "finance",
+                  FinanceRecoveryCase.objects.filter(status="open"), "finance_recovery", "reference",
+                  version=Cast("revision", CharField()), hours=4),
+            Queue("finance_recovery_review", "资金处置待独立复核", "finance",
+                  FinanceRecoveryCase.objects.filter(status="review"), "finance_recovery", "reference",
+                  version=Cast("revision", CharField()), hours=4),
+            Queue("payment_pool_hold", "平台余额付款已暂停", "finance",
+                  ProviderBalancePaymentPool.objects.exclude(hold_reason=""), "finance_recovery", "pk",
+                  time_field="updated_at", version=Cast("generation", CharField()), hours=1,
+                  query={"view": "pools"}),
+            Queue("payment_job_health", "支付任务巡检异常", "system",
+                  PaymentJobHeartbeat.objects.filter(pk__in=[row["id"] for row in job_alerts]), "finance_recovery", "key",
+                  time_field=Coalesce("succeeded_at", "created_at"),
+                  version=job_events,
+                  hours=1, query={"view": "jobs"}),
+        ])
     if access.all_data and permitted(access, "reconciliation.view"):
         from reconciliation.models import ReconciliationIssue
         result.append(Queue(
@@ -188,7 +213,7 @@ def queue_queryset(queue, user, now):
 def target(queue, reference=None, object_id=None):
     query = {"todo": queue.key, **(queue.query or {})}
     if reference:
-        query["search"] = reference
+        query["search"] = str(reference)
     if object_id:
         query["work_id"] = object_id
     return {"page": queue.page, "query": query}

@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     "growth.apps.GrowthConfig",
     "wallets.apps.WalletsConfig",
     "reconciliation.apps.ReconciliationConfig",
+    "financeops.apps.FinanceopsConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -142,6 +143,7 @@ CELERY_BEAT_SCHEDULE = {
 
 # Diagnostic reads only. Rollout date prevents silently importing historical bills.
 HUIFU_RECONCILIATION_ENABLED = os.getenv("HUIFU_RECONCILIATION_ENABLED", "false").lower() == "true"
+HUIFU_FINANCE_RECOVERY_ENABLED = os.getenv("HUIFU_FINANCE_RECOVERY_ENABLED", "false").lower() == "true"
 HUIFU_RECONCILIATION_START_DATE = os.getenv("HUIFU_RECONCILIATION_START_DATE", "")
 HUIFU_RECONCILIATION_DOWNLOAD_HOSTS = tuple(
     h.strip() for h in os.getenv("HUIFU_RECONCILIATION_DOWNLOAD_HOSTS", "file.cloudpnr.com").split(",") if h.strip()

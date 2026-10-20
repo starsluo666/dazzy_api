@@ -986,6 +986,7 @@ class ProviderOrderDistribution(models.Model):
     )
     funds_reserved_amount = models.PositiveBigIntegerField("本次付款及费用预留（分）", null=True)
     funds_released = models.BooleanField(default=False)
+    failure_reviewed_at = models.DateTimeField(null=True, editable=False)
     gateway_trade_no = models.CharField(max_length=128, blank=True)
     response_code = models.CharField(max_length=8, blank=True)
     response_digest = models.CharField(max_length=64, blank=True)

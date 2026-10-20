@@ -240,7 +240,7 @@ def query_wallet_distribution(record, config):
 def reconcile_pool(record):
     """Called inside result/credit transaction; uncertainty never releases a slot."""
     pool = ProviderBalancePaymentPool.objects.select_for_update().get(pk=record.funding_pool_id)
-    if record.evidence_conflict_code or record.status == "failed":
+    if record.evidence_conflict_code or (record.status == "failed" and not record.failure_reviewed_at):
         reason = "余额付款失败或证据存在差异，请财务核账后再处理；禁止自动重发。"
         if not pool.hold_reason:
             pool.hold_reason = reason

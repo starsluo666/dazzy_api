@@ -12,8 +12,9 @@ from providers.models import ProviderIncomeEntry
 from providers.test_income_concurrency import parallel
 from . import test_wallet_distributions as fixtures
 from .balance_payment_gateway import HuifuBalancePaymentGateway
+from .distribution_preflight import DistributionBlocked
 from .distributions import query_distribution
-from .models import ProviderOrderDistribution
+from .models import ProviderOrderDistribution, ProviderOrderDistributionPreflight, ProviderOrderRefundOrder
 from .wallet_distributions import execute_wallet_distribution
 
 
@@ -24,6 +25,7 @@ class WalletDistributionConcurrencyTests(TransactionTestCase):
     receipt = fixtures.WalletDistributionTests.receipt
     second_order = fixtures.WalletDistributionTests.second_order
     refund = fixtures.WalletDistributionTests.refund
+    pending_refund = fixtures.WalletDistributionTests.pending_refund
 
     def setUp(self):
         if connection.vendor != "postgresql":
@@ -74,9 +76,12 @@ class WalletDistributionConcurrencyTests(TransactionTestCase):
         self.assertTrue(record.funds_released)
         self.assertEqual(record.funding_pool.generation, 2)
 
-    def test_concurrent_refund_wins_before_durable_registration(self):
+    def test_pending_refund_committed_during_preflight_prevents_registration(self):
         entered, release = Event(), Event()
+        worker_connection = {}
         def source(_, **kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            worker_connection["pid"] = connection.connection.info.backend_pid
             entered.set()
             if not release.wait(timeout=15):
                 raise AssertionError("preflight release timed out")
@@ -89,14 +94,62 @@ class WalletDistributionConcurrencyTests(TransactionTestCase):
                 connections.close_all()
         with patch.object(HuifuBalancePaymentGateway, "verify_source", side_effect=source), patch.object(
             HuifuBalancePaymentGateway, "platform_balance", return_value={"available_amount": 100000, "response_digest": "synthetic"},
-        ), patch.object(HuifuBalancePaymentGateway, "pay") as pay, ThreadPoolExecutor(max_workers=1) as executor:
+        ) as balance, patch.object(HuifuBalancePaymentGateway, "pay") as pay, ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(run)
             try:
                 self.assertTrue(entered.wait(timeout=15))
-                self.refund()
+                self.assertNotEqual(worker_connection["pid"], connection.connection.info.backend_pid)
+                # Commit a synthetic pending record on another connection
+                # before the payout's second check; do not relax refund policy.
+                refund = self.pending_refund()
+                self.assertFalse(connection.in_atomic_block)
             finally:
                 release.set()
-            with self.assertRaises(ValidationError):
+            with self.assertRaises(DistributionBlocked) as blocked:
                 future.result(timeout=15)
+        self.assertEqual(blocked.exception.code, "local_conditions")
+        balance.assert_called_once()
         pay.assert_not_called()
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, "pending")
+        self.assertEqual(ProviderOrderRefundOrder.objects.count(), 1)
+        self.assertEqual(ProviderOrderDistributionPreflight.objects.get().reason_code, "local_conditions")
         self.assertFalse(ProviderOrderDistribution.objects.exists())
+        self.assertFalse(ProviderIncomeEntry.objects.exists())
+
+    def test_settled_refund_during_preflight_remains_rejected(self):
+        entered, release = Event(), Event()
+        worker_connection = {}
+        def source(_, **kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            worker_connection["pid"] = connection.connection.info.backend_pid
+            entered.set()
+            if not release.wait(timeout=15):
+                raise AssertionError("preflight release timed out")
+            return "synthetic"
+        def run():
+            connections.close_all()
+            try:
+                return execute_wallet_distribution(self.order.order_no)
+            finally:
+                connections.close_all()
+        with patch.object(HuifuBalancePaymentGateway, "verify_source", side_effect=source), patch.object(
+            HuifuBalancePaymentGateway, "platform_balance", return_value={"available_amount": 100000, "response_digest": "synthetic"},
+        ), patch.object(
+            HuifuBalancePaymentGateway, "pay", return_value={"status": "processing"},
+        ) as pay, ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run)
+            try:
+                self.assertTrue(entered.wait(timeout=15))
+                self.assertNotEqual(worker_connection["pid"], connection.connection.info.backend_pid)
+                with self.assertRaisesMessage(ValidationError, "已经结算"):
+                    self.refund()
+            finally:
+                release.set()
+            record, created = future.result(timeout=15)
+        self.assertTrue(created)
+        self.assertEqual(record.status, "processing")
+        pay.assert_called_once()
+        self.assertEqual(ProviderOrderDistribution.objects.count(), 1)
+        self.assertFalse(ProviderOrderRefundOrder.objects.exists())
+        self.assertFalse(ProviderIncomeEntry.objects.exists())

@@ -98,6 +98,9 @@ PERMISSION_GROUPS = (
         "key": "finance",
         "label": "财务管理",
         "permissions": (
+            ("finance.recovery.view", "查看资金异常处置与支付巡检（全平台）"),
+            ("finance.recovery.manage", "登记资金核查凭证与查询原流水（全平台）"),
+            ("finance.recovery.review", "独立复核资金异常及受控恢复（全平台）"),
             ("reconciliation.view", "查看每日渠道对账（全平台）"),
             ("reconciliation.manage", "核查渠道对账差异（不操作资金）"),
             ("reconciliation.review", "独立复核对账差异（不操作资金）"),
