@@ -98,6 +98,9 @@ PERMISSION_GROUPS = (
         "key": "finance",
         "label": "财务管理",
         "permissions": (
+            ("reconciliation.view", "查看每日渠道对账（全平台）"),
+            ("reconciliation.manage", "核查渠道对账差异（不操作资金）"),
+            ("reconciliation.review", "独立复核对账差异（不操作资金）"),
             ("wallet.view", "查看用户钱包与充值记录"),
             ("provider_invite.review", "财务审核达人邀请现金奖励（全平台）"),
             ("provider_invite.pay", "登记达人邀请奖励人工打款（全平台）"),

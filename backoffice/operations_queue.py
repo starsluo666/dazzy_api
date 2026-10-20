@@ -58,6 +58,14 @@ def refund_attention(queryset, task_type, now):
 def queues(access, *, now=None):
     now = now or timezone.now()
     result = []
+    if access.all_data and permitted(access, "reconciliation.view"):
+        from reconciliation.models import ReconciliationIssue
+        result.append(Queue(
+            "reconciliation_difference", "渠道对账差异待核查", "finance",
+            ReconciliationIssue.objects.filter(status__in=("open", "processing", "review")),
+            "reconciliation", "reference", version=Cast("revision", CharField()),
+            hours=24, query={"view": "issues"},
+        ))
     providers = scope(ProviderProfile.objects.all(), access, "service_city_code")
     orders = scope(ProviderOrder.objects.all(), access, "provider__service_city_code")
     activities = scope(Activity.objects.all(), access, "city_code")

@@ -216,6 +216,9 @@ def _execute_distribution(order_no):
 def query_distribution(order_no):
     record = ProviderOrderDistribution.objects.get(settlement__order__order_no=order_no)
     config = HuifuPaymentConfig.from_settings()
+    if record.route == ProviderOrderDistribution.Route.BALANCE:
+        from .wallet_distributions import query_wallet_distribution
+        return query_wallet_distribution(record, config)
     if record.snapshot["scope"] != _scope(config):
         raise ValidationError("分账记录所属渠道范围与当前配置不同。")
     try:
@@ -233,13 +236,20 @@ def query_distribution(order_no):
 @transaction.atomic
 def _save_result(record_id, result, *, queried):
     record = ProviderOrderDistribution.objects.select_for_update().get(pk=record_id)
+    balance_payment = record.route == ProviderOrderDistribution.Route.BALANCE
+    fee_field = "account_payment_fee_amount" if balance_payment else "split_fee_amount"
     terminal = record.status in {"succeeded", "failed"}
-    conflict = result.get("evidence_conflict_code", "") if queried else ""
+    conflict = result.get("evidence_conflict_code", "") if queried or balance_payment else ""
+    if balance_payment and queried and result["status"] == "succeeded":
+        fee = result.get(fee_field)
+        budget = record.snapshot["policy"]["fee_reserve"]
+        if type(fee) is not int or fee < 0 or fee > budget:
+            conflict = "account_payment_fee_limit"
     if terminal and queried and result["status"] in {"succeeded", "failed"}:
         if result["status"] != record.status:
             conflict = "query_terminal_conflict"
         elif record.status == "succeeded":
-            if result.get("split_fee_amount") != record.split_fee_amount:
+            if result.get(fee_field) != getattr(record, fee_field):
                 conflict = "query_fee_conflict"
             elif result.get("gateway_trade_no", "") != record.gateway_trade_no:
                 conflict = "query_trade_conflict"
@@ -256,7 +266,7 @@ def _save_result(record_id, result, *, queried):
         if not record.evidence_conflict_code:
             logger.error("Provider split evidence conflict: request=%s reason=%s", record.req_seq_id, conflict)
         record.evidence_conflict_code = record.evidence_conflict_code or conflict
-        record.attention_reason = "渠道分账证据与原请求或已核验终态不一致，已暂停新增提现，请人工核账；禁止重发。"
+        record.attention_reason = "渠道出款证据与原请求、费用授权或已核验终态不一致，已暂停新增提现，请人工核账；禁止重发。"
         if not terminal:
             record.status = "unknown"
     elif record.evidence_conflict_code:
@@ -267,6 +277,7 @@ def _save_result(record_id, result, *, queried):
             "response_code",
             "response_digest",
             "split_fee_amount",
+            "account_payment_fee_amount",
             "gateway_trade_no",
         ):
             if key in result:
@@ -277,6 +288,9 @@ def _save_result(record_id, result, *, queried):
     if queried:
         record.last_queried_at = timezone.now()
     record.save()
+    if balance_payment:
+        from .wallet_distributions import reconcile_pool
+        reconcile_pool(record)
     from providers.income_wallet import credit_distribution, hold_distribution_wallet
     if record.evidence_conflict_code or (record.attention_reason and terminal):
         hold_distribution_wallet(record)

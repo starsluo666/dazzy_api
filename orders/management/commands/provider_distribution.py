@@ -44,22 +44,25 @@ class Command(BaseCommand):
             ).first()
         )
         if record:
-            platform_split_amount = record.snapshot.get(
+            balance_payment = record.route == "balance"
+            platform_split_amount = None if balance_payment else record.snapshot.get(
                 "platform_split_amount", record.snapshot["platform_amount"]
             )
             result.update(
+                route=record.route,
                 req_date=record.req_date,
                 req_seq_id=record.req_seq_id,
                 status=record.status,
                 provider_amount=record.snapshot["provider_amount"],
                 platform_amount=record.snapshot["platform_amount"],
-                payment_fee_flag=record.snapshot.get("fee_flag", "1"),
+                payment_fee_flag="" if balance_payment else record.snapshot.get("fee_flag", "1"),
                 platform_split_amount=platform_split_amount,
-                split_amount=record.snapshot.get(
+                split_amount=None if balance_payment else record.snapshot.get(
                     "split_amount", record.snapshot["provider_amount"] + platform_split_amount
                 ),
                 payment_fee_amount=record.payment_fee_amount,
                 split_fee_amount=record.split_fee_amount,
+                account_payment_fee_amount=record.account_payment_fee_amount,
                 bank_settlement_fee_amount=None,
                 bank_arrival_verified=False,
                 response_code=record.response_code,

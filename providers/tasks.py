@@ -25,6 +25,7 @@ def process_income_transfers():
         return {"disabled": True}
     counts = {
         "distribution_submitted": 0,
+        "balance_payment_submitted": 0,
         "distribution_queried": 0,
         "withdrawal_queried": 0,
         "deferred": 0,
@@ -72,6 +73,42 @@ def process_income_transfers():
                     logger.warning(
                         "Provider settlement plan refresh deferred: %s", settlement.order.order_no
                     )
+    if settings.HUIFU_PROVIDER_BALANCE_PAYMENT_ENABLED:
+        from orders.wallet_distributions import execute_wallet_distribution, rollout_start
+
+        start = rollout_start()
+        # An explicit rollout time is required; never scan/backpay old orders.
+        candidates = [] if start is None else (
+            ProviderOrderSettlement.objects.filter(
+                status="settled", freeze_until__lte=timezone.now(), distribution__isnull=True,
+                provider_settlement_amount__gt=0,
+                order__paid_at__gte=start, order__fulfillment_review_required=False,
+                distribution_plan__requires_manual_review=False,
+                distribution_plan__funding_type__in=("wallet", "mixed"),
+            )
+            .exclude(distribution_preflight__status="blocked")
+            .filter(Q(distribution_preflight__next_retry_at__isnull=True)
+                    | Q(distribution_preflight__next_retry_at__lte=timezone.now()))
+            .select_related("provider__user", "order")
+            .order_by("distribution_plan__evaluated_at", "pk")[:20]
+        )
+        for settlement in candidates:
+            try:
+                try:
+                    refresh_onboarding(settlement.provider)
+                except Exception:
+                    record_preflight_failure(settlement.order.order_no, "receiving_account")
+                    raise
+                _, created = execute_wallet_distribution(settlement.order.order_no)
+                counts["balance_payment_submitted"] += int(created)
+            except Exception:
+                counts["deferred"] += 1
+                logger.warning("Provider balance settlement deferred: %s", settlement.order.order_no)
+            finally:
+                try:
+                    sync_provider_settlement_plan(order_no=settlement.order.order_no)
+                except Exception:
+                    logger.warning("Provider balance plan refresh deferred: %s", settlement.order.order_no)
     pending = (
         ProviderOrderDistribution.objects.filter(status__in=("submitting", "processing", "unknown"))
         .select_related("settlement__order")

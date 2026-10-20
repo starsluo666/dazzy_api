@@ -1565,22 +1565,27 @@ class ProviderOrderSettlementSerializer(serializers.ModelSerializer):
         record = getattr(obj, "distribution", None)
         if not record:
             return None
+        balance_payment = record.route == "balance"
         # Legacy records were external-deduction only; do not reinterpret them
         # using the current HUIFU_FEE_FLAG or subtract their fee a second time.
-        platform_split_amount = record.snapshot.get(
+        platform_split_amount = None if balance_payment else record.snapshot.get(
             "platform_split_amount", record.snapshot["platform_amount"]
         )
         return {
+            "route": record.route, "route_label": record.get_route_display(),
             "req_date": record.req_date, "req_seq_id": record.req_seq_id,
-            "status": record.status, "status_label": record.get_status_display(),
+            "status": record.status, "status_label": record.channel_status_label,
             "provider_amount": record.snapshot["provider_amount"],
             "platform_amount": record.snapshot["platform_amount"],
-            "payment_fee_flag": record.snapshot.get("fee_flag", "1"),
+            "payment_fee_flag": "" if balance_payment else record.snapshot.get("fee_flag", "1"),
             "platform_split_amount": platform_split_amount,
-            "split_amount": record.snapshot.get(
+            "split_amount": None if balance_payment else record.snapshot.get(
                 "split_amount", record.snapshot["provider_amount"] + platform_split_amount
             ),
             "payment_fee_amount": record.payment_fee_amount, "split_fee_amount": record.split_fee_amount,
+            "account_payment_fee_amount": record.account_payment_fee_amount,
+            "account_payment_amount": record.snapshot["provider_amount"] if balance_payment else None,
+            "funds_reserved_amount": record.funds_reserved_amount,
             "bank_settlement_fee_amount": None, "bank_arrival_verified": False,
             "response_code": record.response_code, "attention_reason": record.attention_reason,
             "evidence_conflict_code": record.evidence_conflict_code,

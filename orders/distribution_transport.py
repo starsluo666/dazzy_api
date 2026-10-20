@@ -83,13 +83,19 @@ def sdk_call(kind, payload, config):
         V2TradeSettlementEncashmentRequest,
         V2TradeSettlementQueryRequest,
         V2TradeAcctpaymentBalanceQueryRequest,
+        V2TradeAcctpaymentPayRequest,
+        V2TradeAcctpaymentPayQueryRequest,
+        V2TradeCheckFilequeryRequest,
     )
     from dg_sdk.core.api_request import ApiRequest
 
     routes = {
+        "bill_query": ("/v2/trade/check/filequery", V2TradeCheckFilequeryRequest),
         "cash": ("/v2/trade/settlement/encashment", V2TradeSettlementEncashmentRequest),
         "cash_query": ("/v2/trade/settlement/query", V2TradeSettlementQueryRequest),
         "balance": ("/v2/trade/acctpayment/balance/query", V2TradeAcctpaymentBalanceQueryRequest),
+        "account_pay": ("/v2/trade/acctpayment/pay", V2TradeAcctpaymentPayRequest),
+        "account_pay_query": ("/v2/trade/acctpayment/pay/query", V2TradeAcctpaymentPayQueryRequest),
         "payment_query": ("/v4/trade/payment/scanpay/query", PaymentQueryRequest),
         "confirm": ("/v2/trade/payment/delaytrans/confirm", V2TradePaymentDelaytransConfirmRequest),
         "confirm_query": (

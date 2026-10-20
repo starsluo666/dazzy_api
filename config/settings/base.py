@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "notifications",
     "growth.apps.GrowthConfig",
     "wallets.apps.WalletsConfig",
+    "reconciliation.apps.ReconciliationConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -109,6 +110,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ("json",)
 CELERY_TIMEZONE = "Asia/Shanghai"
 CELERY_BEAT_SCHEDULE = {
+    "reconcile-daily-channel-bills": {
+        "task": "reconciliation.daily_bills",
+        "schedule": 1800.0,
+    },
     "process-coupon-issue-batches": {
         "task": "orders.process_coupon_issue_batches",
         "schedule": 10.0,
@@ -134,6 +139,13 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 180.0,
     },
 }
+
+# Diagnostic reads only. Rollout date prevents silently importing historical bills.
+HUIFU_RECONCILIATION_ENABLED = os.getenv("HUIFU_RECONCILIATION_ENABLED", "false").lower() == "true"
+HUIFU_RECONCILIATION_START_DATE = os.getenv("HUIFU_RECONCILIATION_START_DATE", "")
+HUIFU_RECONCILIATION_DOWNLOAD_HOSTS = tuple(
+    h.strip() for h in os.getenv("HUIFU_RECONCILIATION_DOWNLOAD_HOSTS", "file.cloudpnr.com").split(",") if h.strip()
+)
 
 AUTH_USER_MODEL = "accounts.User"
 # Overrides are complete per-year calendars, not partial holiday additions.
@@ -245,6 +257,18 @@ HUIFU_PROVIDER_DISTRIBUTION_ENABLED = os.getenv("HUIFU_PROVIDER_DISTRIBUTION_ENA
 # Explicit channel-side confirmation, NOT a request parameter or a fee-rate default.
 HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED = os.getenv("HUIFU_PROVIDER_PLATFORM_FEE_POLICY_CONFIRMED", "false").lower() in {"1", "true", "yes"}
 HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS = int(os.getenv("HUIFU_PROVIDER_DISTRIBUTION_MAX_CENTS", "0"))
+
+# Independent, default-closed platform-account payments for wallet/mixed orders.
+# Do not derive permissions, fees, risk purpose/IP or rollout time from samples.
+HUIFU_PROVIDER_BALANCE_PAYMENT_ENABLED = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_ENABLED", "false").lower() in {"1", "true", "yes"}
+HUIFU_PROVIDER_BALANCE_PAYMENT_CONFIRMED = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_CONFIRMED", "false").lower() in {"1", "true", "yes"}
+HUIFU_PROVIDER_BALANCE_PAYMENT_MAX_CENTS = int(os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_MAX_CENTS", "0"))
+HUIFU_PROVIDER_BALANCE_PAYMENT_ACCT_ID = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_ACCT_ID", "")
+HUIFU_PROVIDER_BALANCE_PAYMENT_FEE_MODE = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_FEE_MODE", "")
+HUIFU_PROVIDER_BALANCE_PAYMENT_FEE_RESERVE_CENTS = int(os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_FEE_RESERVE_CENTS", "-1"))
+HUIFU_PROVIDER_BALANCE_PAYMENT_TRANSFER_TYPE = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_TRANSFER_TYPE", "")
+HUIFU_PROVIDER_BALANCE_PAYMENT_RISK_IP = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_RISK_IP", "")
+HUIFU_PROVIDER_BALANCE_PAYMENT_START_AT = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_START_AT", "")
 
 # Individual split/settlement users, not acquiring merchants. No automatic fund transfer.
 HUIFU_USER_ONBOARDING_ENABLED = os.getenv("HUIFU_USER_ONBOARDING_ENABLED", "false").lower() in {"1", "true", "yes"}

@@ -37,7 +37,7 @@ def finance_queues(providers, now, Queue):
         settlement__provider__in=providers, settlement__distribution__isnull=True,
     ).exclude(settlement__status="cancelled").filter(
         Q(status="blocked") | (Q(status="deferred", failure_count__gte=3)
-                               & ~Q(reason_code__in=("configuration", "local_conditions")))
+                               & ~Q(reason_code__in=("configuration", "local_conditions", "wallet_configuration", "wallet_busy", "wallet_historical")))
     )
     # Manual-cash-only: old auto-settled distributions are never treated as missing credits.
     credited = ProviderIncomeEntry.objects.filter(distribution_id=OuterRef("pk"), kind="credit")
@@ -63,10 +63,10 @@ def finance_queues(providers, now, Queue):
         "available_amount", "reserved_amount", "paid_amount", "_expected_available", "_expected_reserved", "_expected_paid", "hold_reason",
     ) for item in (Cast(name, CharField()), Value(":"))]))
     return [
-        Queue("distribution_attention", "分账结果待核查", "finance", flagged, "finance_alerts", "req_seq_id", version=split_version, hours=1),
-        Queue("distribution_preflight_attention", "分账前置核验异常", "finance", preflight, "finance_alerts", "settlement__order__order_no",
+        Queue("distribution_attention", "渠道结算结果待核查", "finance", flagged, "finance_alerts", "req_seq_id", version=split_version, hours=1),
+        Queue("distribution_preflight_attention", "渠道结算前置核验异常", "finance", preflight, "finance_alerts", "settlement__order__order_no",
               "checked_at", Concat("status", Value(":"), "reason_code"), hours=1, sort_field="checked_at"),
-        Queue("distribution_credit_attention", "分账成功未入余额", "finance", uncredited, "finance_alerts", "req_seq_id", version="status", hours=1),
+        Queue("distribution_credit_attention", "渠道结算成功未入余额", "finance", uncredited, "finance_alerts", "req_seq_id", version="status", hours=1),
         Queue("withdrawal_attention", "提现结果及流水待核查", "finance", withdrawals, "finance_alerts", "req_seq_id",
               version=Concat("status", Value(":"), Cast("_ledger_gap", CharField())), hours=1),
         Queue("income_reconciliation", "达人余额核账", "finance", wallets, "finance_alerts", "provider__display_name",
@@ -99,12 +99,15 @@ def finance_row(queue_key, obj):
             reason = obj.reason_message or "分账前置条件需人工核查，尚未发起渠道分账。"
         else:
             reference, queried = obj.req_seq_id, obj.last_queried_at
+            status_label = obj.channel_status_label
             recorded_amount = obj.snapshot.get("provider_amount")
             amount = recorded_amount if type(recorded_amount) is int and recorded_amount >= 0 else None
             reason = ("渠道分账已成功，但尚未找到对应收入入账流水；请核账，不要再次分账。" if queue_key == "distribution_credit_attention"
                       else "核查原分账流水及金额、费用和终态；禁止重发分账或直接改为成功。")
             if obj.evidence_conflict_code:
                 reason = "分账证据存在冲突，账户仍需人工核账；后续查询成功不等于解除冻结。"
+            if obj.route == "balance":
+                reason = reason.replace("分账", "余额付款")
     return {"id": str(obj.pk), "reference": reference, "provider_name": provider.display_name,
             "city_code": provider.service_city_code, "amount": amount, "status": status, "status_label": status_label,
             "reason": reason, "checks": checks, "last_queried_at": queried, "order_no": order_no}

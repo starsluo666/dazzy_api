@@ -4,6 +4,7 @@ Local wallet debits are NOT Huifu account payments. Funding verification here on
 reconciles local records. It never establishes channel funds availability.
 """
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
@@ -184,10 +185,22 @@ def sync_provider_settlement_plan(*, order_no, now=None, new_settlement=False):
             ProviderOrderSettlementPlan.FundingType.WALLET,
             ProviderOrderSettlementPlan.FundingType.MIXED,
         ):
-            block("wallet_route_unconfirmed", "余额部分尚未接通渠道资金划转")
+            if not (settings.HUIFU_PROVIDER_BALANCE_PAYMENT_ENABLED and settings.HUIFU_PROVIDER_BALANCE_PAYMENT_CONFIRMED):
+                block("wallet_route_unconfirmed", "余额结算尚未启用或授权未确认")
         # This is local readiness, NOT permission/proof of channel execution.
         # Dispatch owns cohort/flags/receiver/funds/fee checks; channel results
         # live on the distribution record, never as unconditional plan blockers.
+
+    from .wallet_settlement_preparation import build_wallet_settlement_preparation
+
+    wallet_preparation = build_wallet_settlement_preparation(
+        order=order, settlement=settlement, funding=funding,
+        blockers=blockers, cancelled=cancelled,
+    )
+    if wallet_preparation is not None:
+        funding["wallet_settlement_preparation"] = wallet_preparation
+        if not cancelled and wallet_preparation["source_issues"]:
+            block("wallet_source_unverified", "余额充值来源或组合付款记录尚未核对完整")
 
     values = {
         "status": ProviderOrderSettlementPlan.Status.CANCELLED

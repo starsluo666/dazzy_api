@@ -71,6 +71,47 @@
 
 ## 验证
 
+### 2026-10-18：余额 / 组合支付资金来源准备
+
+此次仅补充本地准备，不接入尚未确认合同的汇付余额支付接口，不新增真实划款开关，不改变用户已有余额支付入口。
+
+- 准备单的 `funding_snapshot.wallet_settlement_preparation` 追溯本单余额扣款批次、对应充值单、本单退回金额和组合支付的外部付款。只统计本人、金额一致、平台商户匹配且存在成功查询记录的充值；历史无来源余额单列为待核实。
+- `traceable_wallet_amount` 是剩余余额付款中本地记录可追溯的金额，不是汇付账户可用余额。即使全部可追溯，仍然等待渠道接入确认；真实划款金额和费用保留 `null`，`execution_enabled`、`channel_funds_verified` 固定为 `false`。
+- 无法核对的总额返回 `null`；来源明细最多 100 条，超过上限明确标记未核对完整。冻结期、售后、部分退款、历史人工核账等限制保持生效。
+- 使用原有订单锁和版本审计：相同输入不新增版本，来源流水变化保留新旧快照。本准备层不构造 SDK、不创建分账单、不增加达人收入；原有分账执行器仍拒绝余额和组合支付订单。
+- 后台「交易与结算 → 达人结算 → 查看详情」展示已保存的来源准备；GET 不刷新、不补付。旧快照没有此字段时保持兼容，后续正常业务同步或下方命令才补充本地资料，无需新数据库迁移。
+
+```bash
+# 只查看已保存快照；替换成实际达人订单号
+sudo bash ./deploy-docker.sh manage provider_wallet_settlement inspect DZY实际订单号
+# 仅刷新本地准备及版本审计，不出款、不修改历史人工核账标记
+sudo bash ./deploy-docker.sh manage provider_wallet_settlement prepare DZY实际订单号
+```
+
+当时命令没有 execute 操作。准备成功不代表已经完成渠道结算功能；后续受控执行见下文。
+
+2026-10-19 已根据业务方提供的官方文档确定使用余额支付，并补充支付/查询协议适配层，见[余额支付接入状态与边界](provider-balance-payment.md)。此前缺少的支付、查询字段文档现已取得，不能再将其当作文档缺失。平台商户权限、手续费模式、风控资料来源、渠道可用资金与小额验收仍需确认；既有延时分账权限不能替代这些确认。
+
+本次依照 `huifu-pay-integration` 的 `copilot-existing-system.md`、`payment-operations-faq.md`、`copilot-go-live-checklist.md` 保留真实资金执行阻断。隔离测试入口：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_wechat_auth.py orders.test_wallet_settlement_preparation orders.test_settlement_plans
+```
+
+### 2026-10-20：受控余额支付执行
+
+已接入默认关闭的余额 / 组合支付结算执行器，不改变用户下单入口，也不再次扣用户钱包。
+使用结算单的唯一出款记录区分原支付延时分账与平台余额付款；查询充值 / 外部付款来源和平台可用账户资金后，先持久化付款意图再调用渠道。
+独立查询核实金额、收款方和费用后才幂等计入达人收入；超时不重付，冲突暂停，付款后的退款仍由人工售后处理。
+
+新增迁移 `0038_provider_balance_payment_execution`，须先迁移再启动新版服务。
+执行开关、授权、显式启用日期及费用预留均为独立配置，现有分账开关不能自动启用此路径，也不覆盖历史订单。
+本地准备快照仍不代表渠道资金证据，实际出款状态另行展示。
+配置、命令、失败处理及验证结果详见[余额支付接入状态与边界](provider-balance-payment.md)。
+本轮 235 项回归中 228 项通过、7 项 PostgreSQL 专用用例跳过；生产权限确认、PostgreSQL 并发与小额实付验收尚未完成。
+
+### 原有准备层回归
+
 ```powershell
 uv run python scripts/check_wechat_auth.py orders.test_settlement_plans orders.test_settlement_fees
 $env:COS_BUCKET='offline-test-1250000000'

@@ -11,6 +11,12 @@ from .models import ProviderOrder, ProviderOrderDistribution, ProviderOrderDistr
 
 logger = logging.getLogger(__name__)
 REASONS = {
+    "wallet_configuration": "余额结算开关、授权、出款账户、限额或风控配置未满足。",
+    "wallet_source": "余额充值来源或组合支付的外部付款尚未核实，未发起付款。",
+    "wallet_funds": "平台出款账户的可用资金未核实或不足，未发起付款。",
+    "wallet_busy": "平台账户上一笔余额付款尚待核实，后续付款暂缓。",
+    "wallet_pool_hold": "平台出款账户存在待人工核账记录，暂停后续余额付款。",
+    "wallet_historical": "订单早于余额结算启用范围，不自动补付历史订单。",
     "configuration": "分账开关、限额、手续费承担规则或渠道配置未满足，请检查配置。",
     "local_conditions": "订单、冻结期、退款或资金来源条件未满足，请查看业务准备记录。",
     "receiving_account": "达人收款账户、提现方式或费用承担规则尚未核实。",

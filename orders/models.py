@@ -938,6 +938,22 @@ class ProviderOrderDistributionPreflight(models.Model):
         db_table = "provider_distribution_preflight"
 
 
+class ProviderBalancePaymentPool(models.Model):
+    """Serialize platform account payments; no balance is invented locally.
+
+    Generation changes on reservation/release, invalidating in-flight balance
+    queries. A signed failure/conflict holds the pool for manual reconciliation.
+    """
+
+    scope = models.CharField(max_length=64, unique=True)
+    generation = models.PositiveBigIntegerField(default=0)
+    hold_reason = models.CharField(max_length=200, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "provider_balance_payment_pool"
+
+
 class ProviderOrderDistribution(models.Model):
     """One immutable channel request per settlement. Unknown outcomes are query-only.
 
@@ -952,13 +968,24 @@ class ProviderOrderDistribution(models.Model):
         SUCCEEDED = "succeeded", "渠道分账成功（非银行卡到账）"
         FAILED = "failed", "渠道分账失败（禁止自动重发）"
 
+    class Route(models.TextChoices):
+        DELAYED = "delayed", "原支付延时分账"
+        BALANCE = "balance", "平台余额支付结算"
+
     settlement = models.OneToOneField(ProviderOrderSettlement, on_delete=models.PROTECT, related_name="distribution")
+    route = models.CharField(max_length=16, choices=Route, default=Route.DELAYED)
     req_date = models.CharField(max_length=8)
     req_seq_id = models.CharField(max_length=32, unique=True)
     status = models.CharField(max_length=16, choices=Status, default=Status.SUBMITTING)
     snapshot = models.JSONField("不可变分账请求快照")
-    payment_fee_amount = models.PositiveBigIntegerField("支付手续费（分）")
+    payment_fee_amount = models.PositiveBigIntegerField("支付手续费（分）", null=True)
     split_fee_amount = models.PositiveBigIntegerField("分账手续费（分）", null=True)
+    account_payment_fee_amount = models.PositiveBigIntegerField("余额支付手续费（分）", null=True)
+    funding_pool = models.ForeignKey(
+        ProviderBalancePaymentPool, on_delete=models.PROTECT, null=True, related_name="payments",
+    )
+    funds_reserved_amount = models.PositiveBigIntegerField("本次付款及费用预留（分）", null=True)
+    funds_released = models.BooleanField(default=False)
     gateway_trade_no = models.CharField(max_length=128, blank=True)
     response_code = models.CharField(max_length=8, blank=True)
     response_digest = models.CharField(max_length=64, blank=True)
@@ -970,6 +997,25 @@ class ProviderOrderDistribution(models.Model):
 
     class Meta:
         db_table = "provider_order_distribution"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("funding_pool",),
+                condition=models.Q(funding_pool__isnull=False, funds_released=False),
+                name="one_pending_provider_balance_payment_per_pool",
+            ),
+        ]
+
+    @property
+    def channel_status_label(self):
+        if self.route == self.Route.BALANCE:
+            return {
+                "submitting": "余额付款请求已登记",
+                "unknown": "余额付款结果待核实",
+                "processing": "余额付款处理中",
+                "succeeded": "达人账户收款成功（非银行卡到账）",
+                "failed": "余额付款失败（待人工核账）",
+            }[self.status]
+        return self.get_status_display()
 
 
 class ProviderOrderDistributionObservation(models.Model):
