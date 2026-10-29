@@ -96,19 +96,21 @@ class ProviderListView(APIView):
             ),
             starting_price_amount=Min(
                 "services__price_amount",
-                filter=Q(services__is_active=True, services__category__is_active=True),
+                filter=Q(services__is_active=True, services__category__is_active=True, services__content_hidden=False),
             )
         )
         service_filter = Q()
         if category := params.get("category"):
             service_filter &= Q(
                 services__category__slug=category,
+                services__content_hidden=False,
                 services__category__is_active=True,
                 services__is_active=True,
             )
         if max_price_amount := params.get("max_price_amount"):
             service_filter &= Q(
                 services__price_amount__lte=max_price_amount,
+                services__content_hidden=False,
                 services__category__is_active=True,
                 services__is_active=True,
             )
@@ -229,6 +231,7 @@ class ProviderAvailabilityView(APIView):
         service = get_object_or_404(
             ProviderService,
             id=params["service_id"],
+            content_hidden=False,
             provider=provider,
             is_active=True,
             category__is_active=True,

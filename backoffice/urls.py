@@ -1,7 +1,10 @@
 from django.urls import path
+from moderation.views import ContentReviewListView, ContentReviewDetailView
 from .manual_refunds import ManualRefundListView, ManualRefundDetailView
 from reconciliation.views import ReconciliationListView, ReconciliationIssueView
-from financeops.views import FinanceRecoveryListView, FinanceRecoveryDetailView, PaymentJobHealthView
+from financeops.views import (
+    FinanceRecoveryListView, FinanceRecoveryDetailView, PaymentJobHealthView, PaymentReadinessView,
+)
 from .fulfillment_after_sales_views import (
     OrderFulfillmentAfterSalesView, FulfillmentCaseContextView,
     FulfillmentCasePreviewView, FulfillmentCaseResolveView,
@@ -86,10 +89,13 @@ from .operations_views import AdminWorkItemsView, AdminWorkSummaryView, AdminFin
 from .refund_views import StaffRefundContextView, StaffActivityRefundCreateView, StaffRefundPolicyView
 
 urlpatterns = [
+    path("content-reviews/", ContentReviewListView.as_view(), name="content-review-list"),
+    path("content-reviews/<int:pk>/", ContentReviewDetailView.as_view(), name="content-review-detail"),
     path("reconciliation/", ReconciliationListView.as_view(), name="admin-reconciliation"),
     path("finance-recovery/", FinanceRecoveryListView.as_view(), name="admin-finance-recovery"),
     path("finance-recovery/<int:pk>/", FinanceRecoveryDetailView.as_view(), name="admin-finance-recovery-detail"),
     path("payment-job-health/", PaymentJobHealthView.as_view(), name="admin-payment-job-health"),
+    path("payment-readiness/", PaymentReadinessView.as_view(), name="admin-payment-readiness"),
     path("reconciliation/issues/<int:pk>/", ReconciliationIssueView.as_view(), name="admin-reconciliation-issue"),
     path("manual-refunds/", ManualRefundListView.as_view(), name="admin-manual-refunds"),
     path("manual-refunds/<str:case_no>/", ManualRefundDetailView.as_view(), name="admin-manual-refund-detail"),

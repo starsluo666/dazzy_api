@@ -70,6 +70,8 @@ class ServiceCategory(models.Model):
 
 
 class ProviderProfile(models.Model):
+    content_hidden = models.BooleanField("内容审核隐藏", default=False, db_index=True)
+    content_hidden_review = models.UUIDField(null=True, editable=False)
     class Status(models.TextChoices):
         DRAFT = "draft", "草稿"
         PENDING = "pending", "待审核"
@@ -515,6 +517,8 @@ class ProviderLiveLocation(models.Model):
 
 
 class ProviderService(models.Model):
+    content_hidden = models.BooleanField("内容审核隐藏", default=False, db_index=True)
+    content_hidden_review = models.UUIDField(null=True, editable=False)
     class BillingType(models.TextChoices):
         HOURLY = "hourly", "按小时"
         PER_SESSION = "per_session", "按次"

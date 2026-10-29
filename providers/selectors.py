@@ -7,17 +7,20 @@ from .models import ProviderProfile, ProviderService
 def public_providers():
     active_services = ProviderService.objects.filter(
         is_active=True,
+        content_hidden=False,
         category__is_active=True,
     ).select_related("category")
     return (
         ProviderProfile.objects.filter(
             status=ProviderProfile.Status.APPROVED,
+            content_hidden=False,
             onboarding_status=ProviderProfile.OnboardingStatus.APPROVED,
             identity_status=ProviderProfile.IdentityStatus.VERIFIED,
             lifestyle_photo__isnull=False,
             user__is_active=True,
             user__account_status="active",
             services__is_active=True,
+            services__content_hidden=False,
             services__category__is_active=True,
         )
         .exclude(bio="")

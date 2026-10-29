@@ -70,6 +70,8 @@ def create_activity_draft(*, organizer, validated_data) -> Activity:
         **validated_data,
     )
     activity.tags.set(tags)
+    from moderation.services import submit
+    submit("activity", activity)
     return activity
 
 
@@ -630,6 +632,8 @@ def expire_activity_participation_payment(*, order_no: str, now=None) -> dict:
 
 
 def _validate_participation_eligibility(activity, user, now):
+    if activity.content_hidden:
+        raise ValidationError("该活动暂不可报名，请选择其他活动。")
     if activity.organizer_id == user.pk:
         raise PermissionDenied("组织者无需重复报名自己的活动。")
     if user.account_status != user.AccountStatus.ACTIVE:

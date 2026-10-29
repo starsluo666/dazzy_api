@@ -50,6 +50,8 @@ class ActivityCategory(models.Model):
 
 
 class Activity(models.Model):
+    content_hidden = models.BooleanField("内容审核隐藏", default=False, db_index=True)
+    content_hidden_review = models.UUIDField(null=True, editable=False)
     class Status(models.TextChoices):
         DRAFT = "draft", "草稿"
         PENDING_REVIEW = "pending_review", "待审核"

@@ -1,5 +1,13 @@
 PERMISSION_GROUPS = (
     {
+        "key": "content",
+        "label": "内容审核",
+        "permissions": (
+            ("content.review.view", "查看内容审核（全平台）"),
+            ("content.review.manage", "复核、下架与恢复内容（全平台）"),
+        ),
+    },
+    {
         "key": "overview",
         "label": "运营总览",
         "permissions": (

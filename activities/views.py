@@ -191,16 +191,17 @@ class ActivityDetailView(APIView):
             Activity.Status.CANCELLED,
             Activity.Status.FAILED_TO_FORM,
         )
-        visibility = Q(status__in=visible_statuses)
+        visibility = Q(status__in=visible_statuses, content_hidden=False)
         if request.user.is_authenticated:
             visibility |= Q(organizer=request.user)
+            visibility |= Q(participations__user=request.user, status__in=visible_statuses)
         activity = get_object_or_404(
             with_participant_count(
                 Activity.objects.select_related(
                     "category", "organizer", "organizer__provider_profile", "cover",
                     "settlement",
                 ).prefetch_related("tags")
-            ).filter(visibility),
+            ).filter(visibility).distinct(),
             pk=pk,
         )
         return Response(

@@ -2098,6 +2098,8 @@ def build_quote(service: ProviderService, duration_minutes: int, distance_km: De
 
 
 def validate_booking(service: ProviderService, starts_at, duration_minutes: int):
+    if service.content_hidden or service.provider.content_hidden:
+        raise ValidationError({"service_id": "服务暂不可预约，请选择其他达人。"})
     from locations.discovery import require_open_city
     require_open_city(service.provider.service_city_code)
     now = timezone.now()

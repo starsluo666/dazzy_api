@@ -2,6 +2,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from moderation.services import ensure_approved
 from rest_framework.exceptions import ValidationError
 
 from accounts.models import User
@@ -105,6 +106,7 @@ def review_activity(*, activity_id, decision, reason, actor, access, request):
     now = timezone.now()
     if decision == "approve":
         tags = list(activity.tags.all()) or ([activity.category] if activity.category_id else [])
+        ensure_approved("activity", activity)
         activity.city_code, activity.city_name = require_open_city(activity.city_code, field="city_code")
         if not tags:
             raise ValidationError({"decision": "活动未配置标签，不能通过审核。"})
@@ -546,6 +548,7 @@ def review_provider_application(
     before = {"status": profile.status, "rejection_reason": profile.rejection_reason}
     categories = []
     if decision == "approve":
+        ensure_approved("provider", profile)
         profile.service_city_code, profile.service_city_name = require_open_city(profile.service_city_code)
         categories = list(
             ServiceCategory.objects.filter(
@@ -641,6 +644,7 @@ def _validate_service_revision_for_approval(revision):
 
 
 def _apply_service_revision(revision, *, actor, now):
+    ensure_approved("service_revision", revision)
     _validate_service_revision_for_approval(revision)
     service = revision.service
     if service is None:
@@ -653,6 +657,8 @@ def _apply_service_revision(revision, *, actor, now):
                 "estimated_duration_minutes": revision.estimated_duration_minutes,
                 "description": revision.description,
                 "is_active": True,
+                "content_hidden": False,
+                "content_hidden_review": None,
             },
         )
         revision.service = service
@@ -663,6 +669,8 @@ def _apply_service_revision(revision, *, actor, now):
         service.estimated_duration_minutes = revision.estimated_duration_minutes
         service.description = revision.description
         service.is_active = True
+        service.content_hidden = False
+        service.content_hidden_review = None
         service.save()
     revision.status = ProviderServiceRevision.Status.APPROVED
     revision.reviewed_at = now
@@ -715,10 +723,13 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
         ):
             raise ValidationError({"decision": "实名认证姓名与入驻申请姓名不一致。"})
         from providers.identity_verification import require_verified_check
+        ensure_approved("profile_revision", profile_revision)
         require_verified_check(profile)
         from locations.discovery import require_open_city
         profile_revision.service_city_code, profile_revision.service_city_name = require_open_city(profile_revision.service_city_code)
         profile.display_name = profile_revision.display_name
+        profile.content_hidden = False
+        profile.content_hidden_review = None
         profile.bio = profile_revision.bio
         profile.lifestyle_photo = profile_revision.lifestyle_photo
         from providers.media import apply_revision_gallery
@@ -797,6 +808,8 @@ def review_provider_onboarding(*, profile_id, decision, reason, actor, access, r
 
 @transaction.atomic
 def review_provider_profile_revision(*, revision_id, decision, reason, actor, access, request):
+    provider_id = ProviderProfileRevision.objects.filter(pk=revision_id).values_list("provider_id", flat=True).first()
+    ProviderProfile.objects.select_for_update().filter(pk=provider_id).first()
     queryset = ProviderProfileRevision.objects.select_for_update().select_related(
         "provider__user", "lifestyle_photo"
     )
@@ -810,6 +823,9 @@ def review_provider_profile_revision(*, revision_id, decision, reason, actor, ac
     now = timezone.now()
     if decision == "approve":
         profile = revision.provider
+        ensure_approved("profile_revision", revision)
+        profile.content_hidden = False
+        profile.content_hidden_review = None
         from locations.discovery import require_open_city
         revision.service_city_code, revision.service_city_name = require_open_city(revision.service_city_code)
         for field in (
@@ -855,6 +871,8 @@ def review_provider_profile_revision(*, revision_id, decision, reason, actor, ac
 
 @transaction.atomic
 def review_provider_service_revision(*, revision_id, decision, reason, actor, access, request):
+    provider_id = ProviderServiceRevision.objects.filter(pk=revision_id).values_list("provider_id", flat=True).first()
+    ProviderProfile.objects.select_for_update().filter(pk=provider_id).first()
     queryset = ProviderServiceRevision.objects.select_for_update(of=("self",)).select_related(
         "provider__user", "category", "service"
     )
@@ -1267,6 +1285,8 @@ def moderate_provider_order_review(
     }
     reason = reason.strip()
     update_fields = ["updated_at"]
+    if action in ("approve", "restore"):
+        ensure_approved("review", review)
     if action in ("approve", "reject"):
         if review.audit_status != ProviderOrderReview.AuditStatus.PENDING:
             raise ValidationError("该评价已经审核，不能重复审核。")

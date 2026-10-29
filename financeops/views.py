@@ -12,6 +12,7 @@ from orders.models import ProviderBalancePaymentPool
 from .models import FinanceRecoveryCase as Case
 from .recovery import action, create_case, target
 from .watchdog import health
+from .readiness import readiness
 
 
 def access_for(user, permission="finance.recovery.view"):
@@ -131,3 +132,11 @@ class PaymentJobHealthView(APIView):
     def get(self, request):
         access_for(request.user)
         return Response({"data": {"items": health()}})
+
+
+class PaymentReadinessView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access_for(request.user)
+        return Response({"data": readiness()}, headers={"Cache-Control": "no-store"})

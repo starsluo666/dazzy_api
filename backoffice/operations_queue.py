@@ -58,6 +58,14 @@ def refund_attention(queryset, task_type, now):
 def queues(access, *, now=None):
     now = now or timezone.now()
     result = []
+    if access.all_data and permitted(access, "content.review.view"):
+        from moderation.models import ContentReview
+        result.append(Queue(
+            "content_review", "内容待复核", "review",
+            ContentReview.objects.filter(is_current=True).filter(
+                Q(status="manual") | Q(status__in=("queued", "processing"), created_at__lte=now - timedelta(minutes=15))
+            ), "content_reviews", "public_id", version=Cast("revision", CharField()), hours=4,
+        ))
     if access.all_data and permitted(access, "finance.recovery.view"):
         from financeops.models import FinanceRecoveryCase, PaymentJobHeartbeat
         from financeops.watchdog import health

@@ -43,6 +43,7 @@ def resolve_admin_access(user) -> AdminAccess:
         permissions.discard("asset.view")
         permissions.discard("asset.manage")
     if not all_data:
+        permissions.difference_update({"content.review.view", "content.review.manage"})
         permissions.difference_update({"finance.recovery.view", "finance.recovery.manage", "finance.recovery.review"})
         permissions.difference_update({"reconciliation.view", "reconciliation.manage", "reconciliation.review"})
         permissions.difference_update({"provider_invite.view", "provider_invite.manage",

@@ -100,6 +100,8 @@ def submit_provider_application(*, user) -> ProviderProfile:
             "updated_at",
         )
     )
+    from moderation.services import submit
+    submit("provider", profile)
     return profile
 
 
@@ -180,6 +182,8 @@ def submit_provider_profile_revision(*, provider: ProviderProfile, data: dict) -
         ),
     )
     save_revision_gallery(revision, assets)
+    from moderation.services import submit
+    submit("profile_revision", revision)
     maybe_submit_provider_onboarding(provider=locked)
     return revision
 
@@ -225,6 +229,8 @@ def submit_provider_service_revision(
         ),
         description=data.get("description", service.description if service else "").strip(),
     )
+    from moderation.services import submit
+    submit("service_revision", revision)
     maybe_submit_provider_onboarding(provider=locked)
     return revision
 

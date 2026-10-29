@@ -363,6 +363,11 @@ class AvatarUploadView(PublicImageUploadView):
                 .first()
             )
         asset = self.create_asset(request)
+        if settings.CONTENT_REVIEW_ENABLED:
+            from moderation.services import submit
+            review = submit("avatar", request.user, candidate=asset.pk)
+            return Response({"data": {"id": str(asset.pk), "url": build_media_url(asset.object_key),
+                                      "review_status": review.status, "message": "头像已提交审核"}}, status=201)
         request.user.avatar_object_key = asset.object_key
         request.user.save(update_fields=("avatar_object_key",))
         if old_asset:

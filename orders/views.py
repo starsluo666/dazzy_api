@@ -144,6 +144,8 @@ class ProviderOrderListCreateView(APIView):
                 .get(pk=service.provider_id)
             )
             # Configuration may change during the route lookup above.
+            if provider.content_hidden or not service.__class__.objects.filter(pk=service.pk, content_hidden=False).exists():
+                raise ValidationError({"service_id": "服务暂不可预约，请选择其他达人。"})
             from locations.discovery import require_open_city
             require_open_city(provider.service_city_code)
             ensure_booking_within_schedule(
@@ -957,6 +959,8 @@ class ProviderOrderReviewView(ProviderOrderDetailView):
             **data,
         )
         review.images.set(images)
+        from moderation.services import submit
+        submit("review", review)
         order.status = ProviderOrder.Status.COMPLETED
         order.save(update_fields=("status", "updated_at"))
         cancel_provider_order_review_timeout(order_no, "customer_reviewed")

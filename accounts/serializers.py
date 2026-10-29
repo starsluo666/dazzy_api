@@ -1,6 +1,7 @@
 import re
 
 from django.contrib.auth import authenticate, password_validation
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
@@ -44,6 +45,26 @@ def validate_password(value: str) -> str:
 
 class UserSerializer(serializers.ModelSerializer):
     avatar_url = serializers.SerializerMethodField()
+    content_reviews = serializers.SerializerMethodField()
+
+    def get_content_reviews(self, obj):
+        from moderation.targets import user_status
+        return user_status(obj)
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        instance = User.objects.select_for_update().get(pk=instance.pk)
+        if settings.CONTENT_REVIEW_ENABLED and "nickname" in validated_data:
+            from moderation.services import submit
+            from moderation.models import ContentReview
+            nickname = validated_data.pop("nickname")
+            # Submitting the old public name also invalidates a previous pending change.
+            if nickname != instance.nickname or ContentReview.objects.filter(
+                kind="nickname", target_id=instance.pk, is_current=True,
+                status__in=("manual", "queued", "processing"),
+            ).exists():
+                submit("nickname", instance, candidate=nickname)
+        return super().update(instance, validated_data)
 
     def validate_gender(self, value):
         if value not in (User.Gender.MALE, User.Gender.FEMALE):
@@ -54,7 +75,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             "public_id", "phone", "nickname", "gender", "birth_date", "avatar_url",
-            "account_status",
+            "account_status", "content_reviews",
         )
         read_only_fields = ("public_id", "phone", "avatar_url", "account_status")
 

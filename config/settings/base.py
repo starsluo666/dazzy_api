@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     "wallets.apps.WalletsConfig",
     "reconciliation.apps.ReconciliationConfig",
     "financeops.apps.FinanceopsConfig",
+    "moderation.apps.ModerationConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -111,6 +112,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ("json",)
 CELERY_TIMEZONE = "Asia/Shanghai"
 CELERY_BEAT_SCHEDULE = {
+    "process-content-reviews": {
+        "task": "moderation.process_pending",
+        "schedule": 30.0,
+    },
     "reconcile-daily-channel-bills": {
         "task": "reconciliation.daily_bills",
         "schedule": 1800.0,
@@ -227,6 +232,16 @@ SMS_CODE_MAX_ATTEMPTS = int(os.getenv("SMS_CODE_MAX_ATTEMPTS", "5"))
 SMS_PHONE_DAILY_LIMIT = int(os.getenv("SMS_PHONE_DAILY_LIMIT", "10"))
 SMS_DEVELOPMENT_CODE = os.getenv("SMS_DEVELOPMENT_CODE", "123456")
 TENCENT_SMS_ENABLED = os.getenv("TENCENT_SMS_ENABLED", "false").lower() == "true"
+# Public UGC only. The rollout gate is independent of billable machine scanning.
+CONTENT_REVIEW_ENABLED = os.getenv("CONTENT_REVIEW_ENABLED", "true").lower() == "true"
+CONTENT_REVIEW_DAILY_LIMIT = max(1, int(os.getenv("CONTENT_REVIEW_DAILY_LIMIT", "50")))
+TENCENT_CONTENT_REVIEW_ENABLED = os.getenv("TENCENT_CONTENT_REVIEW_ENABLED", "false").lower() == "true"
+TENCENT_CONTENT_REVIEW_SECRET_ID = os.getenv("TENCENT_CONTENT_REVIEW_SECRET_ID", "").strip()
+TENCENT_CONTENT_REVIEW_SECRET_KEY = os.getenv("TENCENT_CONTENT_REVIEW_SECRET_KEY", "").strip()
+TENCENT_CONTENT_REVIEW_REGION = os.getenv("TENCENT_CONTENT_REVIEW_REGION", "ap-guangzhou").strip()
+TENCENT_CONTENT_REVIEW_TEXT_BIZ_TYPE = os.getenv("TENCENT_CONTENT_REVIEW_TEXT_BIZ_TYPE", "").strip()
+TENCENT_CONTENT_REVIEW_IMAGE_BIZ_TYPE = os.getenv("TENCENT_CONTENT_REVIEW_IMAGE_BIZ_TYPE", "").strip()
+TENCENT_CONTENT_REVIEW_VIDEO_BIZ_TYPE = os.getenv("TENCENT_CONTENT_REVIEW_VIDEO_BIZ_TYPE", "").strip()
 TENCENT_SMS_SECRET_ID = os.getenv("TENCENT_SMS_SECRET_ID", "").strip()
 TENCENT_SMS_SECRET_KEY = os.getenv("TENCENT_SMS_SECRET_KEY", "").strip()
 TENCENT_SMS_SDK_APP_ID = os.getenv("TENCENT_SMS_SDK_APP_ID", "").strip()
