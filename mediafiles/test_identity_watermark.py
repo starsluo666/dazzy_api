@@ -103,6 +103,20 @@ class IdentityWatermarkUploadTests(TestCase):
         data.update(kwargs)
         return self.client.post(self.url, data)
 
+    @override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+    def test_identity_uploads_skip_content_queue_even_when_public_scan_is_enabled(self):
+        from moderation.models import ContentReview
+        with patch("moderation.services.submit", side_effect=AssertionError("No content submission")), \
+                patch("moderation.gateway.detect_image", side_effect=AssertionError("No public scan")):
+            for kind in ("identity_front_photo", "identity_back_photo", "identity_face_photo"):
+                response = self.upload(kind)
+                self.assertEqual(response.status_code, 201, response.data)
+                asset = MediaAsset.objects.get(pk=response.data["data"]["id"])
+                self.assertEqual(asset.scope, MediaAsset.Scope.PRIVATE)
+                self.assertEqual(asset.category, MediaAsset.Category.IDENTITY)
+        self.assertFalse(ContentReview.objects.filter(owner=self.user).exists())
+        self.public_upload.assert_not_called()
+
     def test_front_back_and_legacy_uploads_store_only_watermarked_private_bytes(self):
         for kind in ("identity_front_photo", "identity_back_photo", None):
             with self.subTest(kind=kind):

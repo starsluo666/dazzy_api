@@ -1,7 +1,8 @@
-"""Publish the bundled avatar collection once; never change existing users."""
+"""Publish bundled avatars; optionally fill empty avatars without replacing existing ones."""
 
 import hashlib
 from pathlib import Path
+from secrets import choice
 from uuid import UUID
 
 from django.conf import settings
@@ -21,7 +22,7 @@ from mediafiles.services import upload_public_file
 
 
 class Command(BaseCommand):
-    help = "发布 6 张默认头像至 COS 和资源素材库，仅供之后注册的新用户随机使用。"
+    help = "发布默认头像至 COS 和资源素材库，供之后注册的新用户随机使用。"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -29,6 +30,47 @@ class Command(BaseCommand):
             help="素材归属账号 public_id：有效超级管理员或有素材管理权限的平台后台成员。",
         )
         parser.add_argument("--dry-run", action="store_true", help="仅校验和预览，不上传、不写数据库。")
+        parser.add_argument(
+            "--fill-missing", action="store_true",
+            help="另为正常普通账号补齐空头像，不覆盖已有头像或正在审核的头像。",
+        )
+
+    @staticmethod
+    def empty_avatar_users():
+        from moderation.models import ContentReview
+        pending = ContentReview.objects.filter(
+            kind="avatar", is_current=True, status__in=("queued", "processing", "manual"),
+        ).values("owner_id")
+        return User.objects.filter(
+            is_active=True, account_status=User.AccountStatus.ACTIVE,
+            is_staff=False, is_superuser=False, avatar_object_key="",
+        ).exclude(backoffice_memberships__isnull=False).exclude(pk__in=pending)
+
+    def fill_missing(self):
+        from moderation.models import ContentReview
+        keys = list(MediaAsset.objects.filter(
+            object_key__in=default_avatar_keys(), scope=MediaAsset.Scope.PUBLIC,
+            category=MediaAsset.Category.OPERATIONS_IMAGE, status=MediaAsset.Status.UPLOADED,
+        ).values_list("object_key", flat=True))
+        if not keys:
+            return 0
+        count = 0
+        for user_id in self.empty_avatar_users().values_list("pk", flat=True).iterator(chunk_size=200):
+            # Same lock as custom avatar submission; do not invalidate a pending change.
+            with transaction.atomic():
+                user = User.objects.select_for_update().get(pk=user_id)
+                if (user.avatar_object_key or not user.is_active or user.is_staff or user.is_superuser
+                        or user.account_status != User.AccountStatus.ACTIVE
+                        or user.backoffice_memberships.exists()
+                        or ContentReview.objects.filter(
+                            owner=user, kind="avatar", is_current=True,
+                            status__in=("queued", "processing", "manual"),
+                        ).exists()):
+                    continue
+                user.avatar_object_key = choice(keys)
+                user.save(update_fields=("avatar_object_key",))
+                count += 1
+        return count
 
     @staticmethod
     def find_owner(owner_id):
@@ -91,6 +133,8 @@ class Command(BaseCommand):
         if options["dry_run"]:
             for path, key, _, size, asset in prepared:
                 self.stdout.write(f"{'已发布' if asset else '待发布'} {path.name} ({size} bytes) → {key}")
+            if options["fill_missing"]:
+                self.stdout.write(f"待补齐空头像账号：{self.empty_avatar_users().count()} 个；试运行不修改账号。")
             return
 
         uploaded = []
@@ -121,6 +165,8 @@ class Command(BaseCommand):
                         "uploaded_at": timezone.now(),
                     },
                 )
+        filled = self.fill_missing() if options["fill_missing"] else 0
+        detail = f"本次补齐空头像 {filled} 个账号。" if options["fill_missing"] else "未修改任何已有用户。"
         self.stdout.write(self.style.SUCCESS(
-            f"默认头像已就绪：共 {len(prepared)} 张，本次上传 {len(uploaded)} 张；未修改任何已有用户。"
+            f"默认头像已就绪：共 {len(prepared)} 张，本次上传 {len(uploaded)} 张；{detail}"
         ))

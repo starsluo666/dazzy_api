@@ -8,7 +8,10 @@ from django.conf import settings
 from .models import MediaAsset
 
 
-DEFAULT_AVATAR_NAMES = ("cat", "dog", "bear", "rabbit", "panda", "otter")
+DEFAULT_AVATAR_NAMES = (
+    "cat", "dog", "bear", "rabbit", "panda", "otter",
+    "fox", "koala", "penguin", "capybara",
+)
 
 
 def default_avatar_keys() -> tuple[str, ...]:

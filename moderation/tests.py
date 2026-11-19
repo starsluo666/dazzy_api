@@ -74,17 +74,15 @@ class ContentWorkflowTests(TestCase):
     def setUp(self):
         fixture(self)
 
-    def test_nickname_is_staged_and_only_published_after_review(self):
+    def test_nickname_is_immediate_and_does_not_enter_manual_review(self):
         self.client.force_authenticate(self.user)
         response = self.client.patch("/api/v1/users/me/", {"nickname": "新昵称"}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["data"]["nickname"], "原昵称")
-        self.assertEqual(response.data["data"]["content_reviews"][0]["status"], "manual")
-        review = Review.objects.get(kind="nickname")
-        decide(review, self.admin)
+        self.assertEqual(response.data["data"]["nickname"], "新昵称")
+        self.assertEqual(response.data["data"]["content_reviews"], [])
+        self.assertFalse(Review.objects.filter(kind="nickname").exists())
         self.user.refresh_from_db()
         self.assertEqual(self.user.nickname, "新昵称")
-        self.assertEqual(review.events.count(), 2)
 
     def test_identical_submission_is_idempotent_and_replacement_invalidates_old(self):
         first = services.submit("nickname", self.user, candidate="第一次昵称")

@@ -38,12 +38,45 @@ class DefaultAvatarTests(TestCase):
         user = User.objects.create_user(phone="13977005101")
         self.assertEqual(user.avatar_object_key, "")
 
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file", return_value="etag")
+    def test_fill_missing_only_fills_empty_active_users_and_is_stable(self, upload):
+        from moderation.models import ContentReview
+        empty = User.objects.create_user(phone="13977006101")
+        custom = User.objects.create_user(phone="13977006102", avatar_object_key="custom/photo.webp")
+        suspended = User.objects.create_user(phone="13977006103", account_status="suspended")
+        pending = User.objects.create_user(phone="13977006104")
+        ContentReview.objects.create(
+            kind="avatar", target_id=pending.pk, owner=pending, fingerprint="x" * 64,
+            snapshot={}, status="manual",
+        )
+        self.publish(fill_missing=True)
+        empty.refresh_from_db()
+        first = empty.avatar_object_key
+        self.assertIn(first, default_avatar_keys())
+        self.publish(fill_missing=True)
+        for user in (empty, custom, suspended, pending, self.owner):
+            user.refresh_from_db()
+        self.assertEqual(empty.avatar_object_key, first)
+        self.assertEqual(custom.avatar_object_key, "custom/photo.webp")
+        self.assertEqual(suspended.avatar_object_key, "")
+        self.assertEqual(pending.avatar_object_key, "")
+        self.assertEqual(self.owner.avatar_object_key, "")
+        self.assertEqual(upload.call_count, len(DEFAULT_AVATAR_NAMES))
+
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file")
+    def test_fill_missing_dry_run_never_changes_users_or_uploads(self, upload):
+        user = User.objects.create_user(phone="13977006105")
+        self.publish(dry_run=True, fill_missing=True)
+        user.refresh_from_db()
+        self.assertEqual(user.avatar_object_key, "")
+        upload.assert_not_called()
+
     def test_assignment_is_random_once_and_persisted(self):
         keys = default_avatar_keys()
         for index in range(len(keys)):
             self.asset(index)
         with patch("mediafiles.default_avatars.choice", side_effect=keys) as choose:
-            users = [User.objects.create_user(phone=f"1397700520{i}") for i in range(6)]
+            users = [User.objects.create_user(phone=f"139770052{i:02d}") for i in range(len(keys))]
         self.assertEqual({user.avatar_object_key for user in users}, set(keys))
         for user in users:
             stored = user.avatar_object_key
@@ -51,7 +84,7 @@ class DefaultAvatarTests(TestCase):
             user.save(update_fields=("nickname",))
             user.refresh_from_db()
             self.assertEqual(user.avatar_object_key, stored)
-        self.assertEqual(choose.call_count, 6)
+        self.assertEqual(choose.call_count, len(keys))
         self.assertEqual(set(choose.call_args.args[0]), set(keys))
 
     def test_preserves_explicit_avatar_and_blank(self):
@@ -75,14 +108,28 @@ class DefaultAvatarTests(TestCase):
     def test_publication_is_idempotent_and_does_not_backfill(self, upload):
         old_user = User.objects.create_user(phone="13977005401")
         self.publish()
-        self.assertEqual(upload.call_count, 6)
-        self.assertEqual(MediaAsset.objects.count(), 6)
+        self.assertEqual(upload.call_count, len(DEFAULT_AVATAR_NAMES))
+        self.assertEqual(MediaAsset.objects.count(), len(DEFAULT_AVATAR_NAMES))
         self.publish()
-        self.assertEqual(upload.call_count, 6)
+        self.assertEqual(upload.call_count, len(DEFAULT_AVATAR_NAMES))
         old_user.refresh_from_db()
         self.assertEqual(old_user.avatar_object_key, "")
         user = User.objects.create_user(phone="13977005402")
         self.assertIn(user.avatar_object_key, default_avatar_keys())
+
+    @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file", return_value="etag")
+    def test_expanding_pool_uploads_only_new_four_and_preserves_original_records(self, upload):
+        module = "mediafiles.management.commands.publish_default_avatars"
+        with patch(f"{module}.DEFAULT_AVATAR_NAMES", DEFAULT_AVATAR_NAMES[:6]), \
+                patch(f"{module}.default_avatar_keys", return_value=default_avatar_keys()[:6]):
+            self.publish()
+        self.assertEqual(upload.call_count, 6)
+        original = list(MediaAsset.objects.order_by("pk").values_list("pk", "object_key", "checksum_sha256"))
+        self.publish()
+        self.assertEqual(upload.call_count, len(DEFAULT_AVATAR_NAMES))
+        for pk, key, checksum in original:
+            asset = MediaAsset.objects.get(pk=pk)
+            self.assertEqual((asset.object_key, asset.checksum_sha256), (key, checksum))
 
     @patch("mediafiles.management.commands.publish_default_avatars.upload_public_file")
     def test_dry_run_has_no_side_effects(self, upload):
@@ -138,8 +185,8 @@ class DefaultAvatarTests(TestCase):
         self.owner.save(update_fields=("is_superuser", "is_staff"))
         call_command("grant_platform_admin", self.owner.phone, stdout=StringIO())
         self.publish()
-        self.assertEqual(upload.call_count, 6)
-        self.assertEqual(MediaAsset.objects.filter(owner=self.owner).count(), 6)
+        self.assertEqual(upload.call_count, len(DEFAULT_AVATAR_NAMES))
+        self.assertEqual(MediaAsset.objects.filter(owner=self.owner).count(), len(DEFAULT_AVATAR_NAMES))
         self.owner.refresh_from_db()
         self.assertFalse(self.owner.is_superuser)
         self.assertFalse(self.owner.is_staff)
@@ -148,8 +195,8 @@ class DefaultAvatarTests(TestCase):
     def test_explicit_owner_supports_platform_asset_manager(self, upload):
         user, _member = self.platform_owner()
         self.publish(owner=str(user.public_id))
-        self.assertEqual(upload.call_count, 6)
-        self.assertEqual(MediaAsset.objects.filter(owner=user).count(), 6)
+        self.assertEqual(upload.call_count, len(DEFAULT_AVATAR_NAMES))
+        self.assertEqual(MediaAsset.objects.filter(owner=user).count(), len(DEFAULT_AVATAR_NAMES))
         user.refresh_from_db()
         self.assertFalse(user.is_superuser)
 

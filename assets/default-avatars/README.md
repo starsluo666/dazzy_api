@@ -1,8 +1,8 @@
 # 注册默认头像
 
-6 张同系列动物头像：猫、狗、熊、兔、熊猫、水獭。由内置 image_gen 生成，
-完整提示词见 [prompts.json](prompts.json)。线上文件在 `v1/`：256×256 WebP，
-每张约 3–6 KB。原始 PNG 交付在主工作区 `design-assets/default-avatars-20261007/originals/`。
+10 张同系列动物头像：猫、狗、熊、兔、熊猫、水獭、狐狸、考拉、企鹅、水豚。由内置 image_gen 生成，
+提示词见 [原 6 张](prompts.json) 和 [新增 4 张](prompts-20261119.json)。线上文件在 `v1/`：256×256 WebP，
+每张约 3–6 KB。原始 PNG 在主工作区 `design-assets/default-avatars-20261007/originals/`、`design-assets/default-avatars-20261119/originals/`。
 
 ## 部署后首次发布
 
@@ -21,6 +21,18 @@ sudo bash ./deploy-docker.sh manage publish_default_avatars
 发布会上传 COS 并登记到「运营配置 → 资源素材」；所有上传完成后才启用新素材。
 可重复执行，已发布且内容一致的图片不重复上传。已有同名但内容或状态不一致的记录会报错，
 不会覆盖正在使用的对象。无需数据库迁移，不修改历史用户，也不创建测试账号。
+
+清空数据库会清掉发布登记，即使 COS 原文件还在，也需要重新运行此命令恢复默认头像池。
+已发布原 6 张时重新执行，仅上传新增的 4 张，已有默认头像保持原图案。
+如需给头像为空的正常普通账号（含达人用户）补齐默认头像，可显式执行：
+
+```bash
+sudo bash ./deploy-docker.sh manage publish_default_avatars --fill-missing --dry-run
+sudo bash ./deploy-docker.sh manage publish_default_avatars --fill-missing
+```
+
+补齐只处理空头像，跳过封禁账号、后台账号和正在审核自定义头像的账号；锁定用户后再次校验，避免覆盖并发上传的头像。
+已存在的默认或自定义头像不变。新注册用户默认昵称为“用户＋手机号后四位”，通过统一创建入口兜底；昵称不随登录或换绑手机号变化。
 
 若提示“未找到可用的素材归属账号”，检查后台成员、所属平台组织是否启用、
 用户账号是否正常，以及当前角色是否有素材管理权限。旧版命令仅识别

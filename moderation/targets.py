@@ -190,7 +190,11 @@ def publish_candidate(review, obj):
         if not obj.is_active or obj.account_status != "active":
             raise ValidationError("账号当前不可发布新资料。")
         field = "nickname" if review.kind == "nickname" else "avatar_object_key"
-        setattr(obj, field, review.snapshot["values"][field])
+        value = review.snapshot["values"][field]
+        if review.kind == "nickname":
+            from accounts.nicknames import validate_nickname
+            value = validate_nickname(value)
+        setattr(obj, field, value)
         obj.save(update_fields=(field,))
 
 
@@ -254,6 +258,6 @@ def user_status(user):
             "submitted_at": row.created_at,
         }
         for row in Review.objects.filter(
-            owner=user, kind__in=("nickname", "avatar"), is_current=True
+            owner=user, kind="avatar", is_current=True
         )
     ]

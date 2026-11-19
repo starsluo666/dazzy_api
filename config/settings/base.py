@@ -235,6 +235,10 @@ TENCENT_SMS_ENABLED = os.getenv("TENCENT_SMS_ENABLED", "false").lower() == "true
 # Public UGC only. The rollout gate is independent of billable machine scanning.
 CONTENT_REVIEW_ENABLED = os.getenv("CONTENT_REVIEW_ENABLED", "true").lower() == "true"
 CONTENT_REVIEW_DAILY_LIMIT = max(1, int(os.getenv("CONTENT_REVIEW_DAILY_LIMIT", "50")))
+NICKNAME_EXTRA_BLOCKED_WORDS = tuple(
+    word.strip() for word in os.getenv("NICKNAME_EXTRA_BLOCKED_WORDS", "").replace("，", ",").split(",")
+    if word.strip()
+)
 TENCENT_CONTENT_REVIEW_ENABLED = os.getenv("TENCENT_CONTENT_REVIEW_ENABLED", "false").lower() == "true"
 TENCENT_CONTENT_REVIEW_SECRET_ID = os.getenv("TENCENT_CONTENT_REVIEW_SECRET_ID", "").strip()
 TENCENT_CONTENT_REVIEW_SECRET_KEY = os.getenv("TENCENT_CONTENT_REVIEW_SECRET_KEY", "").strip()

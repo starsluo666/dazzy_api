@@ -8,6 +8,7 @@ class UserManager(BaseUserManager):
     def create_user(self, phone: str, password: str | None = None, **extra_fields):
         if not phone:
             raise ValueError("手机号不能为空")
+        extra_fields.setdefault("nickname", f"用户{phone[-4:]}")
         # Historical migration models must not query today's media schema.
         # Explicit avatar values (including an intentionally empty one) are preserved.
         if "avatar_object_key" not in extra_fields and self.model._meta.apps is apps:

@@ -14,6 +14,23 @@ from .models import ContentReview as Review, ContentReviewItem as Item
 
 
 @transaction.atomic
+def retire_nickname_reviews(user):
+    """Caller holds the user lock, matching worker publication lock order."""
+    for review in Review.objects.select_for_update().filter(
+        kind="nickname", target_id=user.pk, is_current=True,
+    ):
+        review.is_current = False
+        review.status = "superseded"
+        review.lease_token = None
+        review.lease_until = None
+        review.next_attempt_at = None
+        review.revision += 1
+        review.reason = "昵称已通过本地校验并保存，旧审核记录不再生效。"
+        review.save()
+        targets.event(review, "superseded", note=review.reason)
+
+
+@transaction.atomic
 def submit(kind, obj, *, candidate=None, force=False):
     if not settings.CONTENT_REVIEW_ENABLED and not force:
         return None

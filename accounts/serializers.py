@@ -1,7 +1,6 @@
 import re
 
 from django.contrib.auth import authenticate, password_validation
-from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
@@ -54,16 +53,9 @@ class UserSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         instance = User.objects.select_for_update().get(pk=instance.pk)
-        if settings.CONTENT_REVIEW_ENABLED and "nickname" in validated_data:
-            from moderation.services import submit
-            from moderation.models import ContentReview
-            nickname = validated_data.pop("nickname")
-            # Submitting the old public name also invalidates a previous pending change.
-            if nickname != instance.nickname or ContentReview.objects.filter(
-                kind="nickname", target_id=instance.pk, is_current=True,
-                status__in=("manual", "queued", "processing"),
-            ).exists():
-                submit("nickname", instance, candidate=nickname)
+        if "nickname" in validated_data:
+            from moderation.services import retire_nickname_reviews
+            retire_nickname_reviews(instance)
         return super().update(instance, validated_data)
 
     def validate_gender(self, value):
@@ -83,10 +75,8 @@ class UserSerializer(serializers.ModelSerializer):
         return build_media_url(obj.avatar_object_key)
 
     def validate_nickname(self, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise serializers.ValidationError("昵称不能为空。")
-        return normalized
+        from .nicknames import validate_nickname
+        return validate_nickname(value)
 
     def validate_birth_date(self, value):
         if value and value > timezone.localdate():

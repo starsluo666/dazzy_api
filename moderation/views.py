@@ -105,6 +105,11 @@ class Filters(serializers.Serializer):
 
 
 class Register(serializers.Serializer):
+    def validate_kind(self, value):
+        if value == "nickname":
+            raise serializers.ValidationError("昵称使用敏感词自动校验，无需登记人工审核。")
+        return value
+
     kind = serializers.ChoiceField(choices=Review.Kind.choices)
     target_id = serializers.IntegerField(min_value=1)
 

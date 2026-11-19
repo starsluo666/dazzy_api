@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-11-19",
+  "tool": "built-in image_gen",
+  "size": "256x256 WebP",
+  "entries": [
+    {
+      "name": "fox",
+      "prompt": "Use case: stylized-concept. Asset type: single finished square default user avatar for a social companion app, ultimately shown at 40–80 pixels in a circle. Style: premium soft matte 3D clay and very subtle short velvety plush illustration, rounded clean forms, friendly but not infantile, simple large glossy dark eyes, tiny gentle smile, softly lit. Front-facing centered head and tiny upper shoulders, head about 65% of canvas width, entire ears and facial features safely inside a central circular crop with even generous margins. Solid pale pastel backdrop edge-to-edge, fully opaque, square. Exactly one animal; no text, letters, logos, accessories, scenery, borders, frames, watermark, collage, or mockup. Match a cohesive collection of cream cat on mint and warm brown teddy bear on peach. Subject: A friendly round red-orange fox with soft cream cheeks and muzzle, small triangular ears, pale powder-blue backdrop."
+    },
+    {
+      "name": "koala",
+      "prompt": "Use case: stylized-concept. Asset type: single finished square default user avatar for a social companion app, ultimately shown at 40–80 pixels in a circle. Style: premium soft matte 3D clay and very subtle short velvety plush illustration, rounded clean forms, friendly but not infantile, simple large glossy dark eyes, tiny gentle smile, softly lit. Front-facing centered head and tiny upper shoulders, head about 65% of canvas width, entire ears and facial features safely inside a central circular crop with even generous margins. Solid pale pastel backdrop edge-to-edge, fully opaque, square. Exactly one animal; no text, letters, logos, accessories, scenery, borders, frames, watermark, collage, or mockup. Match a cohesive collection of cream cat on mint and warm brown teddy bear on peach. Subject: A friendly round light-gray koala with soft rounded fluffy ears, broad charcoal oval nose and cream chest, pale lavender backdrop."
+    },
+    {
+      "name": "penguin",
+      "prompt": "Use case: stylized-concept. Asset type: single finished square default user avatar for a social companion app, ultimately shown at 40–80 pixels in a circle. Style: premium soft matte 3D clay and very subtle short velvety plush illustration, rounded clean forms, friendly but not infantile, simple large glossy dark eyes, tiny gentle smile, softly lit. Front-facing centered head and tiny upper shoulders, head about 65% of canvas width, entire ears and facial features safely inside a central circular crop with even generous margins. Solid pale pastel backdrop edge-to-edge, fully opaque, square. Exactly one animal; no text, letters, logos, accessories, scenery, borders, frames, watermark, collage, or mockup. Match a cohesive collection of cream cat on mint and warm brown teddy bear on peach. Subject: A friendly round charcoal-and-white baby penguin with a small warm yellow beak, tiny soft flippers at upper shoulder edge, pale butter-yellow backdrop."
+    },
+    {
+      "name": "capybara",
+      "prompt": "Use case: stylized-concept. Asset type: single finished square default user avatar for a social companion app, ultimately shown at 40–80 pixels in a circle. Style: premium soft matte 3D clay and very subtle short velvety plush illustration, rounded clean forms, friendly but not infantile, simple large glossy dark eyes, tiny gentle smile, softly lit. Front-facing centered head and tiny upper shoulders, head about 65% of canvas width, entire ears and facial features safely inside a central circular crop with even generous margins. Solid pale pastel backdrop edge-to-edge, fully opaque, square. Exactly one animal; no text, letters, logos, accessories, scenery, borders, frames, watermark, collage, or mockup. Match a cohesive collection of cream cat on mint and warm brown teddy bear on peach. Subject: A friendly light caramel capybara with a broad rounded muzzle, tiny rounded ears, dark relaxed eyes, pale sage-mint backdrop."
+    }
+  ]
+}

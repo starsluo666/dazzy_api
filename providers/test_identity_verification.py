@@ -192,6 +192,22 @@ class IdentitySubmissionTests(TransactionTestCase):
             "recognition_mode": "photo", "verification_mode": "preverified",
         }, format="json")
 
+    @override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+    def test_identity_photos_skip_content_moderation_and_still_require_manual_review(self):
+        from moderation.models import ContentReview
+        with patch("moderation.services.submit", side_effect=AssertionError("No content submission")), \
+                patch("moderation.services.ensure_approved", side_effect=AssertionError("No content gate")), \
+                patch("moderation.gateway.detect_image", side_effect=AssertionError("No content gateway")), \
+                patch("providers.identity_verification.check_identity_photo", return_value=self.result) as channel:
+            verified = self.verify_front()
+            self.assertEqual(verified.status_code, 200, verified.data)
+            submitted = self.submit_preverified()
+        self.assertEqual(submitted.status_code, 200, submitted.data)
+        self.assertEqual(submitted.data["data"]["identity_status"], "pending")
+        self.assertFalse(ContentReview.objects.filter(owner=self.user).exists())
+        channel.assert_called_once()
+        self.assertEqual(channel.call_args.kwargs["asset"].pk, self.profile.identity_front_photo_id)
+
     def test_front_only_verifies_and_fills_without_entering_review(self):
         back, selfie = self.profile.identity_back_photo, self.profile.identity_face_photo
         self.profile.identity_back_photo = self.profile.identity_face_photo = None
