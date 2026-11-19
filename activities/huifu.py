@@ -7,6 +7,8 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from accounts.account_closure import lock_active_user_for_business
+from accounts.models import User, UserFunctionRestriction
 from notifications.models import UserNotification
 from notifications.services import create_activity_notification
 from orders.huifu import (
@@ -203,6 +205,10 @@ def create_activity_huifu_payment_session(
         gateway.validate_for_payment(trade_type=trade_type)
 
     with transaction.atomic():
+        if payment_kind == "activity_publish":
+            lock_active_user_for_business(
+                User(pk=user_id), function=UserFunctionRestriction.Function.ACTIVITY_PUBLISH,
+            )
         order = _resolve_business_order(
             payment_kind=payment_kind,
             activity_id=activity_id,

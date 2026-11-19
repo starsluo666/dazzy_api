@@ -42,6 +42,7 @@ from .views import (
     AdminServiceCategoryDetailView,
     AdminServiceCategoryListView,
     AdminUserAccountActionView,
+    AdminUserFunctionActionView,
     AdminUserDetailView,
     AdminUserListView,
     AdminUserRiskActionView,
@@ -225,6 +226,11 @@ urlpatterns = [
         "users/<uuid:public_id>/account-action/",
         AdminUserAccountActionView.as_view(),
         name="backoffice-user-account-action",
+    ),
+    path(
+        "users/<uuid:public_id>/function-action/",
+        AdminUserFunctionActionView.as_view(),
+        name="backoffice-user-function-action",
     ),
     path(
         "users/<uuid:public_id>/risk-action/",

@@ -58,6 +58,41 @@ class User(AbstractUser):
         return self.nickname or self.phone
 
 
+class UserFunctionRestriction(models.Model):
+    class Function(models.TextChoices):
+        PROVIDER_ORDER = "provider_order", "达人下单"
+        ACTIVITY_PUBLISH = "activity_publish", "发布活动"
+        REVIEW = "review", "评价／评论"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="function_restrictions",
+    )
+    function = models.CharField("限制功能", max_length=32, choices=Function)
+    is_active = models.BooleanField("限制生效", default=True)
+    reason = models.CharField("限制原因", max_length=500)
+    restricted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
+        related_name="issued_function_restrictions",
+    )
+    restricted_at = models.DateTimeField(default=timezone.now)
+    restored_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="restored_function_restrictions",
+    )
+    restored_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "accounts_user_function_restriction"
+        verbose_name = "用户功能限制"
+        verbose_name_plural = verbose_name
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "function"), name="uniq_user_function_restriction",
+            ),
+        ]
+
+
 class AccountClosureRequest(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "等待注销"

@@ -5,7 +5,7 @@ from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
-from accounts.models import User
+from accounts.models import User, UserFunctionRestriction
 from accounts.serializers import UserSerializer, validate_phone
 from activities.models import (
     Activity,
@@ -814,8 +814,34 @@ class AdminUserQuerySerializer(serializers.Serializer):
 
 
 class AdminUserAccountActionSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=("restrict", "suspend", "restore"))
+    action = serializers.ChoiceField(choices=("suspend", "restore"))
     reason = serializers.CharField(min_length=2, max_length=500, trim_whitespace=True)
+
+
+class AdminUserFunctionActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=("restrict", "restore"))
+    functions = serializers.ListField(
+        child=serializers.ChoiceField(choices=UserFunctionRestriction.Function.choices),
+        allow_empty=False, max_length=len(UserFunctionRestriction.Function),
+    )
+    reason = serializers.CharField(min_length=2, max_length=500, trim_whitespace=True)
+
+    def validate_functions(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("请勿重复选择限制功能。")
+        return value
+
+
+class AdminUserFunctionRestrictionSerializer(serializers.ModelSerializer):
+    function_label = serializers.CharField(source="get_function_display")
+    restricted_by_name = serializers.SerializerMethodField()
+
+    def get_restricted_by_name(self, obj):
+        return obj.restricted_by.nickname if obj.restricted_by else ""
+
+    class Meta:
+        model = UserFunctionRestriction
+        fields = ("function", "function_label", "reason", "restricted_at", "restricted_by_name")
 
 
 class AdminUserRiskActionSerializer(serializers.Serializer):
@@ -848,6 +874,7 @@ class AdminUserRiskFlagSerializer(serializers.ModelSerializer):
 
 
 class AdminUserListSerializer(serializers.ModelSerializer):
+    function_restrictions = serializers.SerializerMethodField()
     phone_masked = serializers.SerializerMethodField()
     avatar_url = serializers.SerializerMethodField()
     gender_label = serializers.CharField(source="get_gender_display")
@@ -869,7 +896,15 @@ class AdminUserListSerializer(serializers.ModelSerializer):
             "identity", "provider_status", "provider_status_label", "risk_flag",
             "order_count", "activity_count", "browsing_count", "review_count",
             "date_joined", "last_login",
+            "function_restrictions",
         )
+
+    def get_function_restrictions(self, obj):
+        active = sorted(
+            (item for item in obj.function_restrictions.all() if item.is_active),
+            key=lambda item: item.function,
+        )
+        return AdminUserFunctionRestrictionSerializer(active, many=True).data
 
     def get_phone_masked(self, obj):
         return mask_phone(obj.phone)

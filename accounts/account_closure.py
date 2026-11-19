@@ -106,12 +106,15 @@ def process_account_closure(user_id: int, *, now=None) -> str:
     return "completed"
 
 
-def lock_active_user_for_business(user) -> User:
+def lock_active_user_for_business(user, *, function=None) -> User:
     """Serialize account closure with creation of new chargeable business."""
 
     locked_user = User.objects.select_for_update().get(pk=user.pk)
     if not locked_user.is_active or locked_user.account_status != User.AccountStatus.ACTIVE:
         raise PermissionDenied("当前账号状态不可发起新的业务。")
+    if function is not None:
+        from .restrictions import ensure_function_allowed
+        ensure_function_allowed(locked_user, function)
     return locked_user
 
 

@@ -7,6 +7,7 @@ from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from accounts.account_closure import lock_active_user_for_business
+from accounts.models import UserFunctionRestriction
 from backoffice.operation_settings import platform_operation_rules
 from config.geospatial import gcj02_to_wgs84
 from config.payment_capabilities import ensure_activity_payment_available
@@ -40,7 +41,9 @@ def create_activity_draft(*, organizer, validated_data) -> Activity:
     validated_data = dict(validated_data)
     code, name = require_open_city(validated_data.get("city_code"), field="city_code")
     validated_data.update(city_code=code, city_name=name)
-    organizer = lock_active_user_for_business(organizer)
+    organizer = lock_active_user_for_business(
+        organizer, function=UserFunctionRestriction.Function.ACTIVITY_PUBLISH,
+    )
     tags = validated_data.pop("tag_slugs", [])
     category = validated_data.pop("category_slug", None)
     if tags:
@@ -368,7 +371,9 @@ def create_activity_report(*, activity_id, reporter, reason, description):
 @transaction.atomic
 def get_or_create_publish_order(*, activity_id: int, user):
     ensure_activity_payment_available("activity_publish")
-    user = lock_active_user_for_business(user)
+    user = lock_active_user_for_business(
+        user, function=UserFunctionRestriction.Function.ACTIVITY_PUBLISH,
+    )
     activity = Activity.objects.select_for_update().filter(pk=activity_id, organizer=user).first()
     if not activity:
         raise NotFound("活动草稿不存在。")
@@ -461,6 +466,9 @@ def expire_activity_publish_payment(*, order_no: str, now=None) -> dict:
 
 @transaction.atomic
 def simulate_publish_payment(*, activity_id: int, user):
+    user = lock_active_user_for_business(
+        user, function=UserFunctionRestriction.Function.ACTIVITY_PUBLISH,
+    )
     activity = Activity.objects.select_for_update().filter(pk=activity_id, organizer=user).first()
     if not activity:
         raise NotFound("活动草稿不存在。")

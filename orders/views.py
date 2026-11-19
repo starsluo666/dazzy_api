@@ -13,6 +13,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.account_closure import lock_active_user_for_business
+from accounts.models import UserFunctionRestriction
 from backoffice.access import client_ip
 from backoffice.models import AdminAuditLog, ProviderOrderAfterSalesCase
 from backoffice.operation_settings import platform_operation_rules
@@ -137,7 +138,9 @@ class ProviderOrderListCreateView(APIView):
         # outside the database transaction. Recheck mutable scheduling state only
         # after taking the provider lock.
         with transaction.atomic():
-            customer = lock_active_user_for_business(request.user)
+            customer = lock_active_user_for_business(
+                request.user, function=UserFunctionRestriction.Function.PROVIDER_ORDER,
+            )
             provider = (
                 ProviderProfile.objects.select_for_update()
                 .select_related("user")
@@ -925,6 +928,9 @@ class ProviderOrderConfirmCompletionView(ProviderOrderDetailView):
 class ProviderOrderReviewView(ProviderOrderDetailView):
     @transaction.atomic
     def post(self, request, order_no):
+        lock_active_user_for_business(
+            request.user, function=UserFunctionRestriction.Function.REVIEW,
+        )
         order = get_object_or_404(
             ProviderOrder.objects.select_for_update().select_related("provider"),
             order_no=order_no,

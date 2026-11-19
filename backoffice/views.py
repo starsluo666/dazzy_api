@@ -90,6 +90,7 @@ from .serializers import (
     AdminServiceCategoryQuerySerializer,
     AdminServiceCategorySerializer,
     AdminUserAccountActionSerializer,
+    AdminUserFunctionActionSerializer,
     AdminUserListSerializer,
     AdminUserQuerySerializer,
     AdminUserRiskActionSerializer,
@@ -137,6 +138,7 @@ from .services import (
     change_provider_operational_status,
     correct_provider_application_name,
     change_user_account_status,
+    change_user_function_restrictions,
     change_user_risk_flag,
     create_provider_order_after_sales_case,
     moderate_provider_order_review,
@@ -192,6 +194,7 @@ def admin_user_queryset(access):
             "admin_risk_flag__marked_by",
             "admin_risk_flag__cleared_by",
         )
+        .prefetch_related("function_restrictions__restricted_by")
         .annotate(
             order_count=Count("provider_orders", distinct=True),
             activity_count=Count("organized_activities", distinct=True)
@@ -1941,6 +1944,22 @@ class AdminUserAccountActionView(APIView):
             actor=request.user,
             access=access,
             request=request,
+            **serializer.validated_data,
+        )
+        user = get_object_or_404(admin_user_queryset(access), pk=user.pk)
+        return Response({"data": AdminUserListSerializer(user).data})
+
+
+class AdminUserFunctionActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, public_id):
+        access = resolve_admin_access(request.user)
+        access.require("user.status.manage")
+        serializer = AdminUserFunctionActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = change_user_function_restrictions(
+            public_id=public_id, actor=request.user, access=access, request=request,
             **serializer.validated_data,
         )
         user = get_object_or_404(admin_user_queryset(access), pk=user.pk)

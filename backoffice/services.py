@@ -5,7 +5,7 @@ from django.utils import timezone
 from moderation.services import ensure_approved
 from rest_framework.exceptions import ValidationError
 
-from accounts.models import User
+from accounts.models import User, UserFunctionRestriction
 from activities.models import (
     Activity,
     ActivityAfterSalesCase,
@@ -1030,7 +1030,6 @@ def change_user_account_status(*, public_id, action, reason, actor, access, requ
     if user.account_status == User.AccountStatus.CLOSED:
         raise ValidationError("已注销账号不能由运营后台恢复或变更。")
     transitions = {
-        "restrict": (User.AccountStatus.ACTIVE, User.AccountStatus.RESTRICTED),
         "suspend": (
             (User.AccountStatus.ACTIVE, User.AccountStatus.RESTRICTED),
             User.AccountStatus.SUSPENDED,
@@ -1065,6 +1064,48 @@ def change_user_account_status(*, public_id, action, reason, actor, access, requ
         },
         request_id=request.headers.get("X-Request-ID", ""),
         ip_address=client_ip(request),
+    )
+    return user
+
+
+@transaction.atomic
+def change_user_function_restrictions(*, public_id, action, functions, reason, actor, access, request):
+    scoped_ids = _scoped_users(access).filter(public_id=public_id).values("pk")
+    user = get_object_or_404(
+        User.objects.select_for_update().filter(pk__in=scoped_ids), public_id=public_id,
+    )
+    if user.account_status in (User.AccountStatus.CLOSED, User.AccountStatus.CLOSURE_PENDING):
+        raise ValidationError("当前账号状态不能调整功能限制。")
+    before = sorted(user.function_restrictions.filter(is_active=True).values_list("function", flat=True))
+    now = timezone.now()
+    for function in functions:
+        if action == "restrict":
+            UserFunctionRestriction.objects.update_or_create(
+                user=user, function=function,
+                defaults={
+                    "is_active": True, "reason": reason, "restricted_by": actor,
+                    "restricted_at": now, "restored_by": None, "restored_at": None,
+                },
+            )
+        else:
+            UserFunctionRestriction.objects.filter(user=user, function=function, is_active=True).update(
+                is_active=False, restored_by=actor, restored_at=now,
+            )
+    after = sorted(user.function_restrictions.filter(is_active=True).values_list("function", flat=True))
+    audit = AdminAuditLog.objects.create(
+        actor=actor, organization=_organization(access),
+        action=f"user.function.{action}", target_type="user", target_id=str(user.public_id),
+        before={"functions": before},
+        after={"functions": after, "selected_functions": functions, "reason": reason},
+        request_id=request.headers.get("X-Request-ID", ""), ip_address=client_ip(request),
+    )
+    labels = "、".join(UserFunctionRestriction.Function(item).label for item in functions)
+    create_system_notification(
+        recipient=user, event_type=f"user_function_{action}",
+        title="账号功能限制通知" if action == "restrict" else "账号功能恢复通知",
+        content=(f"{labels}已被限制" if action == "restrict" else f"{labels}的限制已解除")
+        + "，如有疑问请联系客服。",
+        dedupe_key=f"user-function-action:{audit.pk}",
     )
     return user
 
