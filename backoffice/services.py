@@ -956,14 +956,16 @@ def correct_provider_application_name(
 
 
 @transaction.atomic
-def review_provider_identity(*, profile_id, decision, reason, actor, access, request):
+def review_provider_identity(*, profile_id, decision, reason, actor, access, request, store=False):
     queryset = ProviderProfile.objects.select_for_update().select_related("user")
     if not access.all_data:
         queryset = queryset.filter(service_city_code__in=access.city_codes)
     profile = get_object_or_404(queryset, id=profile_id)
-    if profile.status != ProviderProfile.Status.APPROVED:
+    if store and (profile.status != ProviderProfile.Status.STORE or not profile.can_manage_receiving):
+        raise ValidationError("门店收款账号不可用。")
+    if not store and profile.status != ProviderProfile.Status.APPROVED:
         raise ValidationError("仅入驻申请已通过的达人可以审核实名认证。")
-    if profile.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED:
+    if not store and profile.onboarding_status != ProviderProfile.OnboardingStatus.APPROVED:
         raise ValidationError("首次实名认证请在达人综合开通审核中处理。")
     if profile.identity_status != ProviderProfile.IdentityStatus.PENDING:
         raise ValidationError("仅认证中的实名认证可以执行审核。")
@@ -1009,9 +1011,10 @@ def review_provider_identity(*, profile_id, decision, reason, actor, access, req
     create_system_notification(
         recipient=profile.user,
         event_type=UserNotification.EventType.PROVIDER_STATUS_CHANGED,
-        title="达人实名认证已通过" if decision == "approve" else "达人实名认证未通过",
+        title=f"{'门店负责人' if store else '达人'}实名认证{'已通过' if decision == 'approve' else '未通过'}",
         content=(
-            "实名认证已通过，完善达人资料和服务后即可开启接单。"
+            ("实名认证已通过，可以开通门店收款账户。" if store
+             else "实名认证已通过，完善达人资料和服务后即可开启接单。")
             if decision == "approve"
             else f"实名认证未通过：{profile.identity_rejection_reason}。请修改后重新提交。"
         ),

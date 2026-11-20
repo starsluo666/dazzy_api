@@ -801,7 +801,7 @@ class AdminUserQuerySerializer(serializers.Serializer):
     identity = serializers.ChoiceField(
         required=False,
         default="all",
-        choices=("all", "provider", "user"),
+        choices=("all", "provider", "store", "user"),
     )
     risk = serializers.ChoiceField(
         required=False,
@@ -913,7 +913,10 @@ class AdminUserListSerializer(serializers.ModelSerializer):
         return build_media_url(obj.avatar_object_key)
 
     def get_identity(self, obj):
-        return "provider" if hasattr(obj, "provider_profile") else "user"
+        profile = getattr(obj, "provider_profile", None)
+        if profile is None:
+            return "user"
+        return "store" if profile.status == ProviderProfile.Status.STORE else "provider"
 
     def get_provider_status(self, obj):
         profile = getattr(obj, "provider_profile", None)

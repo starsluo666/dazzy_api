@@ -9,7 +9,7 @@ from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.views import APIView
 
 from config.api import paginated_response
@@ -360,13 +360,13 @@ class CurrentProviderIdentityView(PrivateProviderIdentityView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        profile = current_approved_provider(request)
+        profile = current_receiving_profile(request)
         return Response(
             {"data": ProviderIdentitySerializer(profile, context={"request": request}).data}
         )
 
     def patch(self, request):
-        profile = current_approved_provider(request)
+        profile = current_receiving_profile(request)
         serializer = ProviderIdentitySerializer(
             profile, data=request.data, partial=True, context={"request": request}
         )
@@ -385,7 +385,7 @@ class CurrentProviderIdentityVerifyView(PrivateProviderIdentityView):
 
     def post(self, request):
         from .identity_verification import verify_identity
-        profile = current_approved_provider(request)
+        profile = current_receiving_profile(request)
         serializer = ProviderIdentityVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = verify_identity(provider=profile, **serializer.validated_data)
@@ -396,9 +396,11 @@ class CurrentProviderIdentitySubmitView(PrivateProviderIdentityView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        profile = current_approved_provider(request)
+        profile = current_receiving_profile(request)
         serializer = ProviderIdentitySubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if profile.status == ProviderProfile.Status.STORE and serializer.validated_data.get("verification_mode") != "preverified":
+            raise ValidationError("请先完成身份证验真，再提交认证。")
         profile = submit_provider_identity(
             provider=profile, **serializer.validated_data,
         )
@@ -529,6 +531,13 @@ def current_approved_provider(request):
     profile = get_object_or_404(ProviderProfile.objects.select_related("user"), user=request.user)
     if profile.status != ProviderProfile.Status.APPROVED:
         raise PermissionDenied("仅审核通过的达人可以使用达人端功能。")
+    return profile
+
+
+def current_receiving_profile(request):
+    profile = get_object_or_404(ProviderProfile.objects.select_related("user"), user=request.user)
+    if not profile.can_manage_receiving or not request.user.is_active or request.user.account_status != "active":
+        raise PermissionDenied("当前账号无法管理收款资料。")
     return profile
 
 
@@ -683,7 +692,7 @@ class CurrentProviderIncomeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        provider = current_approved_provider(request)
+        provider = current_receiving_profile(request)
         today = timezone.localdate()
         month_start = _local_datetime(today.replace(day=1), time.min)
         settlements = ProviderOrderSettlement.objects.filter(
@@ -725,7 +734,10 @@ class CurrentProviderIncomeView(APIView):
             for item in settlements[:100]
         ]
         from .withdrawals import income_wallet_data
-        response = Response({"data": {"summary": summary, "items": items, "wallet": income_wallet_data(provider)}})
+        response = Response({"data": {
+            "summary": summary, "items": items, "wallet": income_wallet_data(provider),
+            "store_mode": provider.status == ProviderProfile.Status.STORE,
+        }})
         response["Cache-Control"] = "no-store, private"
         return response
 

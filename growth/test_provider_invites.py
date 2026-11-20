@@ -23,7 +23,7 @@ from mediafiles.models import MediaAsset
 from providers.models import ProviderProfile
 from providers.services import save_provider_application
 from rest_framework.exceptions import ValidationError
-from .models import Invitation, ProviderInviteConfig, ProviderInviteReward, ProviderInviteSource
+from .models import Invitation, ProviderInviteAttribution, ProviderInviteConfig, ProviderInviteReward, ProviderInviteSource
 
 
 REGISTER = "/api/v1/growth/provider-invites/register/"
@@ -118,6 +118,41 @@ class ProviderInviteTests(APITestCase):
         self.assertEqual(reward.profile.lifestyle_photo.owner_id, reward.invitee_id)
         self.assertFalse(Invitation.objects.exists())
         self.sms.assert_called_once_with(phone="13800009002", purpose="register", code="123456")
+
+    def test_sources_generate_four_character_codes_and_retry_collisions(self):
+        self.assertRegex(self.source.code, r"^[A-HJ-NP-Z2-9]{4}$")
+        replacement = next(code for code in ("A7K9", "B8M6") if code != self.source.code)
+        with patch("growth.provider_invite_models.invitation_code", return_value=replacement) as retry:
+            second = ProviderInviteSource.objects.create(
+                code=self.source.code, kind="store", name="重复随机码重试门店",
+            )
+        self.assertEqual(second.code, replacement)
+        retry.assert_called_once()
+        self.source.refresh_from_db()
+        self.assertNotEqual(self.source.code, second.code)
+
+    def test_old_links_and_new_codes_bind_the_same_source(self):
+        legacy = "ABCDEF123456"
+        self.source.legacy_code = legacy
+        self.source.save(update_fields=("legacy_code",))
+        for code in (self.source.code, legacy, self.source.code.lower()):
+            response = self.client.get(f"/api/v1/growth/provider-invites/{code}/")
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data["data"]["code"], self.source.code)
+        response = self.register(source_code=legacy)
+        self.assertEqual(response.status_code, 201, response.data)
+        reward = ProviderInviteReward.objects.get()
+        self.assertEqual(reward.source_id, self.source.pk)
+        self.assertEqual(reward.code_snapshot, self.source.code)
+        self.assertEqual(reward.profile.invitation_code, self.source.code)
+
+    def test_disabled_legacy_code_cannot_bypass_source_status(self):
+        self.source.legacy_code = "ABCDEF123456"
+        self.source.active = False
+        self.source.save(update_fields=("legacy_code", "active"))
+        self.assertEqual(self.client.get("/api/v1/growth/provider-invites/ABCDEF123456/").status_code, 400)
+        self.assertEqual(self.register(source_code="ABCDEF123456").status_code, 400)
+        self.upload.assert_not_called()
 
     def test_repeat_phone_never_rebinds_or_rewards_again(self):
         self.make_reward()
@@ -216,6 +251,7 @@ class ProviderInviteTests(APITestCase):
         self.assertEqual(self.client.post(MY).status_code, 404)
         ProviderProfile.objects.create(user=inviter, status="approved", display_name="测试达人")
         code = self.client.post(MY).data["data"]["code"]
+        self.assertRegex(code, r"^[A-HJ-NP-Z2-9]{4}$")
         self.assertEqual(self.client.post(MY).data["data"]["code"], code)
         self.client.force_authenticate(None)
         self.assertEqual(self.register(source_code=code).status_code, 201)
@@ -247,6 +283,8 @@ class ProviderInviteTests(APITestCase):
 
     def test_finance_lifecycle_and_duplicate_payment_rejected(self):
         reward = self.make_reward()
+        reward.payout_method = "manual"
+        reward.save(update_fields=("payout_method",))
         self.client.force_authenticate(self.admin)
         self.assertEqual(
             self.act(
@@ -302,13 +340,16 @@ class ProviderInviteTests(APITestCase):
         self.assertEqual(self.act(reward).status_code, 403)
         role.permissions += ["provider_invite.review"]
         role.save()
+        self.assertEqual(self.act(reward).status_code, 403)
+        role.permissions += ["provider_invite.pay"]
+        role.save()
         self.assertEqual(self.act(reward).status_code, 200)
         reward.refresh_from_db()
         self.assertEqual(
             self.act(
                 reward, "paid", transfer_reference="r", paid_at=timezone.now().isoformat()
             ).status_code,
-            403,
+            400,
         )
 
     def test_regional_wildcard_cannot_read_platform_rewards(self):
@@ -398,6 +439,8 @@ class ProviderInviteTests(APITestCase):
         second = ProviderInviteReward.objects.exclude(pk=first.pk).get()
         self.client.force_authenticate(self.admin)
         for reward in (first, second):
+            reward.payout_method = "manual"
+            reward.save(update_fields=("payout_method",))
             self.assertEqual(self.act(reward).status_code, 200)
             reward.refresh_from_db()
         self.assertEqual(
@@ -420,6 +463,57 @@ class ProviderInviteTests(APITestCase):
         )
         second.refresh_from_db()
         self.assertEqual(second.status, "approved")
+
+    def test_disabled_registration_reward_keeps_attribution_and_first_order_rule(self):
+        rule = {"enabled": True, "mode": "percentage", "amount": 0, "rate_bps": 1000}
+        self.client.force_authenticate(self.admin)
+        result = self.client.put(ADMIN + "config/", {
+            "enabled": True, "store_reward_amount": 0, "provider_reward_amount": 3000,
+            "store_registration_enabled": False, "store_first_order": rule, "revision": 1,
+        }, format="json")
+        self.assertEqual(result.status_code, 200, result.data)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.register().status_code, 201)
+        self.assertFalse(ProviderInviteReward.objects.exists())
+        attribution = ProviderInviteAttribution.objects.get()
+        self.assertEqual(attribution.source_id, self.source.pk)
+        self.assertEqual(attribution.first_order_rule, rule)
+        with self.assertRaises(ValidationError):
+            save_provider_application(user=attribution.profile.user, data={"invitation_code": "B8M6"})
+
+    def test_store_login_identity_and_rewards_stay_scoped_to_store(self):
+        endpoint = f"{ADMIN}sources/{self.source.public_id}/account/"
+        form = {"phone": "13800009019", "real_name": "测试负责人", "revision": self.source.revision}
+        self.assertEqual(self.client.post(endpoint, form, format="json").status_code, 401)
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(endpoint, form, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(self.client.post(endpoint, form, format="json").status_code, 400)
+        profile = ProviderProfile.objects.get(user__phone=form["phone"])
+        self.assertEqual(profile.status, "store")
+        self.assertFalse(profile.user.has_usable_password())
+        admin_users = "/api/v1/admin/users/"
+        stores = self.client.get(admin_users, {"identity": "store"}).data["data"]
+        self.assertEqual(stores["items"][0]["identity"], "store")
+        self.assertEqual(stores["items"][0]["public_id"], str(profile.user.public_id))
+        self.assertEqual(self.client.get(admin_users, {"identity": "provider"}).data["data"]["items"], [])
+        self.assertEqual(self.client.get(f"/api/v1/admin/providers/{profile.pk}/").status_code, 404)
+        identity = f"{ADMIN}sources/{self.source.public_id}/identity/"
+        self.assertEqual(self.client.get(identity).status_code, 200)
+        self.client.force_authenticate(profile.user)
+        api = "/api/v1/providers/me/"
+        self.assertEqual(self.client.get(api + "application/").data["data"]["status"], "store")
+        self.assertEqual(self.client.get(api + "workbench/").status_code, 403)
+        self.assertEqual(self.client.get(api + "identity/").status_code, 200)
+        self.assertEqual(self.client.post(api + "identity/submit/", {}, format="json").status_code, 400)
+        self.assertEqual(self.client.get(api + "receiving-account/").status_code, 200)
+        self.assertTrue(self.client.get(api + "income/").data["data"]["store_mode"])
+        workbench = "/api/v1/growth/provider-invites/store/me/"
+        self.assertEqual(self.client.get(workbench).data["data"]["source"]["code"], self.source.code)
+        self.assertEqual(self.client.get(identity).status_code, 403)
+        stranger = User.objects.create_user(phone="13800009018")
+        self.client.force_authenticate(stranger)
+        self.assertEqual(self.client.get(workbench).status_code, 404)
 
     def test_unpaid_rewards_block_inviter_closure_and_summary_stays_private(self):
         from accounts.account_closure import account_closure_blockers

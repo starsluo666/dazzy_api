@@ -134,7 +134,8 @@ def _locked_pool(scope):
     pool = ProviderBalancePaymentPool.objects.select_for_update().get(pk=pool.pk)
     if pool.hold_reason:
         raise DistributionBlocked("wallet_pool_hold")
-    if pool.payments.filter(funds_released=False).exists():
+    if (pool.payments.filter(funds_released=False).exists()
+            or pool.invite_payments.filter(funds_released=False).exists()):
         raise DistributionBlocked("wallet_busy")
     return pool
 

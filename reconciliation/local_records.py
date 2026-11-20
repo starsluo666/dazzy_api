@@ -2,6 +2,7 @@
 from django.db.models import Q, Min
 
 from activities.models import ActivityHuifuPaymentOrder, ActivityHuifuRefundOrder
+from growth.models import ProviderInvitePayout
 from orders.distributions import _scope
 from orders.models import ProviderOrderPaymentOrder, ProviderOrderRefundOrder, ProviderOrderDistribution
 from providers.models import ProviderWithdrawal
@@ -72,6 +73,20 @@ def records_for(config, day, bill_type, keys):
                 add(r, "refund", refund.refund_no, refund.external_refund_amount, status(refund.status),
                     at_day(refund.refunded_at), r.gateway_refund_no)
     if bill_type in ("TRADE_BILL", "SPLIT_BILL"):
+        invite_payments = ProviderInvitePayout.objects.filter(snapshot__scope=_scope(config)).filter(
+            Q(reward__paid_at__date=day) | seen_request,
+        ).select_related("reward")
+        for payout in invite_payments.iterator():
+            intent = payout.snapshot["intent"]
+            reference = str(payout.reward.public_id)
+            happened = at_day(payout.reward.paid_at)
+            if bill_type == "TRADE_BILL":
+                add(payout, "balance", reference, intent["amount"], status(payout.status),
+                    happened, payout.gateway_trade_no, payout.fee_amount)
+            else:
+                add(payout, "split", reference, intent["amount"], status(payout.status), happened,
+                    fee=payout.fee_amount, recipients={intent["receiver_id"]: intent["amount"]},
+                    original=payout.gateway_trade_no, route="balance")
         distributions = ProviderOrderDistribution.objects.filter(snapshot__scope=_scope(config)).annotate(
             first_success=Min("observations__created_at", filter=Q(observations__status="succeeded")),
         ).filter(Q(first_success__date=day) | seen_request).select_related("settlement")

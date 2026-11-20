@@ -144,7 +144,10 @@ def account_closure_blockers(user) -> list[dict[str, object]]:
     checks = (
         (
             "provider_invite_rewards", "未处理的达人邀请奖励",
-            ProviderInviteReward.objects.filter(source__provider_user=user, status__in=("pending", "approved")),
+            ProviderInviteReward.objects.filter(
+                Q(source__provider_user=user) | Q(source__store_user=user),
+                status__in=("pending", "approved"),
+            ),
         ),
         (
             "wallet_balance", "未结清钱包余额",

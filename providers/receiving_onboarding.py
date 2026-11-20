@@ -52,7 +52,7 @@ def _scope(account, config):
 
 @sensitive_variables()
 def _validate_materials(provider, details):
-    if provider.status != ProviderProfile.Status.APPROVED or not provider.has_verified_identity:
+    if not provider.can_manage_receiving or not provider.has_verified_identity:
         raise PermissionDenied("请先通过平台实名认证。")
     serializer = ReceivingDetailsSerializer(data=details)
     serializer.is_valid(raise_exception=True)

@@ -164,7 +164,7 @@ def manual_cash_account(provider_id, config, *, now=None, lock=False, require_fr
     if not account or account.automatic_settlement_disabled is not True:
         raise ValidationError("尚未核验关闭自动结算，请联系平台切换为余额手动提现。")
     if (
-        account.provider.status != "approved"
+        not account.provider.can_manage_receiving
         or not account.provider.has_verified_identity
         or account.channel_status != "active"
         or account.card_status != "S"

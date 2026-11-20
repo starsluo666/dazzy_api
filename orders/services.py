@@ -1634,6 +1634,8 @@ def advance_provider_order_settlement(*, order_no: str, now=None) -> dict:
     settlement.settled_at = now
     settlement.dispute_reason = ""
     settlement.save()
+    from growth.first_order_rewards import record_first_order_reward
+    record_first_order_reward(settlement, now=now)
     sync_provider_settlement_plan(order_no=order_no, now=now)
     create_notification(
         recipient=settlement.provider.user,

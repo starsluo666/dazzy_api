@@ -268,8 +268,8 @@ def save_receiving_account(*, provider, data):
     lock_active_user_for_business(provider.user)
     # Lock the always-existing provider, including the initial account creation.
     provider = ProviderProfile.objects.select_for_update().get(pk=provider.pk)
-    if provider.status != ProviderProfile.Status.APPROVED or not provider.has_verified_identity:
-        raise PermissionDenied("请先通过达人实名认证，再填写本人收款资料。")
+    if not provider.can_manage_receiving or not provider.has_verified_identity:
+        raise PermissionDenied("请先通过实名认证，再填写本人收款资料。")
     if not provider.identity_number_digest or not provider.identity_real_name:
         raise PermissionDenied("实名信息不完整，请联系客服核实后再填写。")
     account = ProviderReceivingAccount.objects.filter(provider=provider).first()

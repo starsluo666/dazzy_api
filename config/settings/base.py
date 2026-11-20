@@ -128,6 +128,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "providers.process_income_transfers",
         "schedule": 60.0,
     },
+    "process-invite-reward-payouts": {
+        "task": "growth.process_invite_reward_payouts",
+        "schedule": 60.0,
+    },
     "process-due-account-closures": {
         "task": "accounts.process_due_account_closures",
         "schedule": 60.0,
@@ -315,6 +319,14 @@ HUIFU_PROVIDER_BALANCE_PAYMENT_FEE_RESERVE_CENTS = int(os.getenv("HUIFU_PROVIDER
 HUIFU_PROVIDER_BALANCE_PAYMENT_TRANSFER_TYPE = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_TRANSFER_TYPE", "")
 HUIFU_PROVIDER_BALANCE_PAYMENT_RISK_IP = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_RISK_IP", "")
 HUIFU_PROVIDER_BALANCE_PAYMENT_START_AT = os.getenv("HUIFU_PROVIDER_BALANCE_PAYMENT_START_AT", "")
+HUIFU_INVITE_REWARD_PAYOUT_ENABLED = os.getenv("HUIFU_INVITE_REWARD_PAYOUT_ENABLED", "false").lower() in {"1", "true", "yes"}
+HUIFU_INVITE_REWARD_PAYOUT_CONFIRMED = os.getenv("HUIFU_INVITE_REWARD_PAYOUT_CONFIRMED", "false").lower() in {"1", "true", "yes"}
+HUIFU_INVITE_REWARD_PAYOUT_MAX_CENTS = int(os.getenv("HUIFU_INVITE_REWARD_PAYOUT_MAX_CENTS", "0"))
+HUIFU_INVITE_REWARD_PAYOUT_ACCT_ID = os.getenv("HUIFU_INVITE_REWARD_PAYOUT_ACCT_ID", "")
+HUIFU_INVITE_REWARD_PAYOUT_TRANSFER_TYPE = os.getenv("HUIFU_INVITE_REWARD_PAYOUT_TRANSFER_TYPE", "")
+HUIFU_INVITE_REWARD_PAYOUT_RISK_IP = os.getenv("HUIFU_INVITE_REWARD_PAYOUT_RISK_IP", "")
+HUIFU_INVITE_REWARD_PAYOUT_FEE_MODE = os.getenv("HUIFU_INVITE_REWARD_PAYOUT_FEE_MODE", "")
+HUIFU_INVITE_REWARD_PAYOUT_FEE_RESERVE_CENTS = int(os.getenv("HUIFU_INVITE_REWARD_PAYOUT_FEE_RESERVE_CENTS", "-1"))
 
 # Individual split/settlement users, not acquiring merchants. No automatic fund transfer.
 HUIFU_USER_ONBOARDING_ENABLED = os.getenv("HUIFU_USER_ONBOARDING_ENABLED", "false").lower() in {"1", "true", "yes"}

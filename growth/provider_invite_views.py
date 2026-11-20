@@ -2,7 +2,7 @@ import logging
 from types import SimpleNamespace
 
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
@@ -21,7 +21,7 @@ from mediafiles.views import ProviderLifestylePhotoUploadView
 from providers.models import ProviderProfile
 from providers.serializers import ProviderApplicationSerializer
 from providers.services import save_provider_application, submit_provider_application
-from .models import ProviderInviteConfig, ProviderInviteReward, ProviderInviteSource
+from .models import ProviderInviteAttribution, ProviderInviteConfig, ProviderInviteReward, ProviderInviteSource
 from .provider_invites import (
     service_cities,
     require_available,
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 class InvitedRegistrationInput(RegisterSerializer):
     # Override the unrelated coupon-invitation UUID; clients may not set it here.
     invite_code = serializers.CharField(read_only=True)
-    source_code = serializers.RegexField(r"^[A-F0-9]{12}$")
+    source_code = serializers.RegexField(r"^(?:[A-Z0-9]{4}|[A-F0-9]{12})$")
     application_real_name = serializers.CharField(min_length=2, max_length=50)
     application_birth_date = serializers.DateField()
     gender = serializers.ChoiceField(choices=("male", "female"))
@@ -67,7 +67,8 @@ class PublicProviderInviteView(APIView):
 
     def get(self, request, code):
         source = get_object_or_404(
-            ProviderInviteSource.objects.select_related("provider_user"), code=code
+            ProviderInviteSource.objects.select_related("provider_user"),
+            Q(code=code.upper()) | Q(legacy_code=code.upper()),
         )
         config = ProviderInviteConfig.objects.filter(pk=1).first()
         if not config:
@@ -97,7 +98,9 @@ class InvitedProviderRegisterView(APIView):
         serializer = InvitedRegistrationInput(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        source = get_object_or_404(ProviderInviteSource, code=data["source_code"])
+        source = get_object_or_404(
+            ProviderInviteSource, Q(code=data["source_code"]) | Q(legacy_code=data["source_code"]),
+        )
         config = ProviderInviteConfig.objects.filter(pk=1).first()
         if not config:
             raise ValidationError("达人邀请暂未开放。")
@@ -137,22 +140,23 @@ class InvitedProviderRegisterView(APIView):
                     },
                 )
                 submit_provider_application(user=user)
-                amount = (
-                    config.store_reward_amount
-                    if source.kind == "store"
-                    else config.provider_reward_amount
-                )
-                if amount <= 0:
-                    raise ValidationError("邀请奖励尚未配置，请联系平台。")
-                ProviderInviteReward.objects.create(
+                attribution = ProviderInviteAttribution.objects.create(
                     source=source,
-                    invitee=user,
                     profile=profile,
-                    amount=amount,
                     code_snapshot=source.code,
                     source_name_snapshot=source.name,
                     config_revision=config.revision,
+                    first_order_rule=getattr(config, f"{source.kind}_first_order"),
                 )
+                amount = getattr(config, f"{source.kind}_reward_amount")
+                if getattr(config, f"{source.kind}_registration_enabled") and amount > 0:
+                    ProviderInviteReward.objects.create(
+                        source=source, invitee=user, profile=profile, amount=amount,
+                        code_snapshot=attribution.code_snapshot,
+                        source_name_snapshot=attribution.source_name_snapshot,
+                        config_revision=attribution.config_revision,
+                        payout_method=ProviderInviteReward.PayoutMethod.BALANCE,
+                    )
                 result = auth_payload(user)
             return Response({"data": result}, status=201)
         except Exception:
@@ -184,7 +188,7 @@ class MyProviderInvitesView(APIView):
         query = serializers.IntegerField(min_value=1).run_validation(
             request.query_params.get("page", 1)
         )
-        rewards = ProviderInviteReward.objects.filter(source=source).select_related("invitee")
+        rewards = ProviderInviteReward.objects.filter(source=source).select_related("invitee", "order", "payout")
         summary = list(
             rewards.order_by().values("status").annotate(count=Count("id"), amount=Sum("amount"))
         )
@@ -197,7 +201,9 @@ class MyProviderInvitesView(APIView):
                 "data": {
                     "source": source_payload(source) if source else None,
                     "enabled": active,
-                    "reward_amount": config.provider_reward_amount if config else 0,
+                    "reward_amount": config.provider_reward_amount
+                    if config and config.provider_registration_enabled else 0,
+                    "first_order": config.provider_first_order if config else {},
                     "qr_data": qr_data(source) if active else "",
                     "summary": summary,
                     "items": [reward_payload(r) for r in rewards[(query - 1) * 20 : query * 20]],
@@ -205,3 +211,30 @@ class MyProviderInvitesView(APIView):
                 }
             }
         )
+
+class MyInviteStoreView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        source = get_object_or_404(
+            ProviderInviteSource.objects.select_related("store_user__provider_profile"),
+            kind="store", store_user=request.user,
+            store_user__is_active=True, store_user__account_status="active",
+            store_user__provider_profile__status=ProviderProfile.Status.STORE,
+        )
+        page = serializers.IntegerField(min_value=1).run_validation(request.query_params.get("page", 1))
+        profile = source.store_user.provider_profile
+        config = ProviderInviteConfig.objects.filter(pk=1).first()
+        enabled = bool(config and config.enabled and source.active and invite_h5_base())
+        rewards = source.rewards.select_related("invitee", "order", "payout")
+        response = Response({"data": {
+            "source": source_payload(source),
+            "enabled": enabled,
+            "qr_data": qr_data(source) if enabled else "",
+            "identity_status": profile.identity_status,
+            "receiving_status": getattr(getattr(profile, "receiving_account", None), "channel_status", ""),
+            "items": [reward_payload(row) for row in rewards[(page - 1) * 20:page * 20]],
+            "pagination": {"page": page, "page_size": 20, "total": rewards.count()},
+        }})
+        response["Cache-Control"] = "no-store, private"
+        return response

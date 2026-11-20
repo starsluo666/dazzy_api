@@ -1,6 +1,9 @@
 import uuid
 
-from .provider_invite_models import ProviderInviteConfig, ProviderInviteSource, ProviderInviteReward  # noqa: F401
+from .provider_invite_models import (  # noqa: F401
+    ProviderInviteAttribution, ProviderInviteConfig, ProviderInvitePayout,
+    ProviderInviteReward, ProviderInviteSource,
+)
 
 from django.conf import settings
 from django.db import models

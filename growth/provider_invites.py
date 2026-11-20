@@ -9,11 +9,11 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError
 
 from providers.models import ProviderProfile
-from .models import ProviderInviteConfig
+from .models import ProviderInviteConfig, ProviderInviteReward
 
 
 def invite_h5_base():
-    # No customer-app fallback: the registration page belongs to the provider app.
+    # The configured user H5 hosts the public invitation registration page.
     base = str(settings.PROVIDER_INVITE_H5_BASE_URL or "").strip().rstrip("/")
     try:
         URLValidator(schemes=["https"])(base)
@@ -46,6 +46,10 @@ def config_payload(config=None):
             ("enabled", False),
             ("store_reward_amount", 0),
             ("provider_reward_amount", 0),
+            ("store_registration_enabled", True),
+            ("provider_registration_enabled", True),
+            ("store_first_order", {}),
+            ("provider_first_order", {}),
             ("revision", 0),
         )
     }
@@ -93,11 +97,25 @@ def qr_data(source):
 
 def reward_payload(reward, *, admin=False):
     phone = reward.invitee.phone
+    payout = getattr(reward, "payout", None)
+    label = reward.get_status_display()
+    if reward.payout_method == ProviderInviteReward.PayoutMethod.BALANCE:
+        if payout:
+            label = payout.get_status_display()
+        elif reward.status == ProviderInviteReward.Status.APPROVED:
+            label = "待划入汇付余额"
     data = {
         "public_id": str(reward.public_id),
         "amount": reward.amount,
         "status": reward.status,
-        "status_label": reward.get_status_display(),
+        "status_label": label,
+        "reward_kind": reward.kind,
+        "reward_kind_label": reward.get_kind_display(),
+        "order_no": reward.order.order_no if reward.order_id else None,
+        "order_completed_at": (
+            reward.order.customer_confirmed_at or reward.order.auto_confirmed_at
+            if reward.order_id else None
+        ),
         "created_at": reward.created_at,
         "paid_at": reward.paid_at,
         "invitee_phone_masked": f"{phone[:3]}****{phone[-4:]}",
@@ -120,5 +138,10 @@ def reward_payload(reward, *, admin=False):
             payout_note=reward.payout_note,
             revision=reward.revision,
             config_revision=reward.config_revision,
+            payout_method=reward.payout_method,
+            payout_status=payout.status if payout else None,
+            payout_request_no=payout.req_seq_id if payout else None,
+            payout_blocker=reward.payout_blocker,
+            calculation=reward.calculation,
         )
     return data

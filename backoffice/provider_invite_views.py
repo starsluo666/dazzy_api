@@ -7,6 +7,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from accounts.models import User
+from providers.models import ProviderProfile
 
 from growth.models import ProviderInviteConfig, ProviderInviteReward, ProviderInviteSource
 from growth.provider_invites import config_payload, reward_payload, source_payload, qr_data, require_invite_h5_base
@@ -36,20 +38,33 @@ def audit(request, access, action, target, before, after):
     )
 
 
+class FirstOrderRuleInput(serializers.Serializer):
+    enabled = serializers.BooleanField()
+    mode = serializers.ChoiceField(choices=("fixed", "percentage"))
+    amount = serializers.IntegerField(min_value=0, max_value=1000000)
+    rate_bps = serializers.IntegerField(min_value=0, max_value=10000)
+
+    def validate(self, attrs):
+        if attrs["enabled"]:
+            field = "amount" if attrs["mode"] == "fixed" else "rate_bps"
+            if attrs[field] <= 0:
+                raise ValidationError({field: "启用首单奖励时，金额或比例必须大于零。"})
+        return attrs
+
+
 class ConfigInput(serializers.Serializer):
     enabled = serializers.BooleanField()
     store_reward_amount = serializers.IntegerField(min_value=0, max_value=1000000)
     provider_reward_amount = serializers.IntegerField(min_value=0, max_value=1000000)
+    store_registration_enabled = serializers.BooleanField(required=False)
+    provider_registration_enabled = serializers.BooleanField(required=False)
+    store_first_order = FirstOrderRuleInput(required=False)
+    provider_first_order = FirstOrderRuleInput(required=False)
     revision = serializers.IntegerField(min_value=0)
 
     def validate(self, attrs):
         if attrs["enabled"]:
             require_invite_h5_base()
-        if (
-            attrs["enabled"]
-            and min(attrs["store_reward_amount"], attrs["provider_reward_amount"]) <= 0
-        ):
-            raise ValidationError("启用前请分别设置门店、达人奖励金额，金额必须大于0。")
         return attrs
 
 
@@ -103,8 +118,13 @@ class AdminProviderInviteConfigView(APIView):
         if config.revision != values["revision"]:
             raise ValidationError("配置已更新，请刷新后重试。")
         before = config_payload(config)
-        for key in ("enabled", "store_reward_amount", "provider_reward_amount"):
-            setattr(config, key, values[key])
+        for key, value in values.items():
+            if key != "revision" and key in request.data:
+                setattr(config, key, value)
+        for kind in ("store", "provider"):
+            field = f"{kind}_reward_amount"
+            if config.enabled and getattr(config, f"{kind}_registration_enabled") and not getattr(config, field):
+                raise ValidationError({field: "启用注册奖励时，金额必须大于零。"})
         config.revision += 1
         config.save()
         after = config_payload(config)
@@ -120,16 +140,19 @@ class AdminProviderInviteSourcesView(APIView):
         serializer = PageInput(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        qs = ProviderInviteSource.objects.order_by("-id")
+        qs = ProviderInviteSource.objects.select_related("store_user__provider_profile").order_by("-id")
         if data.get("kind"):
             qs = qs.filter(kind=data["kind"])
         if data.get("search"):
-            qs = qs.filter(Q(name__icontains=data["search"]) | Q(code__icontains=data["search"]))
+            qs = qs.filter(
+                Q(name__icontains=data["search"]) | Q(code__icontains=data["search"])
+                | Q(legacy_code__icontains=data["search"])
+            )
         page, size = data["page"], data["page_size"]
         return Response(
             {
                 "data": {
-                    "items": [source_payload(s) for s in qs[(page - 1) * size : page * size]],
+                    "items": [_admin_source(s) for s in qs[(page - 1) * size : page * size]],
                     "pagination": {"page": page, "page_size": size, "total": qs.count()},
                 }
             }
@@ -185,7 +208,7 @@ class AdminProviderInviteRewardsView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         qs = ProviderInviteReward.objects.select_related(
-            "source", "profile", "invitee", "reviewed_by", "paid_by"
+            "source", "profile", "invitee", "reviewed_by", "paid_by", "order", "payout"
         )
         if data.get("status"):
             qs = qs.filter(status=data["status"])
@@ -196,6 +219,8 @@ class AdminProviderInviteRewardsView(APIView):
             qs = qs.filter(
                 Q(source_name_snapshot__icontains=value)
                 | Q(code_snapshot__icontains=value)
+                | Q(source__code__icontains=value)
+                | Q(source__legacy_code__icontains=value)
                 | Q(invitee__phone__icontains=value)
                 | Q(profile__application_real_name__icontains=value)
             )
@@ -234,12 +259,16 @@ class AdminProviderInviteRewardActionView(APIView):
             raise ValidationError("奖励记录已更新，请刷新后重试，勿重复打款。")
         before = {"status": reward.status, "revision": reward.revision, "amount": reward.amount}
         if data["action"] in ("approve", "reject"):
+            if data["action"] == "approve" and reward.payout_method == ProviderInviteReward.PayoutMethod.BALANCE:
+                access.require("provider_invite.pay")
             if reward.status != "pending":
                 raise ValidationError("仅待审核奖励可以审核。")
             reward.status = "approved" if data["action"] == "approve" else "rejected"
             reward.reviewed_by, reward.reviewed_at = request.user, timezone.now()
             reward.review_note = data["note"]
         else:
+            if reward.payout_method != ProviderInviteReward.PayoutMethod.MANUAL:
+                raise ValidationError("该奖励使用汇付余额发放，请查看渠道处理进度。")
             if reward.status != "approved":
                 raise ValidationError("仅财务审核通过的奖励可登记打款。")
             if data["paid_at"] < reward.reviewed_at:
@@ -268,3 +297,83 @@ class AdminProviderInviteRewardActionView(APIView):
             },
         )
         return Response({"data": reward_payload(reward, admin=True)})
+
+
+def _admin_source(source):
+    profile = getattr(source.store_user, "provider_profile", None)
+    return {
+        **source_payload(source),
+        "store_account_bound": bool(source.store_user_id),
+        "store_phone_masked": f"{source.store_user.phone[:3]}****{source.store_user.phone[-4:]}"
+        if source.store_user_id else "",
+        "store_identity_status": profile.identity_status if profile else "",
+    }
+
+
+class StoreAccountInput(serializers.Serializer):
+    phone = serializers.RegexField(r"^1[3-9][0-9]{9}$")
+    real_name = serializers.CharField(min_length=2, max_length=50)
+    revision = serializers.IntegerField(min_value=0)
+
+
+class AdminInviteStoreAccountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, source_id):
+        access = access_for(request, "provider_invite.manage")
+        form = StoreAccountInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        data = form.validated_data
+        source = get_object_or_404(ProviderInviteSource.objects.select_for_update(), kind="store", public_id=source_id)
+        if source.revision != data["revision"] or source.store_user_id:
+            raise ValidationError("门店账号已绑定或记录已更新，请刷新后重试。")
+        # Never reset an existing user's credentials or change an existing provider's role.
+        user, _ = User.objects.select_for_update().get_or_create(
+            phone=data["phone"], defaults={"password": "!", "nickname": f"用户{data['phone'][-4:]}"},
+        )
+        if not user.is_active or user.account_status != "active" or user.is_staff or user.is_superuser:
+            raise ValidationError("该手机号不能用作门店账号。")
+        if (ProviderProfile.objects.filter(user=user).exists()
+                or ProviderInviteSource.objects.filter(store_user=user).exists()):
+            raise ValidationError("该手机号已绑定达人或其他门店，请使用负责人另一个手机号。")
+        before = _admin_source(source)
+        ProviderProfile.objects.create(
+            user=user, status=ProviderProfile.Status.STORE, display_name=source.name[:30],
+            application_real_name=data["real_name"], identity_verification_required=True,
+        )
+        source.store_user = user
+        source.revision += 1
+        source.save(update_fields=("store_user", "revision"))
+        result = _admin_source(source)
+        audit(request, access, "store.bind", source.public_id, before, result)
+        return Response({"data": result}, status=201)
+
+
+class AdminInviteStoreIdentityView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, source_id):
+        from providers.serializers import ProviderIdentitySerializer
+
+        access_for(request, "provider.review")
+        profile = get_object_or_404(ProviderProfile, user__store_invite_source__public_id=source_id,
+                                    status=ProviderProfile.Status.STORE)
+        response = Response({"data": ProviderIdentitySerializer(profile, context={"request": request}).data})
+        response["Cache-Control"] = "no-store, private"
+        return response
+
+    def post(self, request, source_id):
+        from .serializers import ProviderReviewDecisionSerializer
+        from .services import review_provider_identity
+
+        access = access_for(request, "provider.review")
+        profile = get_object_or_404(ProviderProfile, user__store_invite_source__public_id=source_id,
+                                    status=ProviderProfile.Status.STORE)
+        form = ProviderReviewDecisionSerializer(data=request.data)
+        form.is_valid(raise_exception=True)
+        result = review_provider_identity(
+            profile_id=profile.pk, actor=request.user, access=access, request=request,
+            store=True, decision=form.validated_data["decision"], reason=form.validated_data.get("reason", ""),
+        )
+        return Response({"data": {"identity_status": result.identity_status}})

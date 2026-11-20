@@ -11,7 +11,7 @@ from .receiving_accounts import (
     receiving_account_data,
     save_receiving_account,
 )
-from .views import current_approved_provider
+from .views import current_receiving_profile
 from .receiving_onboarding import submit_onboarding, refresh_onboarding, receive_notification
 from .receiving_regions import bank_regions
 
@@ -28,16 +28,16 @@ class CurrentProviderReceivingAccountView(APIView):
         return response
 
     def get(self, request):
-        return Response({"data": receiving_account_data(current_approved_provider(request))})
+        return Response({"data": receiving_account_data(current_receiving_profile(request))})
 
     def put(self, request):
-        provider = current_approved_provider(request)
+        provider = current_receiving_profile(request)
         save_receiving_account(provider=provider, data=request.data)
         return Response({"data": receiving_account_data(provider)})
 
     def delete(self, request):
         # Only unsubmitted local drafts may be cleared, even with collection closed.
-        clear_receiving_account(current_approved_provider(request))
+        clear_receiving_account(current_receiving_profile(request))
         return Response(status=204)
 
 
@@ -45,7 +45,7 @@ class ProviderReceivingRegionsView(CurrentProviderReceivingAccountView):
     http_method_names = ["get", "head", "options"]
 
     def get(self, request):
-        current_approved_provider(request)
+        current_receiving_profile(request)
         return Response({"data": bank_regions()})
 
 
@@ -53,7 +53,7 @@ class ProviderReceivingSubmitView(CurrentProviderReceivingAccountView):
     http_method_names = ["post", "options"]
 
     def post(self, request):
-        provider = current_approved_provider(request)
+        provider = current_receiving_profile(request)
         submit_onboarding(provider, request.data)
         return Response({"data": receiving_account_data(provider)})
 
@@ -62,7 +62,7 @@ class ProviderReceivingRefreshView(CurrentProviderReceivingAccountView):
     http_method_names = ["post", "options"]
 
     def post(self, request):
-        provider = current_approved_provider(request)
+        provider = current_receiving_profile(request)
         refresh_onboarding(provider)
         return Response({"data": receiving_account_data(provider)})
 

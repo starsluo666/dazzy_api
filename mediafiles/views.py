@@ -263,11 +263,9 @@ class ProviderIdentityPhotoUploadView(PublicImageUploadView):
     def post(self, request):
         from providers.models import ProviderProfile
 
-        if not ProviderProfile.objects.filter(
-            user=request.user,
-            status=ProviderProfile.Status.APPROVED,
-        ).exists():
-            raise ValidationError({"file": "达人申请通过后才可上传实名认证材料。"})
+        profile = ProviderProfile.objects.filter(user=request.user).first()
+        if not profile or not profile.can_manage_receiving or request.user.account_status != "active":
+            raise ValidationError({"file": "当前账号不能上传实名认证材料。"})
         asset = self.create_asset(request)
         return Response(
             {

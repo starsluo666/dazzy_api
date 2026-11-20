@@ -78,6 +78,7 @@ class ProviderProfile(models.Model):
         APPROVED = "approved", "已通过"
         REJECTED = "rejected", "已驳回"
         SUSPENDED = "suspended", "已暂停"
+        STORE = "store", "门店收款负责人"
 
     class IdentityStatus(models.TextChoices):
         UNVERIFIED = "unverified", "未认证"
@@ -221,6 +222,15 @@ class ProviderProfile(models.Model):
             and self.service_city_code
             and self.service_city_name
         )
+
+    @property
+    def can_manage_receiving(self) -> bool:
+        if self.status == self.Status.APPROVED:
+            return True
+        if self.status == self.Status.STORE:
+            from growth.models import ProviderInviteSource
+            return ProviderInviteSource.objects.filter(kind="store", store_user_id=self.user_id).exists()
+        return False
 
     @property
     def has_verified_identity(self) -> bool:

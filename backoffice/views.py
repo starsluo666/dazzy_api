@@ -157,7 +157,7 @@ from .services import (
 
 
 def scoped_providers(access):
-    queryset = ProviderProfile.objects.all()
+    queryset = ProviderProfile.objects.exclude(status=ProviderProfile.Status.STORE)
     if not access.all_data:
         queryset = queryset.filter(service_city_code__in=access.city_codes)
     return queryset
@@ -1792,9 +1792,10 @@ class AdminUserListView(APIView):
                 Q(nickname__icontains=keyword) | Q(phone__icontains=keyword)
             )
         summary_queryset = queryset
+        providers = Q(provider_profile__isnull=False) & ~Q(provider_profile__status=ProviderProfile.Status.STORE)
         summary = {
             "total": summary_queryset.count(),
-            "providers": summary_queryset.filter(provider_profile__isnull=False).count(),
+            "providers": summary_queryset.filter(providers).count(),
             "flagged": summary_queryset.filter(admin_risk_flag__is_active=True).count(),
             "suspended": summary_queryset.filter(
                 account_status=User.AccountStatus.SUSPENDED
@@ -1803,7 +1804,9 @@ class AdminUserListView(APIView):
         if account_status := params.get("account_status"):
             queryset = queryset.filter(account_status=account_status)
         if params["identity"] == "provider":
-            queryset = queryset.filter(provider_profile__isnull=False)
+            queryset = queryset.filter(providers)
+        elif params["identity"] == "store":
+            queryset = queryset.filter(provider_profile__status=ProviderProfile.Status.STORE)
         elif params["identity"] == "user":
             queryset = queryset.filter(provider_profile__isnull=True)
         if params["risk"] == "flagged":

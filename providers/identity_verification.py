@@ -112,7 +112,7 @@ def validate_assets(profile, *, front_only=False):
 
 
 def validate_account(profile):
-    if (profile.status != ProviderProfile.Status.APPROVED or not profile.user.is_active
+    if (not profile.can_manage_receiving or not profile.user.is_active
             or profile.user.account_status != "active"):
         raise ValidationError({"detail": "当前账户状态不能提交实名认证。"})
 
@@ -211,7 +211,7 @@ def _run_identity_check(*, provider, consent_version, recognition_mode="", front
         valid = (
             latest.pk == attempt.pk and active_check(attempt)
             and matches_check(profile, attempt)
-            and profile.status == ProviderProfile.Status.APPROVED and profile.user.is_active
+            and profile.can_manage_receiving and profile.user.is_active
             and profile.user.account_status == "active"
             and profile.identity_status in (ProviderProfile.IdentityStatus.UNVERIFIED,
                                              ProviderProfile.IdentityStatus.REJECTED)
