@@ -23,6 +23,7 @@ from .views import (
     ProviderOrderConfirmCompletionView,
     ProviderOrderDetailView,
     ProviderOrderListCreateView,
+    ProviderOrderNavigationView,
     ProviderOrderPaymentAuthorizationView,
     ProviderOrderPaymentSessionView,
     ProviderOrderPaymentStatusView,
@@ -79,6 +80,7 @@ urlpatterns = [
     path("provider-orders/preview/", ProviderOrderPreviewView.as_view()),
     path("provider-orders/", ProviderOrderListCreateView.as_view()),
     path("provider-orders/<str:order_no>/", ProviderOrderDetailView.as_view()),
+    path("provider-orders/<str:order_no>/navigation/", ProviderOrderNavigationView.as_view()),
     path(
         "provider-orders/<str:order_no>/after-sales/",
         ProviderOrderAfterSalesView.as_view(),

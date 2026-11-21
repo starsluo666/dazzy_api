@@ -15,6 +15,7 @@ from rest_framework import serializers
 
 from accounts.account_closure import lock_active_user_for_business
 from accounts.models import UserFunctionRestriction
+from accounts.wechat_js_sdk import navigation_config
 from backoffice.access import client_ip
 from backoffice.models import AdminAuditLog, ProviderOrderAfterSalesCase
 from backoffice.operation_settings import platform_operation_rules
@@ -43,6 +44,7 @@ from .models import ProviderOrder, ProviderOrderPaymentOrder, ProviderOrderRevie
 from .fulfillment import assess_timing
 from .payment_gateway import get_provider_order_payment_gateway
 from .serializers import (
+    CustomerProviderOrderDetailSerializer,
     ProviderOrderAfterSalesInputSerializer,
     ProviderOrderAfterSalesSerializer,
     ProviderOrderInputSerializer,
@@ -252,10 +254,17 @@ class ProviderOrderDetailView(APIView):
         from .renewals import existing_renewal
 
         order = self.get_object(request, order_no)
-        data = ProviderOrderSerializer(order).data
+        data = CustomerProviderOrderDetailSerializer(order).data
         child = existing_renewal(order, timezone.now())
         data["next_renewal_order_no"] = child.order_no if child else None
-        return Response({"data": data})
+        return Response({"data": data}, headers={"Cache-Control": "private, no-store"})
+
+
+class ProviderOrderNavigationView(ProviderOrderDetailView):
+    def get(self, request, order_no):
+        self.get_object(request, order_no)
+        data = navigation_config(request.query_params.get("url", ""))
+        return Response({"data": data}, headers={"Cache-Control": "private, no-store"})
 
 
 class ProviderOrderRenewalInput(serializers.Serializer):

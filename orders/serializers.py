@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 
 from rest_framework import serializers
@@ -418,6 +419,28 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
             "refund_amount": refund.refund_amount if refund else None,
             "refunded_at": refund.refunded_at if refund else None,
         }
+
+
+class CustomerProviderOrderDetailSerializer(ProviderOrderSerializer):
+    provider_contact_phone = serializers.SerializerMethodField()
+    meeting_longitude = serializers.CharField(source="source_longitude", allow_null=True)
+    meeting_latitude = serializers.CharField(source="source_latitude", allow_null=True)
+
+    class Meta(ProviderOrderSerializer.Meta):
+        fields = ProviderOrderSerializer.Meta.fields + (
+            "provider_contact_phone", "meeting_longitude", "meeting_latitude",
+        )
+
+    def get_provider_contact_phone(self, obj):
+        if not obj.paid_at or obj.status not in (
+            ProviderOrder.Status.PENDING_SERVICE,
+            ProviderOrder.Status.DEPARTED,
+            ProviderOrder.Status.IN_SERVICE,
+            ProviderOrder.Status.PENDING_CONFIRMATION,
+        ):
+            return None
+        phone = obj.provider.user.phone
+        return phone if re.fullmatch(r"1[0-9]{10}", phone) else None
 
 
 class ProviderOrderLocationInputSerializer(serializers.Serializer):
