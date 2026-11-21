@@ -139,7 +139,8 @@ def renewal_options(source):
 @transaction.atomic
 def create_renewal(source, *, user, duration, expected_payable, order_no):
     customer = lock_active_user_for_business(user, function=UserFunctionRestriction.Function.PROVIDER_ORDER)
-    source = ProviderOrder.objects.select_for_update(of=("self",)).select_related("service__category").get(pk=source.pk)
+    # Load the service only after the provider lock so revocations are visible.
+    source = ProviderOrder.objects.select_for_update().get(pk=source.pk)
     provider = ProviderProfile.objects.select_for_update().get(pk=source.provider_id)
     source.provider = provider
     now = timezone.now()

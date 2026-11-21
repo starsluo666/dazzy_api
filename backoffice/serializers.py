@@ -1045,6 +1045,11 @@ class AdminCouponRevokeSerializer(serializers.Serializer):
     reason = serializers.CharField(min_length=2, max_length=500, trim_whitespace=True)
 
 
+class ProviderCategoryGrantUpdateSerializer(serializers.Serializer):
+    category_ids = serializers.ListField(child=serializers.IntegerField(min_value=1))
+    expected_category_ids = serializers.ListField(child=serializers.IntegerField(min_value=1))
+
+
 class ProviderCommissionOverrideSerializer(serializers.Serializer):
     reset_period = serializers.ChoiceField(
         choices=("", "month", "quarter", "year", "never"), required=False

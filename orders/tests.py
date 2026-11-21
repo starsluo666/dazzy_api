@@ -181,6 +181,17 @@ class ProviderOrderApiTests(TestCase):
         self.assertIn("暂未开放", str(response.json()))
         self.assertFalse(ProviderOrder.objects.exists())
 
+    def test_service_paused_during_route_lookup_blocks_new_order(self):
+        def pause_service(*_args):
+            ProviderService.objects.filter(pk=self.service.pk).update(is_active=False)
+            return RouteResult(distance_km=Decimal("6.80"), duration_minutes=18)
+
+        with patch("orders.serializers.tencent_map.driving_route", side_effect=pause_service):
+            response = self.client.post("/api/v1/provider-orders/", self.payload(), content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["service_id"], "服务暂不可预约，请选择其他达人。")
+        self.assertFalse(ProviderOrder.objects.exists())
+
     def test_city_closing_does_not_block_existing_order_payment_and_fulfillment(self):
         from backoffice.models import PlatformOperationSetting
 

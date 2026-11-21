@@ -872,6 +872,87 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(data["location_accuracy_m"], "16.00")
         self.assertIsNotNone(data["location_updated_at"])
 
+    def test_manage_provider_category_grants_updates_services_and_preserves_existing_order(self):
+        self.handan.status = ProviderProfile.Status.APPROVED
+        self.handan.onboarding_status = ProviderProfile.OnboardingStatus.APPROVED
+        self.handan.is_accepting_orders = True
+        self.handan.save(update_fields=("status", "onboarding_status", "is_accepting_orders"))
+        new_category = ServiceCategory.objects.create(name="游戏搭子", slug="gaming-grant")
+        disabled_category = ServiceCategory.objects.create(name="已停用分类", slug="disabled-grant", is_active=False)
+        grant = ProviderCategoryGrant.objects.create(provider=self.handan, category=self.order_category)
+        order = self.create_fulfillment_order(order_no="DZY-CATEGORY-REVOCATION", provider=self.handan)
+        revision = ProviderServiceRevision.objects.create(
+            provider=self.handan, category=self.order_category, service=order.service,
+            action=ProviderServiceRevision.Action.UPDATE,
+            billing_type=order.service.billing_type, price_amount=18000,
+        )
+        url = reverse("backoffice-provider-category-grants", args=(self.handan.id,))
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        data = response.data["data"]
+        self.assertEqual(data["category_ids"], [self.order_category.id])
+        self.assertIn(new_category.id, [item["id"] for item in data["categories"]])
+        self.assertNotIn(disabled_category.id, [item["id"] for item in data["categories"]])
+
+        payload = {"category_ids": [new_category.id], "expected_category_ids": data["category_ids"]}
+        invalid = self.client.patch(url, {**payload, "category_ids": [disabled_category.id]}, format="json")
+        self.assertEqual(invalid.status_code, 400)
+        response = self.client.patch(url, payload, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["category_id"] for item in response.data["data"]["commission_overview"]["categories"]],
+            [new_category.id],
+        )
+        grant.refresh_from_db()
+        order.service.refresh_from_db()
+        revision.refresh_from_db()
+        self.assertFalse(grant.is_active)
+        self.assertIsNotNone(grant.revoked_at)
+        self.assertFalse(order.service.is_active)
+        self.assertEqual(revision.status, ProviderServiceRevision.Status.REJECTED)
+        self.assertEqual(revision.reviewed_by, self.admin_user)
+        self.handan.refresh_from_db()
+        self.assertFalse(self.handan.is_accepting_orders)
+        order.refresh_from_db()
+        self.assertEqual(order.status, ProviderOrder.Status.PENDING_CONFIRMATION)
+        self.assertEqual(order.service_name_snapshot, self.order_category.name)
+        self.assertEqual(order.payable_amount, 16800)
+        audit = AdminAuditLog.objects.get(action="provider.category_grants.update", target_id=str(self.handan.id))
+        self.assertEqual(audit.before, {"category_ids": [self.order_category.id]})
+        self.assertEqual(audit.after, {"category_ids": [new_category.id]})
+        self.assertEqual(self.client.patch(url, payload, format="json").status_code, 400)
+        self.client.force_authenticate(self.handan_user)
+        categories = self.client.get(reverse("service-category-list"))
+        self.assertEqual([item["id"] for item in categories.data["data"]["items"]], [new_category.id])
+        self.client.force_authenticate(self.admin_user)
+        response = self.client.patch(
+            url, {"category_ids": [], "expected_category_ids": [new_category.id]}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["commission_overview"]["categories"], [])
+        response = self.client.patch(
+            url, {"category_ids": [self.order_category.id], "expected_category_ids": []}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        grant.refresh_from_db()
+        order.service.refresh_from_db()
+        self.assertTrue(grant.is_active)
+        self.assertFalse(order.service.is_active)
+
+    def test_manage_provider_category_grants_respects_permission_and_city_scope(self):
+        ProviderProfile.objects.filter(pk__in=[self.handan.id, self.beijing.id]).update(
+            status=ProviderProfile.Status.APPROVED,
+        )
+        payload = {"category_ids": [self.order_category.id], "expected_category_ids": []}
+        other_city = reverse("backoffice-provider-category-grants", args=(self.beijing.id,))
+        self.assertEqual(self.client.get(other_city).status_code, 404)
+        self.assertEqual(self.client.patch(other_city, payload, format="json").status_code, 404)
+        self.role.permissions = ["provider.view"]
+        self.role.save(update_fields=("permissions",))
+        url = reverse("backoffice-provider-category-grants", args=(self.handan.id,))
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.assertEqual(self.client.patch(url, payload, format="json").status_code, 403)
+
     def test_provider_commission_override_is_scoped_and_preserves_detail(self):
         service = ProviderService.objects.create(
             provider=self.handan, category=self.order_category,

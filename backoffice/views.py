@@ -105,6 +105,7 @@ from .serializers import (
     ProviderAdminQuerySerializer,
     ProviderAdminSerializer,
     ProviderCreditAdjustmentInputSerializer,
+    ProviderCategoryGrantUpdateSerializer,
     ProviderCommissionOverrideSerializer,
     AdminCouponIssueSerializer,
     AdminCouponListQuerySerializer,
@@ -137,6 +138,7 @@ from .services import (
     adjust_provider_credit,
     change_provider_operational_status,
     correct_provider_application_name,
+    current_provider_category_ids,
     change_user_account_status,
     change_user_function_restrictions,
     change_user_risk_flag,
@@ -148,6 +150,7 @@ from .services import (
     review_provider_profile_revision,
     review_provider_service_revision,
     review_provider_identity,
+    update_provider_category_grants,
     review_activity,
     review_activity_after_sales_case,
     review_activity_settlement,
@@ -2073,6 +2076,39 @@ class ProviderAdminDetailView(APIView):
             for order in profile.orders.select_related("customer").order_by("-created_at")[:5]
         ]
         return Response({"data": data})
+
+
+class ProviderCategoryGrantView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def editable_profiles(self, request):
+        access = resolve_admin_access(request.user)
+        access.require("provider.view")
+        access.require("provider.manage")
+        return access, scoped_providers(access).filter(
+            status__in=(ProviderProfile.Status.APPROVED, ProviderProfile.Status.SUSPENDED),
+        )
+
+    def get(self, request, profile_id):
+        _, profiles = self.editable_profiles(request)
+        profile = get_object_or_404(profiles, pk=profile_id)
+        category_ids = current_provider_category_ids(profile)
+        categories = ServiceCategory.objects.filter(
+            Q(is_active=True) | Q(pk__in=category_ids),
+        ).values("id", "name", "is_active")
+        return Response({"data": {"category_ids": sorted(category_ids), "categories": list(categories)}})
+
+    @transaction.atomic
+    def patch(self, request, profile_id):
+        access, profiles = self.editable_profiles(request)
+        profile = get_object_or_404(profiles.select_for_update(), pk=profile_id)
+        serializer = ProviderCategoryGrantUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        update_provider_category_grants(
+            profile=profile, actor=request.user, access=access, request=request, **serializer.validated_data,
+        )
+        context = {"can_review": can_access(access, "provider.review"), "include_detail": True}
+        return Response({"data": ProviderAdminSerializer(profile, context=context).data})
 
 
 class ProviderApplicationNameCorrectionView(APIView):

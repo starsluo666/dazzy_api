@@ -627,6 +627,76 @@ def review_provider_application(
     return profile
 
 
+def current_provider_category_ids(profile):
+    granted_ids = profile.category_grants.filter(is_active=True).values_list("category_id", flat=True)
+    service_ids = profile.services.filter(is_active=True).values_list("category_id", flat=True)
+    return set(granted_ids) | set(service_ids)
+
+
+def update_provider_category_grants(*, profile, category_ids, expected_category_ids, actor, access, request):
+    # The caller locks the provider, as do service submission and approval.
+    current_ids = current_provider_category_ids(profile)
+    if current_ids != set(expected_category_ids):
+        raise ValidationError("分类授权已变更，请重新打开后再保存。")
+
+    selected_ids = set(category_ids)
+    added_ids = selected_ids - current_ids
+    removed_ids = current_ids - selected_ids
+    if not added_ids and not removed_ids:
+        return
+    if ServiceCategory.objects.filter(pk__in=added_ids, is_active=True).count() != len(added_ids):
+        raise ValidationError("所选分类中包含不存在或已停用的分类。")
+
+    now = timezone.now()
+    for category_id in sorted(added_ids):
+        ProviderCategoryGrant.objects.update_or_create(
+            provider=profile,
+            category_id=category_id,
+            defaults={"is_active": True, "granted_by": actor, "revoked_at": None},
+        )
+    profile.category_grants.filter(category_id__in=removed_ids).update(is_active=False, revoked_at=now)
+    paused_services = profile.services.filter(category_id__in=removed_ids, is_active=True).update(
+        is_active=False, updated_at=now,
+    )
+    pending_revisions = profile.service_revisions.filter(status=ProviderServiceRevision.Status.PENDING)
+    closed_revisions = pending_revisions.filter(category_id__in=removed_ids).update(
+        status=ProviderServiceRevision.Status.REJECTED,
+        rejection_reason="该服务分类的授权已撤销。",
+        reviewed_at=now,
+        reviewed_by=actor,
+        updated_at=now,
+    )
+    changed_fields = []
+    if paused_services and profile.is_accepting_orders and not profile.services.filter(
+        is_active=True, category__is_active=True, content_hidden=False,
+    ).exists():
+        profile.is_accepting_orders = False
+        changed_fields.append("is_accepting_orders")
+        ProviderLiveLocation.objects.filter(provider=profile).update(session_id=None)
+    if (
+        closed_revisions
+        and profile.onboarding_status == ProviderProfile.OnboardingStatus.PENDING_REVIEW
+        and not pending_revisions.exists()
+    ):
+        profile.onboarding_status = ProviderProfile.OnboardingStatus.INCOMPLETE
+        profile.onboarding_submitted_at = None
+        changed_fields.extend(("onboarding_status", "onboarding_submitted_at"))
+    if changed_fields:
+        profile.save(update_fields=(*changed_fields, "updated_at"))
+
+    AdminAuditLog.objects.create(
+        actor=actor,
+        organization=_organization(access),
+        action="provider.category_grants.update",
+        target_type="provider_profile",
+        target_id=str(profile.pk),
+        before={"category_ids": sorted(current_ids)},
+        after={"category_ids": sorted(selected_ids)},
+        request_id=request.headers.get("X-Request-ID", ""),
+        ip_address=client_ip(request),
+    )
+
+
 def _validate_service_revision_for_approval(revision):
     if not revision.category.is_active:
         raise ValidationError({"decision": f"服务分类“{revision.category.name}”已停用。"})

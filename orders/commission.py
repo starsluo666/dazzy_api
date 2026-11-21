@@ -119,9 +119,9 @@ def provider_commission_overview(provider):
     current = next((i for i in range(len(tiers) - 1, -1, -1)
                     if turnover >= tiers[i]["threshold_amount"]), None)
     next_tier = next((tier for tier in tiers if tier["threshold_amount"] > turnover), None)
-    categories = ServiceCategory.objects.filter(
+    categories = ServiceCategory.objects.filter(is_active=True).filter(
         Q(provider_grants__provider=provider, provider_grants__is_active=True)
-        | Q(provider_services__provider=provider)
+        | Q(provider_services__provider=provider, provider_services__is_active=True)
     ).distinct().order_by("sort_order", "id")
     rows = []
     for category in categories:
