@@ -27,14 +27,31 @@ class ContentBusinessTests(TestCase):
         self.provider.lifestyle_photo.provider_photo_cropped = True
         self.provider.lifestyle_photo.save()
 
-    def test_service_submission_and_original_business_approval_are_two_separate_gates(self):
+    def test_service_submission_goes_directly_to_business_review(self):
+        from providers.services import submit_provider_service_revision
+        from backoffice.services import review_provider_service_revision
+
+        revision = submit_provider_service_revision(
+            provider=self.provider, service=self.service, data={"description": "这是新的服务说明"}
+        )
+        self.assertFalse(Review.objects.filter(kind="service_revision", target_id=revision.pk).exists())
+        self.service.refresh_from_db()
+        self.assertEqual(self.service.description, "公开服务说明")
+        review_provider_service_revision(
+            revision_id=revision.pk, decision="approve", reason="", actor=self.admin,
+            access=self.access, request=self.request,
+        )
+        self.service.refresh_from_db()
+        self.assertEqual(self.service.description, "这是新的服务说明")
+
+    def test_legacy_service_revision_still_respects_its_existing_review(self):
         from providers.services import submit_provider_service_revision
         from backoffice.services import _apply_service_revision
 
         revision = submit_provider_service_revision(
             provider=self.provider, service=self.service, data={"description": "这是新的服务说明"}
         )
-        content = Review.objects.get(kind="service_revision", target_id=revision.pk)
+        content = services.submit("service_revision", revision)
         self.assertEqual(content.status, "manual")
         self.service.refresh_from_db()
         self.assertEqual(self.service.description, "公开服务说明")
@@ -76,6 +93,30 @@ class ContentBusinessTests(TestCase):
         self.provider.refresh_from_db()
         self.assertTrue(self.provider.content_hidden)
 
+    def test_first_onboarding_service_can_be_approved_with_the_rest_of_the_application(self):
+        from backoffice.services import review_provider_onboarding
+        from providers.services import submit_provider_profile_revision, submit_provider_service_revision
+
+        self.provider.onboarding_status = self.provider.OnboardingStatus.INCOMPLETE
+        self.provider.identity_status = self.provider.IdentityStatus.VERIFIED
+        self.provider.save(update_fields=("onboarding_status", "identity_status"))
+        profile_revision = submit_provider_profile_revision(provider=self.provider, data={})
+        content = Review.objects.get(kind="profile_revision", target_id=profile_revision.pk)
+        decide(content, self.admin)
+        service_revision = submit_provider_service_revision(
+            provider=self.provider,
+            data={"category": self.category, "billing_type": "per_session", "price_amount": 1000,
+                  "estimated_duration_minutes": 60, "description": "首次提交的服务说明"},
+        )
+        self.assertFalse(Review.objects.filter(kind="service_revision", target_id=service_revision.pk).exists())
+        review_provider_onboarding(
+            profile_id=self.provider.pk, decision="approve", reason="", actor=self.admin,
+            access=self.access, request=self.request,
+        )
+        service_revision.refresh_from_db()
+        self.assertEqual(service_revision.status, service_revision.Status.APPROVED)
+        self.assertEqual(service_revision.service.description, "首次提交的服务说明")
+
     def test_rejected_unpublished_revision_can_be_cleared_without_publishing_it(self):
         from providers.services import submit_provider_service_revision
 
@@ -90,7 +131,7 @@ class ContentBusinessTests(TestCase):
             },
         )
         content = decide(
-            Review.objects.get(kind="service_revision", target_id=revision.pk), self.admin, "reject"
+            services.submit("service_revision", revision), self.admin, "reject"
         )
         content = decide(content, self.admin, "approve")
         revision.refresh_from_db()

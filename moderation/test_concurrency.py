@@ -280,7 +280,6 @@ class ContentConcurrencyTests(TransactionTestCase):
         revision = submit_provider_service_revision(
             provider=self.provider, service=self.service, data={}
         )
-        decide(Review.objects.get(kind="service_revision", target_id=revision.pk), self.admin)
 
         def approve():
             try:

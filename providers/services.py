@@ -229,8 +229,6 @@ def submit_provider_service_revision(
         ),
         description=data.get("description", service.description if service else "").strip(),
     )
-    from moderation.services import submit
-    submit("service_revision", revision)
     maybe_submit_provider_onboarding(provider=locked)
     return revision
 

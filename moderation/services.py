@@ -89,7 +89,8 @@ def submit(kind, obj, *, candidate=None, force=False):
     return review
 
 
-def ensure_approved(kind, obj):
+def ensure_approved(kind, obj, *, allow_missing=False):
+    """Check publication holds and clearance, optionally allowing a missing review."""
     _, publication = targets.published_target(kind, obj)
     if hasattr(publication, "content_hidden_review"):
         publication.refresh_from_db(fields=("content_hidden", "content_hidden_review"))
@@ -120,13 +121,12 @@ def ensure_approved(kind, obj):
     if not settings.CONTENT_REVIEW_ENABLED or (kind == "review" and obj.is_auto_generated):
         return
     targets.material(kind, obj)  # Strict asset availability before business publication.
-    if not Review.objects.filter(
-        kind=kind,
-        target_id=obj.pk,
-        is_current=True,
-        fingerprint=digest,
-        status="approved",
-    ).exists():
+    review = Review.objects.filter(kind=kind, target_id=obj.pk, is_current=True).values(
+        "fingerprint", "status",
+    ).first()
+    if review is None and allow_missing:
+        return
+    if not review or review["fingerprint"] != digest or review["status"] != Review.Status.APPROVED:
         raise ValidationError("内容检测或复核尚未通过，请先在内容审核中心完成核查。")
 
 

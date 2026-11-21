@@ -714,7 +714,7 @@ def _validate_service_revision_for_approval(revision):
 
 
 def _apply_service_revision(revision, *, actor, now):
-    ensure_approved("service_revision", revision)
+    ensure_approved("service_revision", revision, allow_missing=True)
     _validate_service_revision_for_approval(revision)
     service = revision.service
     if service is None:
