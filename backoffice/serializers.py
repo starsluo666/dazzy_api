@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Sum
@@ -90,6 +91,10 @@ class OperationsIconCategorySerializer(serializers.ModelSerializer):
 
 
 class AdminServiceCategorySerializer(OperationsIconCategorySerializer):
+    platform_commission_rate = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal("10.00"),
+        max_value=Decimal("60.00"), required=False,
+    )
     icon_url = serializers.SerializerMethodField()
     icon_asset_id = serializers.PrimaryKeyRelatedField(
         source="icon_asset",

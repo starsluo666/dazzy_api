@@ -1033,6 +1033,43 @@ class BackofficeProviderReviewTests(APITestCase):
             ).exists()
         )
 
+    def test_service_category_commission_rejects_out_of_range_without_changes(self):
+        list_url = reverse("backoffice-service-categories")
+        detail_url = reverse("backoffice-service-category-detail", args=(self.order_category.pk,))
+        initial_count = ServiceCategory.objects.count()
+        for rate in ("9.99", "60.01", "98.50", "0", "100", None):
+            with self.subTest(rate=rate):
+                created = self.client.post(list_url, {
+                    "name": "抽成校验分类", "slug": "commission-validation",
+                    "platform_commission_rate": rate,
+                }, format="json")
+                self.assertEqual(created.status_code, 400, created.data)
+                self.assertIn("platform_commission_rate", created.data)
+                updated = self.client.patch(detail_url, {"platform_commission_rate": rate}, format="json")
+                self.assertEqual(updated.status_code, 400, updated.data)
+                self.assertIn("platform_commission_rate", updated.data)
+        self.order_category.refresh_from_db()
+        self.assertEqual(self.order_category.platform_commission_rate, Decimal("20.00"))
+        self.assertEqual(ServiceCategory.objects.count(), initial_count)
+        self.assertFalse(AdminAuditLog.objects.filter(action__startswith="service_category.").exists())
+
+    def test_service_category_commission_accepts_both_bounds_and_decimal_values(self):
+        for index, rate in enumerate(("10.00", "60.00", "35.25")):
+            with self.subTest(rate=rate):
+                response = self.client.post(reverse("backoffice-service-categories"), {
+                    "name": f"抽成边界{index}", "slug": f"commission-bound-{index}",
+                    "platform_commission_rate": rate,
+                }, format="json")
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual(Decimal(response.data["data"]["platform_commission_rate"]), Decimal(rate))
+                updated = self.client.patch(
+                    reverse("backoffice-service-category-detail", args=(self.order_category.pk,)),
+                    {"platform_commission_rate": rate}, format="json",
+                )
+                self.assertEqual(updated.status_code, 200, updated.data)
+                self.order_category.refresh_from_db()
+                self.assertEqual(self.order_category.platform_commission_rate, Decimal(rate))
+
     def test_provider_ordering_setting_can_be_updated_and_is_audited(self):
         self.client.force_authenticate(self.platform_admin)
         detail_url = reverse("backoffice-provider-ordering-setting")
