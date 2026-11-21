@@ -1118,6 +1118,7 @@ def apply_provider_order_payment_success(
         mark_provider_order_payment_expired,
         register_provider_acceptance_timeout,
         register_provider_fulfillment_timeouts,
+        register_provider_new_order_sms,
     )
 
     now = now or timezone.now()
@@ -1252,6 +1253,7 @@ def apply_provider_order_payment_success(
         content="订单已进入待接单，达人会在接单时限内处理。",
     )
     create_provider_new_order_notification(order=order)
+    register_provider_new_order_sms(order)
     return order, payment, True
 
 

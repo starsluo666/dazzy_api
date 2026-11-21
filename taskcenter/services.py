@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import CharField, Exists, F, OuterRef, Q, Subquery
 from django.db.models.functions import Cast
@@ -98,6 +99,18 @@ def register_provider_acceptance_timeout(order):
         business_key=order.order_no,
         scheduled_at=order.acceptance_expires_at,
         payload={"order_no": order.order_no},
+    )
+
+
+def register_provider_new_order_sms(order):
+    if not settings.TENCENT_SMS_ENABLED or not settings.TENCENT_SMS_TEMPLATE_ID_PROVIDER_NEW_ORDER:
+        return
+    _register_task(
+        task_type=ScheduledTask.Type.PROVIDER_NEW_ORDER_SMS,
+        business_type="provider_order",
+        business_key=order.order_no,
+        scheduled_at=order.paid_at,
+        max_attempts=1,
     )
 
 
@@ -1158,6 +1171,51 @@ def _execute_provider_acceptance_timeout(task, now):
     return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED, result=outcome)
 
 
+def _execute_provider_new_order_sms(task, _now):
+    from accounts.tencent_sms import SmsConfig, SmsDeliveryUnavailable, send_sms
+    from orders.models import ProviderOrder
+
+    if task.payload.get("send_started"):
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.FAILED,
+            last_error="本单短信已尝试发送，请核对腾讯云发送记录。",
+        )
+
+    order = ProviderOrder.objects.select_related("provider__user").filter(
+        order_no=task.business_key,
+        paid_at__isnull=False,
+        renewal_of__isnull=True,
+        status=ProviderOrder.Status.PENDING_ACCEPTANCE,
+        acceptance_expires_at__gt=timezone.now(),
+    ).first()
+    if not order:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.CANCELLED,
+            result={"reason": "order_no_longer_waiting_for_acceptance"},
+        )
+
+    try:
+        config = SmsConfig.load_provider_new_order()
+        # Record the attempt before calling Tencent so an uncertain response is never replayed.
+        claimed = ScheduledTask.objects.filter(
+            pk=task.pk,
+            status=ScheduledTask.Status.RUNNING,
+            started_at=task.started_at,
+            attempt_count=task.attempt_count,
+            payload__send_started__isnull=True,
+        ).update(payload={**task.payload, "send_started": True}, updated_at=timezone.now())
+        if not claimed:
+            return TaskExecutionOutcome(status=ScheduledTask.Status.CANCELLED)
+        receipt = send_sms(phone=order.provider.user.phone, template_params=[], config=config)
+    except SmsDeliveryUnavailable:
+        return TaskExecutionOutcome(
+            status=ScheduledTask.Status.FAILED,
+            last_error="新订单短信发送未确认，请查看腾讯云发送记录或服务日志。",
+        )
+
+    return TaskExecutionOutcome(status=ScheduledTask.Status.SUCCEEDED, result=receipt)
+
+
 def _execute_provider_rejection_support_timeout(task, now):
     from orders.services import expire_provider_rejection_support
 
@@ -1761,6 +1819,7 @@ TASK_HANDLERS = {
     ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT: _execute_provider_fulfillment_timeout,
     ScheduledTask.Type.PROVIDER_ORDER_PAYMENT_EXPIRY: (_execute_provider_order_payment_expiry),
     ScheduledTask.Type.PROVIDER_ACCEPTANCE_TIMEOUT: (_execute_provider_acceptance_timeout),
+    ScheduledTask.Type.PROVIDER_NEW_ORDER_SMS: _execute_provider_new_order_sms,
     ScheduledTask.Type.PROVIDER_REJECTION_SUPPORT_TIMEOUT: (
         _execute_provider_rejection_support_timeout
     ),

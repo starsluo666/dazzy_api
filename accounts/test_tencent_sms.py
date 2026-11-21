@@ -22,7 +22,7 @@ from .services import (
     SMS_PURPOSES, _code_attempt_key, _code_key, _cooldown_key, _sms_phone_daily_key,
     send_sms_code, verify_sms_code,
 )
-from .tencent_sms import TEMPLATE_SETTINGS, SmsConfig, SmsDeliveryUnavailable
+from .tencent_sms import TEMPLATE_SETTINGS, SmsConfig, SmsDeliveryUnavailable, send_sms
 from .wechat_login import WechatIdentity, _issue_ticket
 
 
@@ -123,6 +123,15 @@ class TencentSmsTests(SimpleTestCase):
     def test_two_variable_template_matches_code_then_minutes(self):
         self.assertEqual(self.send().expires_in, 600)
         self.assertEqual(self.client.SendSms.call_args.args[0].TemplateParamSet, ["009876", "10"])
+
+    @override_settings(TENCENT_SMS_TEMPLATE_ID_PROVIDER_NEW_ORDER="5678", SMS_CODE_TTL_SECONDS=0)
+    def test_provider_new_order_uses_its_own_template_without_otp_parameters(self):
+        config = SmsConfig.load_provider_new_order()
+        receipt = send_sms(phone=self.phone, template_params=[], config=config)
+        request = self.client.SendSms.call_args.args[0]
+        self.assertEqual(request.TemplateId, "5678")
+        self.assertEqual(request.TemplateParamSet, [])
+        self.assertEqual(receipt, {"request_id": "unit-request-01", "serial_no": "unit-serial-01"})
 
     def test_scene_overrides_take_priority_for_every_purpose(self):
         self.assertEqual(set(TEMPLATE_SETTINGS), SMS_PURPOSES)

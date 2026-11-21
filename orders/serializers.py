@@ -433,6 +433,7 @@ class CustomerProviderOrderDetailSerializer(ProviderOrderSerializer):
 
     def get_provider_contact_phone(self, obj):
         if not obj.paid_at or obj.status not in (
+            ProviderOrder.Status.PENDING_ACCEPTANCE,
             ProviderOrder.Status.PENDING_SERVICE,
             ProviderOrder.Status.DEPARTED,
             ProviderOrder.Status.IN_SERVICE,

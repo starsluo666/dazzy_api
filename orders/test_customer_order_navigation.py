@@ -25,6 +25,7 @@ class CustomerOrderContactTests(SimpleTestCase):
             paid_at=datetime.now(timezone.utc),
         )
         active_statuses = {
+            ProviderOrder.Status.PENDING_ACCEPTANCE,
             ProviderOrder.Status.PENDING_SERVICE, ProviderOrder.Status.DEPARTED,
             ProviderOrder.Status.IN_SERVICE, ProviderOrder.Status.PENDING_CONFIRMATION,
         }

@@ -65,6 +65,23 @@ class SmsConfig:
         override = getattr(settings, TEMPLATE_SETTINGS[purpose], "").strip() if purpose else ""
         # Fall back only when not configured, never after a rejected/uncertain send.
         template_id = override or settings.TENCENT_SMS_TEMPLATE_ID
+        params = tuple(settings.TENCENT_SMS_TEMPLATE_PARAMS)
+        if (
+            params not in (("code",), ("code", "minutes"))
+            or settings.SMS_CODE_TTL_SECONDS <= 0
+            or ("minutes" in params and settings.SMS_CODE_TTL_SECONDS % 60 != 0)
+            or settings.SMS_PHONE_DAILY_LIMIT <= 0
+            or settings.SMS_CODE_MAX_ATTEMPTS <= 0
+        ):
+            raise _unavailable("NotConfigured")
+        return cls._load(template_id=template_id, params=params)
+
+    @classmethod
+    def load_provider_new_order(cls):
+        return cls._load(template_id=settings.TENCENT_SMS_TEMPLATE_ID_PROVIDER_NEW_ORDER, params=())
+
+    @classmethod
+    def _load(cls, *, template_id, params):
         secret_id, secret_key = settings.TENCENT_SMS_SECRET_ID, settings.TENCENT_SMS_SECRET_KEY
         if not secret_id and not secret_key:
             secret_id = settings.TENCENT_CLOUD_SECRET_ID
@@ -74,7 +91,7 @@ class SmsConfig:
             app_id=settings.TENCENT_SMS_SDK_APP_ID,
             sign_name=settings.TENCENT_SMS_SIGN_NAME,
             template_id=template_id,
-            params=tuple(settings.TENCENT_SMS_TEMPLATE_PARAMS),
+            params=params,
             region=settings.TENCENT_SMS_REGION,
             timeout=settings.TENCENT_SMS_TIMEOUT_SECONDS,
         )
@@ -83,28 +100,29 @@ class SmsConfig:
             or not all((config.secret_id, config.secret_key, config.sign_name, config.region))
             or not re.fullmatch(r"[0-9]+", config.app_id)
             or not re.fullmatch(r"[0-9]+", config.template_id)
-            or config.params not in (("code",), ("code", "minutes"))
-            or settings.SMS_CODE_TTL_SECONDS <= 0
-            or ("minutes" in config.params and settings.SMS_CODE_TTL_SECONDS % 60 != 0)
             or not 1 <= config.timeout <= 15
-            or settings.SMS_PHONE_DAILY_LIMIT <= 0
-            or settings.SMS_CODE_MAX_ATTEMPTS <= 0
         ):
             raise _unavailable("NotConfigured")
         return config
 
 
 def send_verification_sms(*, phone: str, code: str, config: SmsConfig) -> None:
-    """Success means provider acceptance, not a handset delivery receipt."""
-    if not re.fullmatch(r"1[3-9][0-9]{9}", phone) or not re.fullmatch(r"[0-9]{6}", code):
+    if not re.fullmatch(r"[0-9]{6}", code):
+        raise _unavailable("InvalidInput")
+    values = {"code": code, "minutes": str(settings.SMS_CODE_TTL_SECONDS // 60)}
+    send_sms(phone=phone, template_params=[values[name] for name in config.params], config=config)
+
+
+def send_sms(*, phone: str, template_params: list[str], config: SmsConfig) -> dict:
+    """Return Tencent's submission identifiers for a single recipient."""
+    if not re.fullmatch(r"1[3-9][0-9]{9}", phone):
         raise _unavailable("InvalidInput")
     request = SendSmsRequest()
     request.PhoneNumberSet = [f"+86{phone}"]
     request.SmsSdkAppId = config.app_id
     request.SignName = config.sign_name
     request.TemplateId = config.template_id
-    values = {"code": code, "minutes": str(settings.SMS_CODE_TTL_SECONDS // 60)}
-    request.TemplateParamSet = [values[name] for name in config.params]
+    request.TemplateParamSet = template_params
     try:
         client = SmsClient(
             Credential(config.secret_id, config.secret_key), config.region,
@@ -136,3 +154,4 @@ def send_verification_sms(*, phone: str, code: str, config: SmsConfig) -> None:
         or not _safe_token(request_id)
     ):
         raise _unavailable("InvalidResponse", request_id)
+    return {"request_id": request_id, "serial_no": status.SerialNo}

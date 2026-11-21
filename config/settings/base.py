@@ -266,6 +266,10 @@ TENCENT_SMS_TEMPLATE_ID_INITIAL_PASSWORD = os.getenv(
 ).strip()
 TENCENT_SMS_TEMPLATE_ID_WECHAT_BIND = os.getenv("TENCENT_SMS_TEMPLATE_ID_WECHAT_BIND", "").strip()
 TENCENT_SMS_TEMPLATE_ID_CHANGE_PHONE = os.getenv("TENCENT_SMS_TEMPLATE_ID_CHANGE_PHONE", "").strip()
+# The new-order notification uses a separate approved template with no variables.
+TENCENT_SMS_TEMPLATE_ID_PROVIDER_NEW_ORDER = os.getenv(
+    "TENCENT_SMS_TEMPLATE_ID_PROVIDER_NEW_ORDER", ""
+).strip()
 # Match the approved template's variable order: code or code,minutes.
 TENCENT_SMS_TEMPLATE_PARAMS = tuple(
     part.strip() for part in os.getenv("TENCENT_SMS_TEMPLATE_PARAMS", "code").split(",")
