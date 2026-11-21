@@ -65,7 +65,7 @@ def _validate_materials(provider, details):
 
 
 @sensitive_variables()
-def submit_onboarding(provider, data):
+def submit_onboarding(provider, data, *, expected_updated_at=None):
     config = UserChannelConfig.load(for_submission=True)
     if data.get("consent_accepted") is not True or data.get("consent_version") != ONBOARDING_CONSENT_VERSION:
         raise ValidationError("请阅读并确认当前开户及余额提现授权。")
@@ -75,6 +75,8 @@ def submit_onboarding(provider, data):
         account = ProviderReceivingAccount.objects.select_for_update().filter(provider=provider).first()
         if not account:
             raise ValidationError("请先保存本人收款资料。")
+        if expected_updated_at is not None and account.updated_at != expected_updated_at:
+            raise ValidationError("收款资料或开户状态已更新，请刷新核对后再申请。")
         _scope(account, config)
         if account.user_huifu_id and account.attempts.filter(kind="configure").exists() and account.onboarding_consent_version != ONBOARDING_CONSENT_VERSION:
             # Renew consent only. Never silently modify an existing live channel account.

@@ -206,6 +206,23 @@ class ReceivingOnboardingTests(TestCase):
             call.assert_not_called()
         self.assertEqual(self.account.attempts.count(), 2)
 
+    def test_submit_uses_the_same_materials_the_applicant_approved(self):
+        previous = self.client.get(URL).json()["data"]["updated_at"]
+        result = self.client.put(URL, {**self.materials, "bank_name": "更正后的银行"}, format="json")
+        self.assertEqual(result.status_code, 200, result.data)
+        updated = result.json()["data"]["updated_at"]
+        self.assertNotEqual(updated, previous)
+
+        with patch("providers.receiving_onboarding.HuifuUserGateway.call", side_effect=[SUCCESS, ACCEPTED]) as gateway:
+            stale = self.submit(expected_updated_at=previous)
+            self.assertEqual(stale.status_code, 400, stale.data)
+            gateway.assert_not_called()
+            self.assertFalse(self.account.attempts.exists())
+
+            accepted = self.submit(expected_updated_at=updated)
+            self.assertEqual(accepted.status_code, 200, accepted.data)
+            self.assertEqual(gateway.call_count, 2)
+
     def test_timeout_is_unknown_and_never_automatically_recreated(self):
         with patch("providers.receiving_onboarding.HuifuUserGateway.call", side_effect=ChannelUncertain()):
             self.assertEqual(self.submit().status_code, 200)

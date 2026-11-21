@@ -14,10 +14,11 @@ from orders.distribution_transport import DistributionUncertain, validate_transp
 from orders.distributions import _scope
 from orders.huifu import HuifuPaymentConfig
 from .cash_accounts import manual_cash_account
-from .huifu_user import digest
+from .huifu_user import OnboardingUnavailable, digest
 from .income_wallet import locked_wallet, append_entry
 from .models import (
     ProviderIncomeWallet,
+    ProviderReceivingAccount,
     ProviderWithdrawal,
     ProviderWithdrawalObservation,
     ProviderProfile,
@@ -233,6 +234,23 @@ def withdrawal_data(record):
     }
 
 
+def _income_withdrawal_cash_type(provider):
+    cash_type = (
+        ProviderReceivingAccount.objects.filter(provider=provider, cash_status="S")
+        .values_list("verified_cash_config__cash_type", flat=True)
+        .first()
+    )
+    if cash_type in ("T1", "D1"):
+        return cash_type
+
+    from backoffice.receiving_settings import effective_cash_config
+
+    try:
+        return effective_cash_config()["cash_type"]
+    except OnboardingUnavailable:
+        return ""
+
+
 def income_wallet_data(provider):
     wallet = ProviderIncomeWallet.objects.filter(provider=provider).first()
     available = wallet.available_amount if wallet else 0
@@ -268,6 +286,7 @@ def income_wallet_data(provider):
         "can_withdraw": not bool(reason),
         "unavailable_reason": reason,
         "max_withdrawal_amount": settings.HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS,
+        "withdrawal_cash_type": _income_withdrawal_cash_type(provider),
         "withdrawals": [withdrawal_data(row) for row in wallet.withdrawals.all()[:50]]
         if wallet
         else [],

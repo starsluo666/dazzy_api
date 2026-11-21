@@ -858,10 +858,31 @@ class WithdrawalStateTests(TransactionTestCase):
             result = self.client.get("/api/v1/providers/me/income/")
             http.assert_not_called()
         self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.data["data"]["wallet"]["available_amount"], 5000)
+        wallet = result.data["data"]["wallet"]
+        self.assertEqual(wallet["available_amount"], 5000)
+        self.assertEqual(wallet["max_withdrawal_amount"], SETTINGS["HUIFU_PROVIDER_WITHDRAWAL_MAX_CENTS"])
+        self.assertEqual(wallet["withdrawal_cash_type"], "T1")
         self.assertNotIn(onboarding.USER_ID, str(result.data))
         self.assertNotIn("TESTTOKEN1", str(result.data))
         self.assertNotIn(self.details["bank_card_number"], str(result.data))
+
+    def test_income_uses_verified_cash_cycle_before_the_published_default(self):
+        from backoffice.models import ReceivingWithdrawalSetting
+
+        setting = ReceivingWithdrawalSetting.objects.create(
+            cash_type="D1", fix_amt="0.10", out_fee_acct_type="01",
+            fee_bearer_id=SETTINGS["HUIFU_MERCHANT_ID"], updated_by=self.provider.user,
+        )
+        self.assertEqual(income_wallet_data(self.provider)["withdrawal_cash_type"], "T1")
+
+        self.account.cash_status = ""
+        self.account.verified_cash_config = {}
+        self.account.save(update_fields=("cash_status", "verified_cash_config"))
+        self.assertEqual(income_wallet_data(self.provider)["withdrawal_cash_type"], "D1")
+
+        setting.fee_bearer_id = "1"
+        setting.save(update_fields=("fee_bearer_id",))
+        self.assertEqual(income_wallet_data(self.provider)["withdrawal_cash_type"], "")
 
     def test_income_or_reserved_funds_block_account_closure(self):
         from accounts.account_closure import account_closure_blockers

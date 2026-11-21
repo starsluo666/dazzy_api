@@ -1,6 +1,8 @@
 from django.utils.decorators import method_decorator
+from django.db import transaction
 from django.http import HttpResponse
 from django.views.decorators.debug import sensitive_post_parameters
+from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -30,6 +32,7 @@ class CurrentProviderReceivingAccountView(APIView):
     def get(self, request):
         return Response({"data": receiving_account_data(current_receiving_profile(request))})
 
+    @transaction.atomic
     def put(self, request):
         provider = current_receiving_profile(request)
         save_receiving_account(provider=provider, data=request.data)
@@ -54,7 +57,10 @@ class ProviderReceivingSubmitView(CurrentProviderReceivingAccountView):
 
     def post(self, request):
         provider = current_receiving_profile(request)
-        submit_onboarding(provider, request.data)
+        expected_updated_at = None
+        if "expected_updated_at" in request.data:
+            expected_updated_at = serializers.DateTimeField().run_validation(request.data["expected_updated_at"])
+        submit_onboarding(provider, request.data, expected_updated_at=expected_updated_at)
         return Response({"data": receiving_account_data(provider)})
 
 
