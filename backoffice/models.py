@@ -208,6 +208,7 @@ class PlatformOperationSetting(models.Model):
     support_refund_single_limit = models.PositiveBigIntegerField("客服单订单退款上限（分）", default=0)
     support_refund_daily_limit = models.PositiveBigIntegerField("客服每日退款审批上限（分）", default=0)
     provider_order_payment_timeout_minutes = models.PositiveSmallIntegerField(default=15)
+    provider_order_renewal_travel_minutes = models.PositiveSmallIntegerField(default=60)
     provider_order_confirmation_timeout_days = models.PositiveSmallIntegerField(default=3)
     provider_order_early_tolerance_minutes = models.PositiveSmallIntegerField(default=30)
     provider_order_late_tolerance_minutes = models.PositiveSmallIntegerField(default=30)

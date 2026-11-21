@@ -106,7 +106,7 @@ def expire_provider_departure(order_no, *, now=None):
         return {"state": "not_enrolled"}
     if order.departure_timed_out_at:
         return {"state": "already_expired"}
-    if order.status != ProviderOrder.Status.PENDING_SERVICE or not order.accepted_at:
+    if order.status != ProviderOrder.Status.PENDING_SERVICE or not order.accepted_at or order.renewal_of_id:
         return {"state": "not_applicable"}
     if now < order.departure_deadline_at:
         return {"state": "not_due", "deadline": order.departure_deadline_at}
@@ -176,10 +176,11 @@ def inspect_idle_fulfillment(order_no, *, stage, now=None):
         return {"state": "not_enrolled"}
     if stage == "reminder":
         expected = order.starts_at - timedelta(minutes=30)
-        applicable = order.status == ProviderOrder.Status.PENDING_SERVICE and not order.departed_at
+        applicable = order.status == ProviderOrder.Status.PENDING_SERVICE and not order.departed_at and not order.renewal_of_id
     elif stage == "start":
         expected = order.start_deadline_at
-        applicable = order.status == ProviderOrder.Status.DEPARTED and not order.service_started_at
+        expected_status = ProviderOrder.Status.PENDING_SERVICE if order.renewal_of_id else ProviderOrder.Status.DEPARTED
+        applicable = order.status == expected_status and not order.service_started_at
         if (applicable and order.customer_wait.get("state") == "waiting"
                 and order.customer_wait_deadline_at):
             return {"state": "not_due", "deadline": max(now, order.customer_wait_deadline_at) + timedelta(seconds=30)}
@@ -198,7 +199,9 @@ def inspect_idle_fulfillment(order_no, *, stage, now=None):
                 content=f"请按预约时间到场，联系确认后点击出发。{deadline_text} 前仍未出发，订单将按超时规则取消并扣分。",
                 provider_only=True)
     else:
-        label = "已出发但超时未开始服务" if stage == "start" else "服务已超过结束时间但未提交完成"
+        label = "服务已超过结束时间但未提交完成"
+        if stage == "start":
+            label = "续单超时未开始服务" if order.renewal_of_id else "已出发但超时未开始服务"
         flag_idle_fulfillment(order, code=f"idle_{stage}", label=label, expected=expected, now=now)
     return {"state": "processed"}
 
@@ -238,7 +241,7 @@ def timeout_summary(order):
         else:
             refund_label = "退款处理中"
     return {
-        "departure_deadline_at": order.departure_deadline_at,
+        "departure_deadline_at": None if order.renewal_of_id else order.departure_deadline_at,
         "timed_out_at": order.departure_timed_out_at,
         "reason": "达人超时未出发" if order.departure_timed_out_at else "",
         "refund_label": refund_label,

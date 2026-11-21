@@ -1,10 +1,10 @@
 from datetime import date, datetime, time, timedelta
 
-from django.db.models import Q
+from django.db.models import Max
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from orders.models import ProviderOrder
+from orders.booking_slots import blocking_orders
 from orders.services import MAXIMUM_ADVANCE, MINIMUM_ADVANCE, TIME_GRAIN_MINUTES
 
 from .models import (
@@ -16,30 +16,31 @@ from .models import (
 
 
 def _blocking_orders(provider, range_start, range_end):
-    now = timezone.now()
-    blocking = Q(status=ProviderOrder.Status.PENDING_PAYMENT, payment_expires_at__gt=now) | Q(
-        status__in=(
-            ProviderOrder.Status.PENDING_ACCEPTANCE,
-            ProviderOrder.Status.PENDING_SUPPORT,
-            ProviderOrder.Status.PENDING_SERVICE,
-            ProviderOrder.Status.DEPARTED,
-            ProviderOrder.Status.IN_SERVICE,
-            ProviderOrder.Status.PENDING_CONFIRMATION,
-            ProviderOrder.Status.AFTER_SALES,
-        )
-    )
-    return list(
-        ProviderOrder.objects.filter(
-            blocking,
-            provider=provider,
-            starts_at__lt=range_end,
-            ends_at__gt=range_start,
-        ).values_list("starts_at", "ends_at")
-    )
+    return list(blocking_orders(provider, range_start, range_end).values_list("starts_at", "occupied_until"))
 
 
 def _local_datetime(day: date, value: time):
     return timezone.make_aware(datetime.combine(day, value), timezone.get_current_timezone())
+
+
+def booking_window_end(provider, starts_at):
+    local_start = timezone.localtime(starts_at)
+    day, start = local_start.date(), local_start.time()
+    if (
+        not provider.is_accepting_orders
+        or provider.admin_order_restricted
+        or provider.date_closures.filter(date=day).exists()
+    ):
+        return None
+    times = {"starts_at__lte": start, "ends_at__gt": start}
+    weekly = provider.weekly_availability.filter(
+        is_active=True, weekday=day.weekday(), **times
+    ).aggregate(latest=Max("ends_at"))["latest"]
+    extra = provider.date_availability.filter(date=day, **times).aggregate(
+        latest=Max("ends_at")
+    )["latest"]
+    latest = max((end for end in (weekly, extra) if end is not None), default=None)
+    return _local_datetime(day, latest) if latest else None
 
 
 def booking_is_within_schedule(provider, starts_at, ends_at) -> bool:

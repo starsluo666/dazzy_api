@@ -11,6 +11,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework import serializers
 
 from accounts.account_closure import lock_active_user_for_business
 from accounts.models import UserFunctionRestriction
@@ -122,7 +123,7 @@ class ProviderOrderListCreateView(APIView):
     def get(self, request):
         customer_orders = ProviderOrder.objects.filter(customer=request.user)
         orders = customer_orders.select_related(
-            "provider__user", "service__category", "arrival_photo", "review__customer",
+            "provider__user", "service__category", "arrival_photo", "review__customer", "renewal_of",
             "payment_order", "settlement__distribution",
         ).prefetch_related(
             "review__images", "refund_orders", "after_sales_cases"
@@ -238,7 +239,7 @@ class ProviderOrderDetailView(APIView):
     def get_object(self, request, order_no):
         return get_object_or_404(
             ProviderOrder.objects.select_related(
-                "provider__user", "service__category", "arrival_photo", "review__customer",
+                "provider__user", "service__category", "arrival_photo", "review__customer", "renewal_of",
                 "payment_order", "settlement__distribution",
             ).prefetch_related("review__images", "refund_orders", "after_sales_cases"),
             order_no=order_no,
@@ -246,7 +247,37 @@ class ProviderOrderDetailView(APIView):
         )
 
     def get(self, request, order_no):
-        return Response({"data": ProviderOrderSerializer(self.get_object(request, order_no)).data})
+        from .renewals import existing_renewal
+
+        order = self.get_object(request, order_no)
+        data = ProviderOrderSerializer(order).data
+        child = existing_renewal(order, timezone.now())
+        data["next_renewal_order_no"] = child.order_no if child else None
+        return Response({"data": data})
+
+
+class ProviderOrderRenewalInput(serializers.Serializer):
+    duration_minutes = serializers.IntegerField(min_value=1)
+    payable_amount = serializers.IntegerField(min_value=0)
+
+
+class ProviderOrderRenewalView(ProviderOrderDetailView):
+    def get(self, request, order_no):
+        from .renewals import renewal_options
+
+        return Response({"data": renewal_options(self.get_object(request, order_no))})
+
+    def post(self, request, order_no):
+        from .renewals import create_renewal
+
+        serializer = ProviderOrderRenewalInput(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order, created = create_renewal(
+            self.get_object(request, order_no), user=request.user,
+            duration=serializer.validated_data["duration_minutes"],
+            expected_payable=serializer.validated_data["payable_amount"], order_no=make_order_no(),
+        )
+        return Response({"data": {"order_no": order.order_no, "status": order.status}}, status=201 if created else 200)
 
 
 class ProviderOrderTerminationView(APIView):
@@ -571,7 +602,7 @@ class CurrentProviderOrderListView(APIView):
             provider=provider,
             paid_at__isnull=False,
         ).select_related(
-            "customer", "provider__user", "service__category", "arrival_photo",
+            "customer", "provider__user", "service__category", "arrival_photo", "renewal_of",
             "payment_order", "settlement__distribution",
         ).prefetch_related("refund_orders", "after_sales_cases")
         if order_status := query.validated_data.get("status"):
@@ -591,7 +622,7 @@ class CurrentProviderOrderDetailView(APIView):
             queryset = queryset.select_for_update(of=("self",))
         return get_object_or_404(
             queryset.select_related(
-                "customer", "provider__user", "service__category", "arrival_photo",
+                "customer", "provider__user", "service__category", "arrival_photo", "renewal_of",
                 "payment_order", "settlement__distribution",
             ).prefetch_related("refund_orders", "after_sales_cases"),
             provider=provider,
@@ -600,8 +631,13 @@ class CurrentProviderOrderDetailView(APIView):
         )
 
     def get(self, request, order_no):
+        from .renewals import existing_renewal
+
         order = self.get_object(request, order_no)
-        return Response({"data": ProviderOrderManageSerializer(order).data})
+        data = ProviderOrderManageSerializer(order).data
+        child = existing_renewal(order, timezone.now())
+        data["next_renewal_order_no"] = child.order_no if child and child.paid_at else None
+        return Response({"data": data})
 
 
 class CurrentProviderOrderAcceptView(CurrentProviderOrderDetailView):
@@ -742,6 +778,8 @@ class CurrentProviderOrderDepartView(CurrentProviderOrderDetailView):
     @transaction.atomic
     def post(self, request, order_no):
         order = self.get_object(request, order_no, for_update=True)
+        if order.renewal_of_id:
+            raise ValidationError({"status": "续单可在原单结束后直接开始服务。"})
         if order.status == ProviderOrder.Status.DEPARTED and order.departed_at:
             return Response({"data": ProviderOrderManageSerializer(order).data})
         if order.status != ProviderOrder.Status.PENDING_SERVICE:
@@ -821,10 +859,19 @@ class CurrentProviderOrderStartView(CurrentProviderOrderDetailView):
         order = self.get_object(request, order_no, for_update=True)
         if order.status == ProviderOrder.Status.IN_SERVICE and order.service_started_at:
             return Response({"data": ProviderOrderManageSerializer(order).data})
-        if order.status != ProviderOrder.Status.DEPARTED:
-            raise ValidationError({"status": "订单不在已出发状态。"})
-        if not order.arrival_photo_id:
-            raise ValidationError({"arrival_photo": "请先上传清晰包含本人及到场环境的集合照片。"})
+        if order.renewal_of_id:
+            from .renewals import SOURCE_FINISHED
+
+            if order.status != ProviderOrder.Status.PENDING_SERVICE or timezone.now() < order.starts_at:
+                raise ValidationError({"status": "请在续单预约时间开始服务。"})
+            source = ProviderOrder.objects.select_for_update().get(pk=order.renewal_of_id)
+            if source.status not in SOURCE_FINISHED:
+                raise ValidationError({"status": "请先提交原订单完成。如原单已取消或终止，请联系客服。"})
+        else:
+            if order.status != ProviderOrder.Status.DEPARTED:
+                raise ValidationError({"status": "订单不在已出发状态。"})
+            if not order.arrival_photo_id:
+                raise ValidationError({"arrival_photo": "请先上传清晰包含本人及到场环境的集合照片。"})
         if order.customer_wait.get("state") == "waiting":
             raise ValidationError("请先结束用户失联等待，确认已联系上用户后再开始服务。")
         order.status = ProviderOrder.Status.IN_SERVICE

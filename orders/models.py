@@ -41,6 +41,10 @@ class ProviderOrder(models.Model):
         ProviderProfile, on_delete=models.PROTECT, related_name="orders"
     )
     service = models.ForeignKey(ProviderService, on_delete=models.PROTECT, related_name="orders")
+    renewal_of = models.ForeignKey(
+        "self", on_delete=models.PROTECT, related_name="renewals", null=True, blank=True
+    )
+    renewal_travel_until = models.DateTimeField(null=True, blank=True)
     provider_name_snapshot = models.CharField("达人名称快照", max_length=30)
     service_name_snapshot = models.CharField("服务名称快照", max_length=30)
     billing_type_snapshot = models.CharField(

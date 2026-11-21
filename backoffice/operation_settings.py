@@ -9,6 +9,7 @@ DEFAULT_PLATFORM_OPERATION_RULES = {
     "support_refund_single_limit": 0,
     "support_refund_daily_limit": 0,
     "provider_order_payment_timeout_minutes": 15,
+    "provider_order_renewal_travel_minutes": 60,
     "provider_order_confirmation_timeout_days": 3,
     "provider_order_early_tolerance_minutes": 30,
     "provider_order_late_tolerance_minutes": 30,

@@ -7,7 +7,7 @@ from hashlib import sha256
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Avg, Q, Sum
+from django.db.models import Avg, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -154,6 +154,7 @@ def _create_provider_order_huifu_payment_session(
     *, order_id: int, customer_id: int, payment_scene: str, sub_openid: str = "",
 ):
     """Create or replay one idempotent Huifu aggregate payment session."""
+    from .renewals import renewal_source_allows_payment
     from .wechat_oauth import validate_wechat_payment_payer
 
     try:
@@ -175,6 +176,8 @@ def _create_provider_order_huifu_payment_session(
             raise ValidationError({"status": "支付单不在待支付状态。"})
         if order.payment_expires_at <= now:
             raise ValidationError({"status": "支付已超时，请重新下单。"})
+        if not renewal_source_allows_payment(order):
+            raise ValidationError({"status": "原订单状态已变化，该续单无法支付。"})
         from wallets.models import WalletPaymentAllocation
         from wallets.services import prepare_wallet_payment
 
@@ -474,6 +477,7 @@ def _apply_huifu_payment_query_success(
             else payment.payable_amount
         ),
         signature_verified=True,
+        huifu_trade_type=channel_trade_type,
         now=paid_at,
     )
     if result[1].status not in (
@@ -1104,13 +1108,16 @@ def apply_provider_order_payment_success(
     gateway_trade_no: str,
     paid_amount: int,
     signature_verified: bool,
+    huifu_trade_type: str | None = None,
     now=None,
 ):
+    from .renewals import renewal_source_allows_payment
     from providers.presence import operation_rules
     from taskcenter.services import (
         cancel_provider_order_payment_expiry,
         mark_provider_order_payment_expired,
         register_provider_acceptance_timeout,
+        register_provider_fulfillment_timeouts,
     )
 
     now = now or timezone.now()
@@ -1132,6 +1139,12 @@ def apply_provider_order_payment_success(
         and order.paid_at
     ):
         return order, payment, False
+    if huifu_trade_type is not None and order.status in (
+        ProviderOrder.Status.CANCELLED, ProviderOrder.Status.REFUNDED,
+    ):
+        return _apply_cancelled_huifu_payment_success(
+            payment=payment, gateway_trade_no=gateway_trade_no, trade_type=huifu_trade_type, paid_at=now,
+        )
     from wallets.models import WalletPaymentAllocation
     from wallets.services import (
         consume_wallet_payment,
@@ -1152,6 +1165,30 @@ def apply_provider_order_payment_success(
         raise ValidationError(
             {"paid_amount": "支付回调金额与订单外部应付金额不一致，已拒绝入账。"}
         )
+    if order.renewal_of_id:
+        slot_lost = (
+            order.status != ProviderOrder.Status.PENDING_PAYMENT
+            or now >= order.payment_expires_at
+            or not renewal_source_allows_payment(order, lock_provider=True)
+        )
+    else:
+        slot_lost = False
+        if order.status == ProviderOrder.Status.PENDING_PAYMENT:
+            from .booking_slots import blocking_orders
+
+            ProviderProfile.objects.select_for_update().only("pk").get(pk=order.provider_id)
+            # A timely channel payment can reach us after its booking hold was released.
+            # Do not reinstate it over a renewal that has since reserved the slot.
+            slot_lost = timezone.now() >= order.payment_expires_at and blocking_orders(
+                order.provider_id, order.starts_at, order.ends_at,
+            ).filter(renewal_of__isnull=False).exists()
+    if slot_lost:
+        if huifu_trade_type is not None:
+            return _apply_cancelled_huifu_payment_success(
+                payment=payment, gateway_trade_no=gateway_trade_no, trade_type=huifu_trade_type, paid_at=now,
+            )
+        message = "续单已失效，请重新查看原订单。" if order.renewal_of_id else "该档期已被续单占用，请重新预约。"
+        raise ValidationError({"status": message})
     if order.status != ProviderOrder.Status.PENDING_PAYMENT:
         raise ValidationError({"status": "订单不在待支付状态。"})
     if order.payment_expires_at <= now:
@@ -1174,11 +1211,15 @@ def apply_provider_order_payment_success(
         business_type=WalletPaymentAllocation.BusinessType.PROVIDER_ORDER,
         business_order_no=order.order_no,
     )
-    acceptance_timeout = operation_rules()["acceptance_timeout_minutes"]
-    order.status = ProviderOrder.Status.PENDING_ACCEPTANCE
     order.paid_at = now
-    order.acceptance_expires_at = now + timedelta(minutes=acceptance_timeout)
-    order.save(update_fields=("status", "paid_at", "acceptance_expires_at", "updated_at"))
+    if order.renewal_of_id:
+        order.status = ProviderOrder.Status.PENDING_SERVICE
+        order.accepted_at = now
+    else:
+        acceptance_timeout = operation_rules()["acceptance_timeout_minutes"]
+        order.status = ProviderOrder.Status.PENDING_ACCEPTANCE
+        order.acceptance_expires_at = now + timedelta(minutes=acceptance_timeout)
+    order.save(update_fields=("status", "paid_at", "accepted_at", "acceptance_expires_at", "updated_at"))
     payment.channel = channel
     payment.status = ProviderOrderPaymentOrder.Status.PAID
     payment.gateway_trade_no = gateway_trade_no
@@ -1189,6 +1230,20 @@ def apply_provider_order_payment_success(
     from .coupons import consume_coupon
     consume_coupon(order, now=now)
     cancel_provider_order_payment_expiry(order_no, "payment_succeeded")
+    if order.renewal_of_id:
+        register_provider_fulfillment_timeouts(order)
+        create_order_notification(
+            order=order, event_type=UserNotification.EventType.ORDER_PAYMENT_SUCCESS,
+            title="续单支付成功", content="续单已确认，达人将在原服务结束后继续服务。",
+        )
+        create_notification(
+            recipient=order.provider.user, category=UserNotification.Category.ORDER,
+            event_type=UserNotification.EventType.ORDER_PAYMENT_SUCCESS,
+            title="收到已支付的续单", content="请先提交原订单完成，再按续单时间继续服务。",
+            target_type="provider_order", target_id=order_no, action_text="查看续单",
+            action_url=f"/pages/orders/detail?order_no={order_no}", dedupe_key=f"provider-renewal:{order_no}:paid",
+        )
+        return order, payment, True
     register_provider_acceptance_timeout(order)
     create_order_notification(
         order=order,
@@ -2056,7 +2111,7 @@ def fallback_transport_fee(distance_km: Decimal | None) -> int:
     return max(1, math.ceil(float(distance_km) / 5)) * 500
 
 
-def build_quote(service: ProviderService, duration_minutes: int, distance_km: Decimal | None, coupon=None, *, wallet_discount_rate_bps=10000) -> PriceQuote:
+def build_quote(service: ProviderService, duration_minutes: int, distance_km: Decimal | None, coupon=None, *, wallet_discount_rate_bps=10000, commission=None) -> PriceQuote:
     from .commission import commission_snapshot
 
     service_fee = calculate_service_fee(service, duration_minutes)
@@ -2072,6 +2127,8 @@ def build_quote(service: ProviderService, duration_minutes: int, distance_km: De
         net_service = max(net_service, 1)
     wallet_discount = after_coupon - net_service
     discount = coupon_amount + wallet_discount
+    if commission is None:
+        commission = commission_snapshot(service.provider, service.category.platform_commission_rate)
     return PriceQuote(
         service_fee_amount=service_fee,
         transport_fee_amount=transport_fee,
@@ -2085,7 +2142,7 @@ def build_quote(service: ProviderService, duration_minutes: int, distance_km: De
             "wallet_discount_rate_bps": wallet_discount_rate_bps,
             "net_service_fee_amount": net_service,
             "currency": "CNY",
-            **commission_snapshot(service.provider, service.category.platform_commission_rate),
+            **commission,
             "time_grain_minutes": TIME_GRAIN_MINUTES,
             "minimum_hourly_minutes": MINIMUM_HOURLY_MINUTES,
             "transport_rule": "fallback_5_cny_per_5km" if distance_km is not None else "pending_map_route",
@@ -2122,21 +2179,9 @@ def validate_booking(service: ProviderService, starts_at, duration_minutes: int)
 
 
 def ensure_slot_available(provider: ProviderProfile, starts_at, ends_at):
-    now = timezone.now()
-    blocking = Q(status=ProviderOrder.Status.PENDING_PAYMENT, payment_expires_at__gt=now) | Q(
-        status__in=(
-            ProviderOrder.Status.PENDING_ACCEPTANCE,
-            ProviderOrder.Status.PENDING_SUPPORT,
-            ProviderOrder.Status.PENDING_SERVICE,
-            ProviderOrder.Status.DEPARTED,
-            ProviderOrder.Status.IN_SERVICE,
-            ProviderOrder.Status.PENDING_CONFIRMATION,
-            ProviderOrder.Status.AFTER_SALES,
-        )
-    )
-    if ProviderOrder.objects.filter(
-        blocking, provider=provider, starts_at__lt=ends_at, ends_at__gt=starts_at
-    ).exists():
+    from .booking_slots import blocking_orders
+
+    if blocking_orders(provider, starts_at, ends_at).exists():
         raise ValidationError({"starts_at": "该时间段刚刚被预约，请选择其他时间。"})
 
 

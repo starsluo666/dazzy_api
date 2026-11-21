@@ -106,8 +106,11 @@ def register_provider_fulfillment_timeouts(order):
         return 0
     specs = []
     if order.status == "pending_service" and order.accepted_at:
-        specs = [(ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT, order.departure_deadline_at),
-                 (ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER, order.starts_at - timedelta(minutes=30))]
+        if order.renewal_of_id:
+            specs = [(ScheduledTask.Type.PROVIDER_START_TIMEOUT, order.start_deadline_at)]
+        else:
+            specs = [(ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT, order.departure_deadline_at),
+                     (ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER, order.starts_at - timedelta(minutes=30))]
     elif order.status == "departed":
         specs = [(ScheduledTask.Type.PROVIDER_START_TIMEOUT, order.start_deadline_at)]
     elif order.status == "in_service":
@@ -136,13 +139,16 @@ def synchronize_provider_fulfillment_timeouts(*, batch_size):
         created += int(added)
     # Missing-task queries (not a scan of the first N active orders) avoid
     # starvation of later orders. Terminal tasks never silently replay.
-    for status, task_type in (("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT),
-                             ("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER),
-                             ("departed", ScheduledTask.Type.PROVIDER_START_TIMEOUT),
-                             ("in_service", ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT)):
+    for status, task_type, filters in (
+        ("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_TIMEOUT, {"renewal_of__isnull": True}),
+        ("pending_service", ScheduledTask.Type.PROVIDER_DEPARTURE_REMINDER, {"renewal_of__isnull": True}),
+        ("pending_service", ScheduledTask.Type.PROVIDER_START_TIMEOUT, {"renewal_of__isnull": False}),
+        ("departed", ScheduledTask.Type.PROVIDER_START_TIMEOUT, {}),
+        ("in_service", ScheduledTask.Type.PROVIDER_COMPLETION_TIMEOUT, {}),
+    ):
         existing = ScheduledTask.objects.filter(business_type="provider_order", business_key=OuterRef("order_no"), task_type=task_type)
         orders = ProviderOrder.objects.filter(status=status, departure_deadline_at__isnull=False,
-            accepted_at__isnull=False).annotate(_has_watchdog=Exists(existing)).filter(_has_watchdog=False).order_by("id")[:batch_size]
+            accepted_at__isnull=False, **filters).annotate(_has_watchdog=Exists(existing)).filter(_has_watchdog=False).order_by("id")[:batch_size]
         for order in orders:
             created += register_provider_fulfillment_timeouts(order)
     return created

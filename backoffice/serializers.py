@@ -2119,6 +2119,11 @@ class PlatformOperationSettingSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("达人订单支付时限必须在 5–60 分钟之间。")
         return value
 
+    def validate_provider_order_renewal_travel_minutes(self, value):
+        if not 0 <= value <= 180:
+            raise serializers.ValidationError("续单行程预留必须在 0–180 分钟之间。")
+        return value
+
     def validate_provider_order_confirmation_timeout_days(self, value):
         if not 1 <= value <= 15:
             raise serializers.ValidationError("用户确认时限必须在 1–15 天之间。")

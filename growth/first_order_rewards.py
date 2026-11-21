@@ -31,6 +31,8 @@ def eligible_first_order(settlement, *, now=None):
 
 def record_first_order_reward(settlement, *, now=None):
     """Called inside the settlement transaction while the order is locked."""
+    if settlement.order.renewal_of_id:
+        return None
     attribution = ProviderInviteAttribution.objects.select_for_update().filter(
         profile_id=settlement.provider_id, first_order__isnull=True,
     ).first()

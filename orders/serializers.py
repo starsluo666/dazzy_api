@@ -319,6 +319,7 @@ class ProviderOrderAfterSalesSerializer(serializers.ModelSerializer):
 
 
 class ProviderOrderSerializer(serializers.ModelSerializer):
+    renewal_of_order_no = serializers.CharField(source="renewal_of.order_no", read_only=True, default=None)
     cancellation = serializers.SerializerMethodField()
 
     def get_cancellation(self, obj):
@@ -348,7 +349,7 @@ class ProviderOrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProviderOrder
         fields = (
-            "public_id", "order_no", "status", "status_label", "provider_public_id", "cancellation",
+            "public_id", "order_no", "renewal_of_order_no", "status", "status_label", "provider_public_id", "cancellation",
             "provider_name", "provider_avatar_url", "service_name", "billing_type_snapshot",
             "unit_price_amount", "starts_at", "ends_at", "duration_minutes",
             "meeting_location_name", "meeting_address", "contact_name", "contact_gender",
@@ -470,6 +471,8 @@ class ProviderOrderManageSerializer(ProviderOrderSerializer):
         )
 
     def get_acceptance_expires_at(self, obj):
+        if obj.renewal_of_id:
+            return None
         if obj.acceptance_expires_at:
             return obj.acceptance_expires_at
         if obj.paid_at:

@@ -28,6 +28,7 @@ from .views import (
     ProviderOrderPaymentStatusView,
     ProviderOrderPreviewView,
     ProviderOrderReviewView,
+    ProviderOrderRenewalView,
     ProviderOrderSimulatePaymentView,
     WechatOfficialOAuthCallbackView,
 )
@@ -36,6 +37,7 @@ urlpatterns = [
     path("coupon-campaigns/<uuid:campaign_id>/", CouponCampaignDetailView.as_view()),
     path("coupon-campaigns/<uuid:campaign_id>/claim/", CouponCampaignClaimView.as_view()),
     path("provider-orders/<str:order_no>/cancellation/", ProviderOrderPolicyCancelView.as_view()),
+    path("provider-orders/<str:order_no>/renewal/", ProviderOrderRenewalView.as_view()),
     path("provider-orders/<str:order_no>/customer-wait/", ProviderOrderWaitView.as_view()),
     path("providers/me/orders/<str:order_no>/customer-wait/", ProviderOrderWaitView.as_view(role="provider")),
     path("provider-orders/<str:order_no>/termination/", ProviderOrderTerminationView.as_view()),

@@ -99,7 +99,7 @@ def calculate(order, *, now, no_show=False):
         rule, label = "departed", "出租车／网约车出发后取消"
         travel = retained["transport"] = components["transport"]
     else:
-        rule, label = "before_departure", "出发前取消"
+        rule, label = "before_departure", "续单开始前取消" if order.renewal_of_id else "出发前取消"
     remaining = compensation
     for key in ("service", "other", "transport"):
         amount = min(remaining, components[key] - retained[key])
@@ -115,7 +115,7 @@ def calculate(order, *, now, no_show=False):
 def ensure_eligible(order):
     from .distributions import assert_refund_not_distributed
     from .timeouts import _manual_intervention_reason
-    if not order.cancellation_policy or order.transport_mode not in MODES:
+    if not order.cancellation_policy or (not order.renewal_of_id and order.transport_mode not in MODES):
         raise ValidationError("本单使用原规则，请联系客服处理取消。")
     if order.status not in ELIGIBLE or order.cancellation_record:
         raise ValidationError("订单状态已变化，请刷新订单。")
