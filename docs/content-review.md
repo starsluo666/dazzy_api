@@ -60,6 +60,25 @@ Beat 每30秒调度 `moderation.process_pending`。文字/图片同步接口在�
 
 实时待办包含人工复核和超15分钟的检测队列。仅查看/刷新/登记不会触发任何支付或退款。
 
+### 批量导入关键词
+
+仓库的 `moderation/data/keyword_packs/` 提供暴恐、色情、政治、谩骂、违法、广告六组起始词库，每组 100 条，共 600 条。它们是初筛样本，不是完备词库；政治组侧重冒充和暴力威胁，不纳入普通政治讨论。文本文件均为 UTF-8，每行一个关键词。
+
+后端部署到包含本命令的版本并迁移后，在服务器 `dazzy_api` 目录执行：
+
+```bash
+# 仅查看计划，不写数据库
+sudo bash ./deploy-docker.sh manage import_content_keywords
+
+# 确认后导入六组，并记录到指定后台账号的操作审计
+read -r -p '后台审核管理员手机号：' keyword_operator_phone
+sudo bash ./deploy-docker.sh manage import_content_keywords --apply --actor-phone "$keyword_operator_phone"
+```
+
+可重复传入 `--group` 选择词库：`violence`、`sexual`、`political`、`abuse`、`illegal`、`advertising`。`--scope` 支持 `nickname`、`review`、`both`，默认两者。已有同词（含归一化后的相同词）直接跳过，不覆盖、不重新启用已停用的规则。导入后只影响新提交的文字初筛，不会自动拦截或重审历史内容。
+
+腾讯云不提供自定义词库写入 API。要配置腾讯云词库，到控制台对应词库中按组粘贴，或使用控制台下载的批量模板，然后关联实际调用的审核策略。评价场景的广告等规则建议先用 `Review` 验证，避免误拦引用这些短语来举报的用户。[腾讯云词库文档](https://cloud.tencent.com/document/faq/1124/64683)
+
 ## 验收
 
 离线测试：`python scripts/check_wechat_auth.py moderation.tests moderation.test_business moderation.test_gateway`（只用内存 SpatiaLite，腾讯 HTTP 已模拟）。后台 `npm run build` 和 `node tests/contentReviews.browser.cjs`（模拟接口）。这不替代生产腾讯账号的小量图片、视频、超时/拒绝样本验收，也不替代 PostgreSQL 并发锁测试。
