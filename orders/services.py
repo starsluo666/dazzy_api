@@ -2076,7 +2076,10 @@ def process_provider_order_refund(refund_no: str, *, now=None):
     )
 
 
+@transaction.atomic
 def refresh_provider_review_metrics(provider) -> None:
+    # Serialize aggregation when different orders update the same provider.
+    type(provider).objects.select_for_update().only("pk").get(pk=provider.pk)
     aggregate = provider.order_reviews.filter(
         audit_status=ProviderOrderReview.AuditStatus.APPROVED,
         is_visible=True,

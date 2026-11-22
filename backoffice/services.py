@@ -1385,6 +1385,8 @@ def _scoped_provider_orders(access):
 def moderate_provider_order_review(
     *, order_no, action, reason, actor, access, request
 ):
+    if action not in ("hide", "restore"):
+        raise ValidationError("评价请在内容审核中处理。")
     order = get_object_or_404(
         _scoped_provider_orders(access).select_for_update(), order_no=order_no
     )
@@ -1398,42 +1400,13 @@ def moderate_provider_order_review(
         "is_visible": review.is_visible,
     }
     reason = reason.strip()
-    update_fields = ["updated_at"]
-    if action in ("approve", "restore"):
+    if review.audit_status != ProviderOrderReview.AuditStatus.APPROVED:
+        raise ValidationError("只有审核通过的评价可以屏蔽或恢复展示。")
+    if action == "restore":
         ensure_approved("review", review)
-    if action in ("approve", "reject"):
-        if review.audit_status != ProviderOrderReview.AuditStatus.PENDING:
-            raise ValidationError("该评价已经审核，不能重复审核。")
-        review.audit_status = (
-            ProviderOrderReview.AuditStatus.APPROVED
-            if action == "approve"
-            else ProviderOrderReview.AuditStatus.REJECTED
-        )
-        review.audit_rejection_reason = reason if action == "reject" else ""
-        review.audited_by = actor
-        review.audited_at = timezone.now()
-        update_fields.extend((
-            "audit_status", "audit_rejection_reason", "audited_by", "audited_at",
-        ))
-    else:
-        if review.audit_status != ProviderOrderReview.AuditStatus.APPROVED:
-            raise ValidationError("只有审核通过的评价可以下架或恢复展示。")
-        review.is_visible = action == "restore"
-        update_fields.append("is_visible")
-    review.save(update_fields=tuple(update_fields))
+    review.is_visible = action == "restore"
+    review.save(update_fields=("is_visible", "updated_at"))
     refresh_provider_review_metrics(review.provider)
-    if action in ("approve", "reject"):
-        create_order_notification(
-            order=order,
-            event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
-            title="评价审核通过" if action == "approve" else "评价审核未通过",
-            content=(
-                "您的订单评价已审核通过并公开展示。"
-                if action == "approve"
-                else f"您的订单评价未通过审核。原因：{reason}"
-            ),
-            dedupe_suffix=str(review.audited_at.timestamp()),
-        )
     AdminAuditLog.objects.create(
         actor=actor,
         organization=_organization(access),

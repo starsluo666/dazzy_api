@@ -1,4 +1,4 @@
-"""Local nickname checks; no paid gateway or manual review queue."""
+"""Nickname format and reusable local matching helpers."""
 from functools import lru_cache
 from pathlib import Path
 import unicodedata
@@ -22,12 +22,21 @@ def builtin_words():
     )
 
 
-def validate_nickname(value):
+def validate_nickname_format(value):
     nickname = value.strip()
     if not any(not ch.isspace() and unicodedata.category(ch)[0] != "C" for ch in nickname):
         raise ValidationError("昵称不能为空。")
-    normalized = matching_text(nickname)
+    return nickname
+
+
+def nickname_rule_matches(value):
+    normalized = matching_text(value)
     extra = (matching_text(word) for word in settings.NICKNAME_EXTRA_BLOCKED_WORDS)
-    if any(word and word in normalized for word in (*builtin_words(), *extra)):
+    return any(word and word in normalized for word in (*builtin_words(), *extra))
+
+
+def validate_nickname(value):
+    nickname = validate_nickname_format(value)
+    if nickname_rule_matches(nickname):
         raise ValidationError("昵称包含不合适的内容，请更换昵称。")
     return nickname

@@ -5,34 +5,20 @@ import uuid
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from . import gateway, targets
+from . import gateway, local_rules, targets
 from .models import ContentReview as Review, ContentReviewItem as Item
 
 
-@transaction.atomic
-def retire_nickname_reviews(user):
-    """Caller holds the user lock, matching worker publication lock order."""
-    for review in Review.objects.select_for_update().filter(
-        kind="nickname", target_id=user.pk, is_current=True,
-    ):
-        review.is_current = False
-        review.status = "superseded"
-        review.lease_token = None
-        review.lease_until = None
-        review.next_attempt_at = None
-        review.revision += 1
-        review.reason = "昵称已通过本地校验并保存，旧审核记录不再生效。"
-        review.save()
-        targets.event(review, "superseded", note=review.reason)
+UNIFIED_KINDS = (Review.Kind.REVIEW, Review.Kind.NICKNAME, Review.Kind.AVATAR)
 
 
 @transaction.atomic
-def submit(kind, obj, *, candidate=None, force=False):
-    if not settings.CONTENT_REVIEW_ENABLED and not force:
+def submit(kind, obj, *, candidate=None, force=False, manual=False):
+    if not settings.CONTENT_REVIEW_ENABLED and not force and kind not in UNIFIED_KINDS:
         return None
     obj = targets.target(kind, obj.pk, lock=True)
     owner, city, snapshot = targets.material(kind, obj, candidate=candidate)
@@ -61,7 +47,10 @@ def submit(kind, obj, *, candidate=None, force=False):
         previous.save()
         targets.event(previous, "superseded", note="已提交新内容，旧检测结果不再生效。")
     text = "\n".join(f"{label}：{value}" for label, value in snapshot["text"].items() if value)
-    automatic = settings.CONTENT_REVIEW_ENABLED and settings.TENCENT_CONTENT_REVIEW_ENABLED
+    automatic = settings.CONTENT_REVIEW_ENABLED and settings.TENCENT_CONTENT_REVIEW_ENABLED and not manual
+    findings = local_rules.screen(kind, snapshot)
+    if kind in UNIFIED_KINDS:
+        automatic = automatic and gateway.has_credentials()
     review = Review.objects.create(
         kind=kind,
         target_id=obj.pk,
@@ -73,6 +62,7 @@ def submit(kind, obj, *, candidate=None, force=False):
         base_value=getattr(obj, "nickname" if kind == "nickname" else "avatar_object_key", "")
         if kind in ("nickname", "avatar")
         else "",
+        local_findings=findings,
         status="queued" if automatic else "manual",
         reason="" if automatic else "等待人工内容审核。",
     )
@@ -118,7 +108,9 @@ def ensure_approved(kind, obj, *, allow_missing=False):
         raise ValidationError("该内容已被下架，请先在原内容审核记录中核实并恢复。")
     if review_holds.filter(fingerprint=digest).exists():
         raise ValidationError("该评价已被内容审核下架或驳回，请先在内容审核记录中核实。")
-    if not settings.CONTENT_REVIEW_ENABLED or (kind == "review" and obj.is_auto_generated):
+    if not settings.CONTENT_REVIEW_ENABLED or (
+        kind == Review.Kind.REVIEW and (obj.is_auto_generated or (not obj.content.strip() and not obj.images.exists()))
+    ):
         return
     targets.material(kind, obj)  # Strict asset availability before business publication.
     review = Review.objects.filter(kind=kind, target_id=obj.pk, is_current=True).values(
@@ -178,15 +170,15 @@ def decide(review_id, *, actor, action, revision, reason):
         if review.kind not in ("nickname", "avatar"):
             targets.material(review.kind, obj)  # Recheck usable public assets before clearance.
         # A prior rejection may have removed a matching live publication.
-        targets.restore(review, obj) if review.status == "rejected" and targets.public_matches(
-            review, obj
-        ) else targets.publish_candidate(review, obj)
+        if review.status == "rejected" and targets.public_matches(review, obj):
+            targets.restore(review, obj, actor=actor)
+        else:
+            targets.publish_candidate(review, obj, actor=actor)
         review.status = "approved"
     elif action == "reject":
         if review.status not in ("queued", "processing", "manual", "approved"):
             raise ValidationError("当前内容状态不能重复驳回。")
-        if targets.public_matches(review, obj):
-            targets.set_hidden(review, obj, True)
+        targets.reject_candidate(review, obj, actor=actor)
         review.status = "rejected"
     elif action == "withdraw":
         if review.status != "approved":
@@ -198,7 +190,7 @@ def decide(review_id, *, actor, action, revision, reason):
             raise ValidationError("当前内容不能恢复。")
         if review.kind not in ("nickname", "avatar"):
             targets.material(review.kind, obj)
-        targets.restore(review, obj)
+        targets.restore(review, obj, actor=actor)
         review.status = "approved"
     else:
         raise ValidationError("不支持的审核操作。")
@@ -321,14 +313,16 @@ def _finish(original):
         if "block" in states:
             review.status, review.machine_suggestion = "rejected", "Block"
             review.reason = "内容未通过检测，请修改后重新提交；如有异议可联系客服复核。"
-            if targets.public_matches(review, obj):
-                targets.set_hidden(review, obj, True)
+            targets.reject_candidate(review, obj)
         elif states.intersection(("review", "error")):
             review.status, review.machine_suggestion = "manual", "Review"
             review.reason = "检测结果需要人工核查。"
         elif states.difference(("pass",)):
             review.status = "queued"
             review.next_attempt_at = timezone.now() + timedelta(seconds=30)
+        elif review.local_findings:
+            review.status, review.machine_suggestion = "manual", "Pass"
+            review.reason = "腾讯检测通过，本地初筛有提示，请核实后决定是否公开。"
         else:
             try:
                 targets.publish_candidate(review, obj)
@@ -354,3 +348,44 @@ def pending_ids(limit=20):
         .order_by("updated_at", "pk")
         .values_list("pk", flat=True)[:limit]
     )
+
+
+def legacy_order_review_ids(limit=20):
+    """Find old pending evaluations that lack an active decision workflow."""
+    from orders.models import ProviderOrderReview
+
+    current = Review.objects.filter(kind=Review.Kind.REVIEW, target_id=OuterRef("pk"), is_current=True)
+    return list(
+        ProviderOrderReview.objects.filter(audit_status=ProviderOrderReview.AuditStatus.PENDING)
+        .alias(content_status=Subquery(current.values("status")[:1]))
+        .filter(Q(content_status__isnull=True) | Q(content_status__in=("approved", "rejected", "withdrawn")))
+        .order_by("pk").values_list("pk", flat=True)[:limit]
+    )
+
+
+@transaction.atomic
+def reconcile_legacy_order_review(review_id):
+    obj = targets.target(Review.Kind.REVIEW, review_id, lock=True)
+    if obj.audit_status != obj.AuditStatus.PENDING:
+        return False
+    review = Review.objects.select_for_update().filter(
+        kind=Review.Kind.REVIEW, target_id=review_id, is_current=True,
+    ).first()
+    if review is None:
+        submit(Review.Kind.REVIEW, obj, force=True, manual=True)
+    elif review.status not in (Review.Status.APPROVED, Review.Status.REJECTED, Review.Status.WITHDRAWN):
+        return False
+    elif not _current(review, obj):
+        submit(Review.Kind.REVIEW, obj, force=True, manual=True)
+    elif review.status == Review.Status.APPROVED:
+        try:
+            targets.publish_candidate(review, obj, actor=review.reviewed_by)
+        except ValidationError:
+            review.status = Review.Status.MANUAL
+            review.reason = "原评价素材需要重新核实。"
+            review.revision += 1
+            review.save(update_fields=("status", "reason", "revision", "updated_at"))
+            targets.event(review, "legacy_review_recheck", note=review.reason)
+    else:
+        targets.reject_candidate(review, obj, actor=review.reviewed_by)
+    return True

@@ -1,6 +1,7 @@
 """Global-only moderation desk; decisions never change financial lifecycles."""
 
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
@@ -9,11 +10,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from backoffice.access import resolve_admin_access
+from accounts.nicknames import matching_text
+from backoffice.access import client_ip, resolve_admin_access
+from backoffice.models import AdminAuditLog
 from mediafiles.models import MediaAsset
 from . import services, targets
 from .gateway import media_url, DetectionUnavailable
-from .models import ContentReview as Review
+from .models import ContentKeywordRule, ContentReview as Review
 
 
 def access_for(user, *, write=False):
@@ -44,6 +47,7 @@ def review_data(review, *, detail=False):
         "title": next(iter(review.snapshot.get("text", {}).values()), "图片或视频内容")[:80],
     }
     if detail:
+        data["local_findings"] = review.local_findings
         try:
             obj = targets.target(review.kind, review.target_id)
         except serializers.ValidationError:
@@ -136,8 +140,12 @@ class ContentReviewListView(APIView):
             if key in params:
                 rows = rows.filter(**{key: params[key]})
         if params.get("q"):
+            from orders.models import ProviderOrderReview
+
+            order_reviews = ProviderOrderReview.objects.filter(order__order_no__icontains=params["q"])
             rows = rows.filter(
                 Q(public_id__icontains=params["q"]) | Q(search_text__icontains=params["q"])
+                | Q(kind=Review.Kind.REVIEW, target_id__in=order_reviews.values("pk"))
             )
         total = rows.count()
         start = (params["page"] - 1) * params["page_size"]
@@ -153,7 +161,7 @@ class ContentReviewListView(APIView):
                         "total": total,
                     },
                     "enabled": settings.CONTENT_REVIEW_ENABLED,
-                    "automatic": settings.TENCENT_CONTENT_REVIEW_ENABLED,
+                    "automatic": settings.TENCENT_CONTENT_REVIEW_ENABLED and services.gateway.has_credentials(),
                 }
             }
         )
@@ -181,3 +189,71 @@ class ContentReviewDetailView(APIView):
         get_object_or_404(Review, pk=pk)
         review = services.decide(pk, actor=request.user, **form.validated_data)
         return Response({"data": review_data(review, detail=True)})
+
+
+class KeywordRuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContentKeywordRule
+        fields = ("id", "keyword", "scope", "label", "enabled", "updated_at")
+
+    def validate(self, attrs):
+        if "keyword" in attrs:
+            normalized = matching_text(attrs["keyword"])
+            if not normalized or len(normalized) > 120:
+                raise serializers.ValidationError({"keyword": "请输入有效的文字或数字关键词。"})
+            attrs["normalized_keyword"] = normalized
+        return attrs
+
+
+def save_keyword_rule(request, access, *, pk=None):
+    try:
+        with transaction.atomic():
+            instance = None if pk is None else get_object_or_404(ContentKeywordRule.objects.select_for_update(), pk=pk)
+            before = KeywordRuleSerializer(instance).data if instance else {}
+            form = KeywordRuleSerializer(instance, data=request.data, partial=instance is not None)
+            form.is_valid(raise_exception=True)
+            rule = form.save()
+            data = KeywordRuleSerializer(rule).data
+            AdminAuditLog.objects.create(
+                actor=request.user, organization=access.member.organization if access.member else None,
+                action="content.keyword_rule.create" if instance is None else "content.keyword_rule.update",
+                target_type="content_keyword_rule", target_id=str(rule.pk), before=before, after=data,
+                request_id=request.headers.get("X-Request-ID", "")[:64], ip_address=client_ip(request),
+            )
+            return data
+    except IntegrityError as exc:
+        raise serializers.ValidationError({"keyword": "相同范围已有此关键词，请编辑原规则。"}) from exc
+
+
+class ContentKeywordRuleListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        access_for(request.user)
+        class Query(serializers.Serializer):
+            page = serializers.IntegerField(default=1, min_value=1)
+            q = serializers.CharField(required=False, allow_blank=True, max_length=60)
+
+        query = Query(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        page = query.validated_data["page"]
+        rows = ContentKeywordRule.objects.all()
+        if search := query.validated_data.get("q"):
+            rows = rows.filter(Q(keyword__icontains=search) | Q(label__icontains=search))
+        offset = (page - 1) * 20
+        return Response({"data": {
+            "items": KeywordRuleSerializer(rows[offset:offset + 20], many=True).data,
+            "pagination": {"page": page, "page_size": 20, "total": rows.count()},
+        }})
+
+    def post(self, request):
+        access = access_for(request.user, write=True)
+        return Response({"data": save_keyword_rule(request, access)}, status=201)
+
+
+class ContentKeywordRuleDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        access = access_for(request.user, write=True)
+        return Response({"data": save_keyword_rule(request, access, pk=pk)})

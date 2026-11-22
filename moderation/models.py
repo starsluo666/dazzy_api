@@ -33,6 +33,7 @@ class ContentReview(models.Model):
     snapshot = models.JSONField(default=dict)
     search_text = models.TextField(blank=True)
     base_value = models.CharField(max_length=512, blank=True)
+    local_findings = models.JSONField(default=list, blank=True)
     is_current = models.BooleanField(default=True)
     status = models.CharField(max_length=20, choices=Status, default=Status.QUEUED)
     machine_suggestion = models.CharField(max_length=16, blank=True)
@@ -98,3 +99,23 @@ class ContentReviewEvent(models.Model):
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True)
     note = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ContentKeywordRule(models.Model):
+    class Scope(models.TextChoices):
+        NICKNAME = "nickname", "用户昵称"
+        REVIEW = "review", "评价文字"
+        BOTH = "both", "昵称和评价"
+
+    keyword = models.CharField(max_length=60)
+    normalized_keyword = models.CharField(max_length=120, editable=False)
+    scope = models.CharField(max_length=12, choices=Scope)
+    label = models.CharField(max_length=40, blank=True)
+    enabled = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-updated_at", "-pk")
+        constraints = [
+            models.UniqueConstraint(fields=("scope", "normalized_keyword"), name="unique_content_keyword_scope"),
+        ]

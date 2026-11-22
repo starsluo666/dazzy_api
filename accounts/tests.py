@@ -281,7 +281,8 @@ class AuthenticationApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["nickname"], "新昵称")
+        self.assertEqual(response.data["data"]["nickname"], "旧昵称")
+        self.assertEqual(response.data["data"]["content_reviews"][0]["status"], "manual")
         self.assertEqual(response.data["data"]["gender"], "female")
         self.assertEqual(response.data["data"]["birth_date"], "2000-05-20")
 

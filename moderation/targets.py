@@ -5,6 +5,7 @@ import json
 from decimal import Decimal
 
 from django.apps import apps
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from mediafiles.models import MediaAsset
@@ -180,8 +181,45 @@ def public_matches(review, obj):
     )
 
 
-def publish_candidate(review, obj):
-    """Only user nickname/avatar auto-publish. Business approvals remain separate."""
+def _order_review_result(review, obj, *, approved, actor=None, restore_visibility=False):
+    from notifications.models import UserNotification
+    from notifications.services import create_order_notification
+    from orders.services import refresh_provider_review_metrics
+
+    status = obj.AuditStatus.APPROVED if approved else obj.AuditStatus.REJECTED
+    if obj.audit_status == status:
+        return
+    obj.audit_status = status
+    obj.audit_rejection_reason = "" if approved else "评价内容不符合公开展示要求，如有异议请联系客服。"
+    obj.audited_by = actor
+    obj.audited_at = timezone.now()
+    obj.is_visible = approved and (obj.is_visible or restore_visibility)
+    obj.save(update_fields=(
+        "audit_status", "audit_rejection_reason", "audited_by", "audited_at", "is_visible", "updated_at",
+    ))
+    refresh_provider_review_metrics(obj.provider)
+    create_order_notification(
+        order=obj.order,
+        event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
+        title="评价审核通过" if approved else "评价审核未通过",
+        content=(
+            "您的订单评价已审核通过并公开展示。" if obj.is_visible else "您的订单评价已审核通过。"
+        ) if approved else obj.audit_rejection_reason,
+        dedupe_suffix=f"content:{review.public_id}:{review.revision}",
+    )
+
+
+def publish_candidate(review, obj, *, actor=None):
+    """Publish user avatars/nicknames and order reviews; other approvals remain separate."""
+    if review.kind == Review.Kind.REVIEW:
+        restore = actor is not None and review.status in (Review.Status.REJECTED, Review.Status.WITHDRAWN)
+        if obj.audit_status == obj.AuditStatus.APPROVED or (
+            obj.audit_status == obj.AuditStatus.REJECTED and not restore
+        ):
+            return
+        material(review.kind, obj)  # Revalidate public assets before publication.
+        _order_review_result(review, obj, approved=True, actor=actor, restore_visibility=restore)
+        return
     if review.kind in (Review.Kind.NICKNAME, Review.Kind.AVATAR):
         for pinned in review.snapshot["assets"]:
             asset = MediaAsset.objects.filter(pk=pinned["id"]).first()
@@ -192,8 +230,8 @@ def publish_candidate(review, obj):
         field = "nickname" if review.kind == "nickname" else "avatar_object_key"
         value = review.snapshot["values"][field]
         if review.kind == "nickname":
-            from accounts.nicknames import validate_nickname
-            value = validate_nickname(value)
+            from accounts.nicknames import validate_nickname_format
+            value = validate_nickname_format(value)
         setattr(obj, field, value)
         obj.save(update_fields=(field,))
 
@@ -237,7 +275,19 @@ def set_hidden(review, obj, hidden):
         published.save(update_fields=("content_hidden", "content_hidden_review", "updated_at"))
 
 
-def restore(review, obj):
+def reject_candidate(review, obj, *, actor=None):
+    if not public_matches(review, obj):
+        return
+    if review.kind == Review.Kind.REVIEW:
+        _order_review_result(review, obj, approved=False, actor=actor)
+    else:
+        set_hidden(review, obj, True)
+
+
+def restore(review, obj, *, actor=None):
+    if review.kind == Review.Kind.REVIEW and obj.audit_status != obj.AuditStatus.APPROVED:
+        publish_candidate(review, obj, actor=actor)
+        return
     if review.kind in ("nickname", "avatar"):
         publish_candidate(review, obj)
     else:
@@ -254,10 +304,10 @@ def user_status(user):
             "kind": row.kind,
             "status": row.status,
             "label": row.get_status_display(),
-            "reason": row.reason if row.status in ("rejected", "withdrawn") else "",
+            "reason": "内容未通过审核，请修改后重新提交。" if row.status in ("rejected", "withdrawn") else "",
             "submitted_at": row.created_at,
         }
         for row in Review.objects.filter(
-            owner=user, kind="avatar", is_current=True
+            owner=user, kind__in=("avatar", "nickname"), is_current=True
         )
     ]

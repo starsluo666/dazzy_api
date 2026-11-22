@@ -1,5 +1,7 @@
 from django.urls import path
-from moderation.views import ContentReviewListView, ContentReviewDetailView
+from moderation.views import (
+    ContentKeywordRuleDetailView, ContentKeywordRuleListView, ContentReviewListView, ContentReviewDetailView,
+)
 from .manual_refunds import ManualRefundListView, ManualRefundDetailView
 from reconciliation.views import ReconciliationListView, ReconciliationIssueView
 from financeops.views import (
@@ -94,6 +96,8 @@ from .refund_views import StaffRefundContextView, StaffActivityRefundCreateView,
 urlpatterns = [
     path("content-reviews/", ContentReviewListView.as_view(), name="content-review-list"),
     path("content-reviews/<int:pk>/", ContentReviewDetailView.as_view(), name="content-review-detail"),
+    path("content-review-rules/", ContentKeywordRuleListView.as_view(), name="content-keyword-rules"),
+    path("content-review-rules/<int:pk>/", ContentKeywordRuleDetailView.as_view(), name="content-keyword-rule"),
     path("reconciliation/", ReconciliationListView.as_view(), name="admin-reconciliation"),
     path("finance-recovery/", FinanceRecoveryListView.as_view(), name="admin-finance-recovery"),
     path("finance-recovery/<int:pk>/", FinanceRecoveryDetailView.as_view(), name="admin-finance-recovery-detail"),

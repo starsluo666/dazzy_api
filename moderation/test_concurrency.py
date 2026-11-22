@@ -46,7 +46,8 @@ def parallel(*functions):
         return list(pool.map(run, functions))
 
 
-@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True,
+                   TENCENT_CONTENT_REVIEW_SECRET_ID="offline-id", TENCENT_CONTENT_REVIEW_SECRET_KEY="offline-key")
 class ContentConcurrencyTests(TransactionTestCase):
     def setUp(self):
         if connection.vendor != "postgresql":

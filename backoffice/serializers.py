@@ -1360,14 +1360,14 @@ class ProviderOrderAdminQuerySerializer(serializers.Serializer):
 
 
 class ProviderOrderReviewActionSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=("approve", "reject", "hide", "restore"))
+    action = serializers.ChoiceField(choices=("hide", "restore"))
     reason = serializers.CharField(
         required=False, allow_blank=True, max_length=500, default=""
     )
 
     def validate(self, attrs):
-        if attrs["action"] in ("reject", "hide") and len(attrs.get("reason", "").strip()) < 2:
-            raise serializers.ValidationError({"reason": "驳回或屏蔽评价时请填写至少2个字的原因。"})
+        if attrs["action"] == "hide" and len(attrs.get("reason", "").strip()) < 2:
+            raise serializers.ValidationError({"reason": "屏蔽评价时请填写至少2个字的原因。"})
         return attrs
 
 

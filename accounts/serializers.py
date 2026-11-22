@@ -53,9 +53,10 @@ class UserSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         instance = User.objects.select_for_update().get(pk=instance.pk)
-        if "nickname" in validated_data:
-            from moderation.services import retire_nickname_reviews
-            retire_nickname_reviews(instance)
+        nickname = validated_data.pop("nickname", None)
+        if nickname is not None and nickname != instance.nickname:
+            from moderation.services import submit
+            submit("nickname", instance, candidate=nickname)
         return super().update(instance, validated_data)
 
     def validate_gender(self, value):
@@ -75,8 +76,8 @@ class UserSerializer(serializers.ModelSerializer):
         return build_media_url(obj.avatar_object_key)
 
     def validate_nickname(self, value: str) -> str:
-        from .nicknames import validate_nickname
-        return validate_nickname(value)
+        from .nicknames import validate_nickname_format
+        return validate_nickname_format(value)
 
     def validate_birth_date(self, value):
         if value and value > timezone.localdate():

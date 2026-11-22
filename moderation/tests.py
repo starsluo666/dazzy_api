@@ -74,13 +74,13 @@ class ContentWorkflowTests(TestCase):
     def setUp(self):
         fixture(self)
 
-    def test_nickname_is_immediate_and_does_not_enter_manual_review(self):
+    def test_nickname_stays_public_until_manual_review_passes(self):
         self.client.force_authenticate(self.user)
         response = self.client.patch("/api/v1/users/me/", {"nickname": "新昵称"}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["data"]["nickname"], "新昵称")
-        self.assertEqual(response.data["data"]["content_reviews"], [])
-        self.assertFalse(Review.objects.filter(kind="nickname").exists())
+        self.assertEqual(response.data["data"]["nickname"], "原昵称")
+        self.assertEqual(response.data["data"]["content_reviews"][0]["status"], "manual")
+        decide(Review.objects.get(kind="nickname", owner=self.user), self.admin)
         self.user.refresh_from_db()
         self.assertEqual(self.user.nickname, "新昵称")
 
@@ -128,7 +128,7 @@ class ContentWorkflowTests(TestCase):
         self.client.force_authenticate(self.user)
         with (
             patch("mediafiles.views.AvatarUploadView.create_asset", return_value=new),
-            patch("mediafiles.views.delete_public_object") as delete,
+            patch("mediafiles.services.delete_public_object") as delete,
         ):
             response = self.client.post("/api/v1/media/avatars/", {}, format="multipart")
         self.assertEqual(response.status_code, 201, response.data)
@@ -275,11 +275,13 @@ class ContentWorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             services.submit("nickname", self.user, candidate="第二次")
         with override_settings(CONTENT_REVIEW_ENABLED=False):
-            self.assertIsNone(services.submit("nickname", self.user, candidate="第三次"))
+            self.assertIsNone(services.submit("service", self.service))
+            self.assertEqual(services.submit("nickname", self.other, candidate="第三次").status, "manual")
             services.ensure_approved("provider", self.provider)
 
 
-@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True,
+                   TENCENT_CONTENT_REVIEW_SECRET_ID="offline-id", TENCENT_CONTENT_REVIEW_SECRET_KEY="offline-key")
 class ContentWorkerTests(TransactionTestCase):
     def setUp(self):
         fixture(self)

@@ -40,7 +40,8 @@ class NicknameWordTests(SimpleTestCase):
                 validate_nickname(value)
 
 
-@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True,
+                   TENCENT_CONTENT_REVIEW_SECRET_ID="offline-id", TENCENT_CONTENT_REVIEW_SECRET_KEY="offline-key")
 class NicknameProfileTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(phone="13800005555", nickname="原昵称")
@@ -53,23 +54,22 @@ class NicknameProfileTests(TestCase):
     def change(self, value):
         return self.client.patch("/api/v1/users/me/", {"nickname": value}, format="json")
 
-    def test_safe_nickname_is_immediate_without_review_or_tencent(self):
+    def test_safe_nickname_waits_for_worker_before_publishing(self):
         with patch("moderation.gateway.detect_text") as gateway:
             response = self.change(" 用户新昵称 ")
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["data"]["nickname"], "用户新昵称")
-        self.user.refresh_from_db()
-        self.assertEqual(self.user.nickname, "用户新昵称")
-        self.assertFalse(ContentReview.objects.filter(kind="nickname").exists())
-        gateway.assert_not_called()
-
-    def test_rejected_name_does_not_change_public_name_or_enter_queue(self):
-        response = self.change("平台客服123")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("更换昵称", str(response.data))
+        self.assertEqual(response.data["data"]["nickname"], "原昵称")
         self.user.refresh_from_db()
         self.assertEqual(self.user.nickname, "原昵称")
-        self.assertFalse(ContentReview.objects.exists())
+        self.assertEqual(ContentReview.objects.get(kind="nickname").status, "queued")
+        gateway.assert_not_called()
+
+    def test_flagged_name_is_not_immediately_published(self):
+        response = self.change("平台客服123")
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.nickname, "原昵称")
+        self.assertTrue(ContentReview.objects.get().local_findings)
 
     def test_old_review_cannot_overwrite_latest_name_even_when_old_base_returns(self):
         old = services.submit("nickname", self.user, candidate="旧待审核昵称")
@@ -85,14 +85,14 @@ class NicknameProfileTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.nickname, "原昵称")
 
-    def test_profile_status_still_exposes_avatar_review_only(self):
+    def test_profile_status_exposes_both_pending_changes(self):
         asset = MediaAsset.objects.create(
             owner=self.user, scope="public", category="avatar", status="uploaded", object_key="test-avatar.webp",
         )
         services.submit("avatar", self.user, candidate=asset.pk)
         services.submit("nickname", self.user, candidate="旧昵称请求")
         response = self.client.get("/api/v1/users/me/")
-        self.assertEqual([row["kind"] for row in response.data["data"]["content_reviews"]], ["avatar"])
+        self.assertEqual({row["kind"] for row in response.data["data"]["content_reviews"]}, {"avatar", "nickname"})
 
     def test_admin_registration_cannot_enqueue_a_nickname(self):
         admin = User.objects.create_superuser(phone="13800005556", password="test-password")
@@ -119,12 +119,13 @@ class NicknameProfileTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.nickname, "原昵称")
 
-    def test_historical_manual_approval_still_cannot_publish_sensitive_word(self):
+    def test_operator_can_resolve_a_local_rule_match(self):
         old = services.submit("nickname", self.user, candidate="平台客服")
-        with self.assertRaises(ValidationError):
-            services.decide(old.pk, actor=self.user, action="approve", revision=old.revision, reason="历史昵称也需本地校验")
+        self.assertTrue(old.local_findings)
+        admin = User.objects.create_superuser(phone="13800005559", password="test-password")
+        services.decide(old.pk, actor=admin, action="approve", revision=old.revision, reason="已核实本地初筛警报")
         self.user.refresh_from_db()
-        self.assertEqual(self.user.nickname, "原昵称")
+        self.assertEqual(self.user.nickname, "平台客服")
 
     def test_manager_defaults_to_phone_suffix_and_preserves_explicit_name(self):
         user = User.objects.create_user(phone="13800006666")
@@ -133,9 +134,10 @@ class NicknameProfileTests(TestCase):
         self.assertEqual(explicit.nickname, "自定义名字")
 
 
-@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True,
+                   TENCENT_CONTENT_REVIEW_SECRET_ID="offline-id", TENCENT_CONTENT_REVIEW_SECRET_KEY="offline-key")
 class NicknameConcurrencyTests(TransactionTestCase):
-    def test_late_detector_cannot_overwrite_immediate_nickname(self):
+    def test_late_detector_cannot_publish_an_older_nickname(self):
         if connection.vendor != "postgresql":
             self.skipTest("Requires PostgreSQL independent connections")
         user = User.objects.create_user(phone="13800005558", nickname="原昵称")
@@ -161,13 +163,14 @@ class NicknameConcurrencyTests(TransactionTestCase):
                 self.assertTrue(entered.wait(10))
                 client = APIClient()
                 client.force_authenticate(user)
-                response = client.patch("/api/v1/users/me/", {"nickname": "新昵称立即生效"}, format="json")
+                response = client.patch("/api/v1/users/me/", {"nickname": "最新待审昵称"}, format="json")
                 self.assertEqual(response.status_code, 200, response.data)
             finally:
                 release.set()
             result.result(timeout=10)
         review.refresh_from_db()
         user.refresh_from_db()
-        self.assertEqual(user.nickname, "新昵称立即生效")
+        self.assertEqual(user.nickname, "原昵称")
+        self.assertEqual(ContentReview.objects.get(kind="nickname", is_current=True).snapshot["values"]["nickname"], "最新待审昵称")
         self.assertEqual(review.status, "superseded")
         self.assertFalse(review.is_current)

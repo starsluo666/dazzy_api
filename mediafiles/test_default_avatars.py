@@ -300,9 +300,11 @@ class DefaultAvatarTests(TestCase):
         self.assertEqual(shared.status, MediaAsset.Status.UPLOADED)
 
     @patch("mediafiles.views.build_media_url", return_value="https://example.test/custom.webp")
-    @patch("mediafiles.views.delete_public_object")
+    @patch("mediafiles.services.delete_public_object")
     def test_replacing_avatar_never_deletes_shared_file(self, delete, _url):
         from mediafiles.views import AvatarUploadView
+        from moderation.models import ContentReview
+        from moderation.tests import decide
 
         shared = self.asset()
         first = User.objects.create_user(phone="13977005501")
@@ -311,6 +313,10 @@ class DefaultAvatarTests(TestCase):
         with patch.object(AvatarUploadView, "create_asset", return_value=custom):
             response = AvatarUploadView().post(SimpleNamespace(user=first))
         self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["data"]["review_status"], "manual")
+        first.refresh_from_db()
+        self.assertEqual(first.avatar_object_key, shared.object_key)
+        decide(ContentReview.objects.get(kind="avatar", owner=first), self.owner)
         delete.assert_not_called()
         first.refresh_from_db()
         other.refresh_from_db()

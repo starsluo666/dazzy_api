@@ -215,7 +215,6 @@ class ContentBusinessTests(TestCase):
         with self.assertRaises(ValidationError):
             moderate_provider_order_review(**args)
         content = decide(content, self.admin)
-        moderate_provider_order_review(**args)
         order.refresh_from_db()
         self.assertEqual(order.review.audit_status, "approved")
         content = decide(content, self.admin, "withdraw")
@@ -290,7 +289,8 @@ class ContentBusinessTests(TestCase):
         self.assertEqual(self.client.get("/api/v1/admin/content-reviews/").status_code, 403)
 
 
-@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True)
+@override_settings(CONTENT_REVIEW_ENABLED=True, TENCENT_CONTENT_REVIEW_ENABLED=True,
+                   TENCENT_CONTENT_REVIEW_SECRET_ID="offline-id", TENCENT_CONTENT_REVIEW_SECRET_KEY="offline-key")
 class ContentVersionTests(TransactionTestCase):
     def setUp(self):
         fixture(self)

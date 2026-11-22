@@ -1016,6 +1016,9 @@ class ProviderOrderReviewView(ProviderOrderDetailView):
         )
         if len(images) != len(unique_image_ids):
             raise ValidationError({"image_ids": "评价图片不存在或不属于当前用户。"})
+        stars_only = not data.get("content", "").strip() and not images
+        if stars_only:
+            data.update(audit_status=ProviderOrderReview.AuditStatus.APPROVED, audited_at=timezone.now())
         review = ProviderOrderReview.objects.create(
             order=order,
             customer=request.user,
@@ -1023,8 +1026,9 @@ class ProviderOrderReviewView(ProviderOrderDetailView):
             **data,
         )
         review.images.set(images)
-        from moderation.services import submit
-        submit("review", review)
+        if not stars_only:
+            from moderation.services import submit
+            submit("review", review)
         order.status = ProviderOrder.Status.COMPLETED
         order.save(update_fields=("status", "updated_at"))
         cancel_provider_order_review_timeout(order_no, "customer_reviewed")

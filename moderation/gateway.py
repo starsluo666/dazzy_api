@@ -15,6 +15,14 @@ class DetectionUnavailable(Exception):
         super().__init__("内容检测暂未完成，已转人工复核。")
 
 
+def has_credentials():
+    return bool(
+        settings.TENCENT_CONTENT_REVIEW_SECRET_ID
+        and settings.TENCENT_CONTENT_REVIEW_SECRET_KEY
+        and settings.TENCENT_CONTENT_REVIEW_REGION
+    )
+
+
 @sensitive_variables()
 def _call(product, action, payload):
     from tencentcloud.common.credential import Credential
@@ -25,7 +33,7 @@ def _call(product, action, payload):
         raise DetectionUnavailable("machine_disabled")
     secret_id = settings.TENCENT_CONTENT_REVIEW_SECRET_ID
     secret_key = settings.TENCENT_CONTENT_REVIEW_SECRET_KEY
-    if not secret_id or not secret_key or not settings.TENCENT_CONTENT_REVIEW_REGION:
+    if not has_credentials():
         raise DetectionUnavailable("configuration_missing")
     if product == "tms":
         from tencentcloud.tms.v20201229.tms_client import TmsClient as Client

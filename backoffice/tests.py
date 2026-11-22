@@ -1431,7 +1431,7 @@ class BackofficeProviderReviewTests(APITestCase):
             ).exists()
         )
 
-    def test_order_review_requires_audit_and_notifies_customer(self):
+    def test_order_review_actions_cannot_approve_or_reject_and_keep_city_scope(self):
         approved_order = self.create_fulfillment_order(
             order_no="ADMIN-REVIEW-APPROVE",
             provider=self.handan,
@@ -1454,80 +1454,26 @@ class BackofficeProviderReviewTests(APITestCase):
             status.HTTP_403_FORBIDDEN,
         )
         self.client.force_authenticate(self.admin_user)
-        self.assertEqual(
-            self.client.post(url, {"action": "restore"}, format="json").status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
-        approved = self.client.post(url, {"action": "approve"}, format="json")
-
-        self.assertEqual(approved.status_code, status.HTTP_200_OK)
+        for action in ("approve", "reject", "restore", "hide"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    self.client.post(url, {"action": action, "reason": "人工核查说明"}, format="json").status_code,
+                    status.HTTP_400_BAD_REQUEST,
+                )
         approved_review.refresh_from_db()
-        self.handan.refresh_from_db()
-        self.assertEqual(
-            approved_review.audit_status, ProviderOrderReview.AuditStatus.APPROVED
-        )
-        self.assertEqual(approved_review.audited_by, self.admin_user)
-        self.assertEqual(self.handan.rating, Decimal("4.00"))
-        self.assertEqual(
-            self.client.post(url, {"action": "approve"}, format="json").status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
-        self.assertEqual(
-            UserNotification.objects.filter(
-                recipient=self.order_customer,
-                event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
-            ).count(),
-            1,
-        )
-        self.assertTrue(
-            UserNotification.objects.filter(
-                recipient=self.order_customer,
-                event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
-                title="评价审核通过",
-            ).exists()
-        )
+        self.assertEqual(approved_review.audit_status, ProviderOrderReview.AuditStatus.PENDING)
         rejected_order = self.create_fulfillment_order(
             order_no="ADMIN-REVIEW-REJECT",
             provider=self.handan,
             status=ProviderOrder.Status.COMPLETED,
         )
-        rejected_review = ProviderOrderReview.objects.create(
+        ProviderOrderReview.objects.create(
             order=rejected_order,
             customer=self.order_customer,
             provider=self.handan,
             rating=1,
             content="包含不适合公开展示的内容",
-        )
-        rejected_url = reverse(
-            "backoffice-provider-order-review-action", args=(rejected_order.order_no,)
-        )
-
-        self.assertEqual(
-            self.client.post(
-                rejected_url, {"action": "reject", "reason": " "}, format="json"
-            ).status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
-        rejected = self.client.post(
-            rejected_url,
-            {"action": "reject", "reason": "内容包含个人隐私"},
-            format="json",
-        )
-
-        self.assertEqual(rejected.status_code, status.HTTP_200_OK)
-        rejected_review.refresh_from_db()
-        self.assertEqual(
-            rejected_review.audit_status, ProviderOrderReview.AuditStatus.REJECTED
-        )
-        self.assertEqual(rejected_review.audit_rejection_reason, "内容包含个人隐私")
-        self.handan.refresh_from_db()
-        self.assertEqual(self.handan.rating, Decimal("4.00"))
-        self.assertTrue(
-            UserNotification.objects.filter(
-                recipient=self.order_customer,
-                event_type=UserNotification.EventType.ORDER_REVIEW_RESULT,
-                title="评价审核未通过",
-            ).exists()
+            audit_status=ProviderOrderReview.AuditStatus.REJECTED,
         )
         BrowsingHistory.objects.create(
             user=self.order_customer,
@@ -1552,7 +1498,7 @@ class BackofficeProviderReviewTests(APITestCase):
         self.assertEqual(
             self.client.post(
                 reverse("backoffice-provider-order-review-action", args=(foreign_order.order_no,)),
-                {"action": "approve"}, format="json",
+                {"action": "restore"}, format="json",
             ).status_code,
             status.HTTP_404_NOT_FOUND,
         )

@@ -2,11 +2,16 @@ from celery import shared_task
 from django.conf import settings
 import logging
 
-from .services import pending_ids, process_one
+from .services import legacy_order_review_ids, pending_ids, process_one, reconcile_legacy_order_review
 
 
 @shared_task(name="moderation.process_pending", ignore_result=True)
 def process_pending():
+    for pk in legacy_order_review_ids():
+        try:
+            reconcile_legacy_order_review(pk)
+        except Exception:
+            logging.getLogger(__name__).warning("Legacy order review %s could not be reconciled", pk)
     if not settings.CONTENT_REVIEW_ENABLED or not settings.TENCENT_CONTENT_REVIEW_ENABLED:
         return {"disabled": True}
     processed = 0
